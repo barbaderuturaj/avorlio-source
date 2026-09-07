@@ -1,0 +1,354 @@
+<div align="center">
+
+<img src=".github/assets/seldon-mark.svg" width="72" height="72" alt="Seldon" />
+
+# SeldonFrame
+
+**Sell AI front offices. Deploy them in minutes.**
+
+SeldonFrame is the agent-native, open-source alternative to GoHighLevel for agencies serving local businesses. Give your coding agent a client's URL and it can create a branded website, booking flow, intake, CRM, and AI agent in one workspace. Run evals, publish, and hand it off — then operate every client from one agency view.
+
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-1FAE85.svg)](LICENSE)
+[![npm version](https://img.shields.io/npm/v/@seldonframe/mcp.svg?color=1FAE85)](https://www.npmjs.com/package/@seldonframe/mcp)
+[![GitHub stars](https://img.shields.io/github/stars/seldonframe/seldonframe?color=1FAE85)](https://github.com/seldonframe/seldonframe/stargazers)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2.svg)](https://discord.gg/sbVUu976NW)
+[![X](https://img.shields.io/badge/follow-%40themaxthule-1d9bf0.svg)](https://x.com/themaxthule)
+[![smithery badge](https://smithery.ai/badge/maximehoule100/seldonframe)](https://smithery.ai/servers/maximehoule100/seldonframe)
+
+[Website](https://seldonframe.com) · [For agencies](https://seldonframe.com/agencies) · [For builders](https://seldonframe.com/build) · [Docs](https://seldonframe.com/docs) · [Discord](https://discord.gg/sbVUu976NW)
+
+**Live demos:** [HVAC](https://j-marin-heating-air-conditioning-9599.app.seldonframe.com/) · [Med spa](https://app.seldonframe.com/w/metro-medspa-9d24) · [Med spa](https://app.seldonframe.com/w/skinney-medspa) · [Weight loss](https://app.seldonframe.com/w/vive-ageless-weight-loss-center)
+
+</div>
+
+---
+
+## Ship your first client front office
+
+```bash
+claude mcp add seldonframe -- npx -y @seldonframe/mcp
+```
+
+Or as an auto-updating Claude Code plugin:
+
+```
+/plugin marketplace add seldonframe/seldonframe
+/plugin install seldonframe@seldonframe
+```
+
+```
+> Build a branded AI front office for my HVAC client in New Orleans.
+
+  ✓ Workspace ready at acme-hvac.app.seldonframe.com
+```
+
+Build the first client workspace before paying. Hosted Managed uses SeldonFrame's keys; Builder and Agency plans are BYOK. Your agency owns the client relationship, workspace data, and delivery margin.
+
+**See a real one — a live workspace, not a mockup:**
+
+<table>
+  <tr>
+    <td width="50%">
+      <a href="https://j-marin-heating-air-conditioning-9599.app.seldonframe.com/"><img src=".github/assets/demo-workspace.png" alt="A live SeldonFrame workspace — generated website with quote intake and the chat agent (bottom right)" /></a>
+    </td>
+    <td width="50%">
+      <a href="https://j-marin-heating-air-conditioning-9599.app.seldonframe.com/book"><img src=".github/assets/demo-booking.png" alt="The same workspace's booking page — the real calendar the agent books against" /></a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><sub>The generated site — quote intake, reviews, and the chat agent (bottom right)</sub></td>
+    <td align="center"><sub>Its booking page — the real calendar the agent books against</sub></td>
+  </tr>
+</table>
+
+And here's the agent on that site handling a real inbound — checking the live calendar, and, when asked for a price, *refusing to invent one* (that's the quote-guard, not a scripted reply):
+
+<table>
+  <tr>
+    <td width="42%">
+      <a href="https://j-marin-heating-air-conditioning-9599.app.seldonframe.com/"><img src=".github/assets/demo-chat.png" alt="A real conversation with the site's chat agent — it offers same-day scheduling and declines to guess a price" /></a>
+    </td>
+    <td width="58%">
+      <p>A genuine exchange with the chatbot on the live site — nothing scripted:</p>
+      <ul>
+        <li><b>It reads the real calendar.</b> "Today's fully booked — here are tomorrow's 9/10/11 AM slots."</li>
+        <li><b>It won't lie about price.</b> Asked what a visit costs, it says <i>"I don't have exact rates on hand, but I'll have a technician confirm the cost before any work starts"</i> — the <b>quote-guard</b> in action, not a canned line.</li>
+        <li><b>It qualifies to book.</b> Asks for the service address to confirm you're in-area, then locks the slot.</li>
+      </ul>
+      <p>Same agent answers on <b>SMS and voice</b> too — the channel is just a config knob.</p>
+    </td>
+  </tr>
+</table>
+
+Click any screenshot — [this HVAC workspace](https://j-marin-heating-air-conditioning-9599.app.seldonframe.com/) is live and books real appointments. More live workspaces: [Metro MedSpa](https://app.seldonframe.com/w/metro-medspa-9d24) · [SKINNEY Medspa](https://app.seldonframe.com/w/skinney-medspa) · [Vive Ageless Weight Loss](https://app.seldonframe.com/w/vive-ageless-weight-loss-center) — and more on [seldonframe.com](https://seldonframe.com).
+
+---
+
+## The agency delivery loop
+
+1. **Start with the client URL.** SeldonFrame extracts the business facts and creates the workspace.
+2. **Apply your agency playbook.** Brand the site, booking flow, intake, CRM, and agent.
+3. **Verify before handoff.** Run evals and complete a real test booking.
+4. **Publish and operate.** Give the client a branded portal while your agency keeps the master view.
+
+The same loop works from the dashboard, Claude Code, Cursor, Windsurf, or any MCP-compatible agent. See the [agency workflow](https://seldonframe.com/agencies).
+
+---
+
+## What an agent is made of here
+
+Most "agent frameworks" hand you a chat loop and wish you luck. SeldonFrame gives your IDE agent the full production anatomy:
+
+### The agent model — Trigger × Skill × Channel
+
+An agent isn't a chatbot UI; it's three independent axes:
+
+- **Trigger** — *when it runs*: **inbound** (a call / chat / email / SMS arrives) · **event** (a domain event fires — `booking.completed`, `lead.created`, `invoice.paid`…) · **schedule** (a cron cadence).
+- **Skill** — *what it does*: receptionist · review-requester · speed-to-lead · win-back · digest…
+- **Channel** — *how it speaks*: voice · web chat · SMS · email · internal digest.
+- **Tools** — *what it can touch*: native tools (book against the real calendar · read/write the CRM · send SMS & email · take a message) **plus 1,000+ app integrations via Composio** (Google Calendar, Sheets, Slack, HubSpot, Notion, …), bound per-agent.
+
+`surface: voice | chat` (the old receptionist-only knob) is just one point in this space — `trigger=inbound`. One builder creates any agent; the marketplace sells any agent.
+
+### From agent to production *loop*
+
+A production agent is a **loop**, not a single prompt:
+
+> **Trigger → (Model + Tools + State) → Verify → Iterate**, bounded by a **Stop** condition, improved by **Evals**, kept honest by **Observability + Guardrails**.
+
+Two non-negotiables drive the roadmap: **the checker must be separate from the maker** (a model grading its own work is too generous a grader), and **the loop must have brakes** (or it bills you in silence). Where each primitive stands today:
+
+| Primitive | Status | What's there |
+|---|---|---|
+| **Trigger** | ✅ Shipped | Inbound + **event** triggers on the `SeldonEvent` bus. `booking.completed` → review-requester; `lead.created` → speed-to-lead, both sending outbound SMS/email. |
+| **State** | ✅ Shipped | Agent **loop-memory** in **Brain v2** — agents recall what they did before acting and record after. The review "ask once per customer" throttle is now a memory recall, not a bespoke flag. |
+| **Verify** (maker ≠ checker) | ✅ Shipped | Deterministic validators grade every run — pass rates surface on each agent's health card and `/runs`; `run_agent_evals` replays scripted scenarios. Rolling out: the same checker as a hard pre-send gate + an LLM judge for judgment calls. |
+| **Guardrails / Stop** | ✅ Shipped | Quote-guard (never invent prices), enforced read-back before booking, per-contact throttles, booking-policy enforcement (hours · duration · required fields), hard call/iteration caps. Rolling out: generic token-budget brakes for long-looping agents. |
+| **Generate-by-default** | ✅ Shipped | One English sentence → trigger + skill + channel + tool bindings + guardrails, generated together. *"text every customer for a Google review the day after their job — never twice, only if completed"* compiles into a real agent. The `generate_agent` MCP tool and the Studio wizard both run this pipeline. |
+| **Record → Agent** | 🗺 Roadmap | Skip describing it — **screen-share your workflow once**. SeldonFrame watches, compiles the steps into a draft agent (skill + tool bindings + eval scenarios derived from the recording), and you deploy in minutes. Live behind a flag at [`/record`](https://seldonframe.com/record); becoming the default on-ramp next. |
+### The loop, drawn
+
+<img src=".github/assets/agent-loop.svg" alt="The agent loop: one build command in a terminal; Inbound / Event / Schedule triggers feed a running agent loop (Model · Tools · State · Verify) with native + Composio tools orbiting the core and Stop brakes bounding it; each pass produces a real action — books the calendar, texts the lead back, answers the phone." width="100%" />
+
+> One sentence builds it; **triggers** drive it; the ring is the loop *running* — **Model → Tools → State → Verify** — with tools orbiting the core, `/runs` + Brain observing, and the **Stop** brakes bounding every pass. Everything in the diagram is shipped today. *(Animated SVG — if your viewer freezes it, the still frame reads the same.)*
+
+---
+Deeper — the pre-wired stack, the architectural bet, the roadmap: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+
+## Five agents you can ship today
+
+Trigger × Skill × Channel are independent axes — pick one of each and you've architected an agent:
+
+| Agent | Trigger | Skill | Channel | The interesting part |
+|---|---|---|---|---|
+| **AI receptionist** | inbound call | qualify + book | voice | Books against the real calendar. Quote-guard, enforced read-back, `take_message` escalation to the owner. |
+| **Website chatbot** | inbound chat | the same receptionist skill | web embed | Same blueprint, different channel — channels are swappable. |
+| **Speed-to-lead** | `lead.created` event | first-touch + qualify | SMS | Fires seconds after a form submit, straight off the event bus. |
+| **Review requester** | `booking.completed` event | review ask | SMS / email | Brain recall enforces "never ask the same customer twice." |
+| **Anything you describe** | any | one English sentence | any | The Studio wizard adapts its questions to the primitives your agent needs. |
+
+## The Brain — memory that compounds
+
+Agents that forget are demos. Every SeldonFrame workspace owns a **Brain**:
+
+- **The Soul** — the single source of truth an agent grounds on (identity, services, hours, pricing). Install someone else's agent and it re-grounds on *your* Soul, never their facts.
+- **Loop memory** — agents recall before acting and record after. "Did I already ask this customer for a review?" is a memory recall, not a bespoke flag.
+- **Notes → distilled rules** — raw observations get compiled and promoted into durable knowledge on a schedule, so every run starts smarter than the last one ended.
+
+## Money rails, built in
+
+Agents that do real work end up touching real money — so the rails are platform primitives, not an integration project:
+
+- **A prepaid wallet ledger** — UNIQUE idempotency keys and guarded never-negative decrements: a charge can't double-fire, a balance can't go below zero.
+- **Stripe Connect payouts** — `seldonframe payout` moves accrued earnings to a bank account.
+- **Checkout that fulfills** — a marketplace sale auto-provisions the deployment and re-grounds it on the buyer's business.
+- **Per-use rental billing** — every agent exposes a signed MCP endpoint; other LLMs can rent it and the ledger meters each use.
+- **Real phone numbers** — provision a number per agent (bring your own Twilio today; SF-managed metered numbers are rolling out).
+
+<sub>Fee fine print: SeldonFrame takes a 5% GMV fee only when the marketplace brings the buyer, ~2% on sales through your own SeldonFrame storefront, and $0 anywhere else.</sub>
+
+---
+
+## Operate every client from any IDE
+
+One npm package — [`@seldonframe/mcp`](https://www.npmjs.com/package/@seldonframe/mcp) — runs as a local MCP server in every major AI-native editor. Pick yours, paste the snippet, and ask your agent to create or update a client workspace — website, booking page, intake form, CRM, and agent in one pass.
+
+<details>
+<summary><strong>Claude Code</strong></summary>
+
+```bash
+claude mcp add seldonframe -- npx -y @seldonframe/mcp
+```
+
+Or as a plugin (auto-updates, one-liner via the marketplace):
+
+```
+/plugin marketplace add seldonframe/seldonframe
+/plugin install seldonframe@seldonframe
+```
+
+</details>
+
+<details>
+<summary><strong>Cursor</strong></summary>
+
+Add to `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "seldonframe": {
+      "command": "npx",
+      "args": ["-y", "@seldonframe/mcp"]
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Windsurf</strong></summary>
+
+Add to `~/.codeium/windsurf/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "seldonframe": {
+      "command": "npx",
+      "args": ["-y", "@seldonframe/mcp"]
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><strong>VS Code (Copilot agent mode)</strong></summary>
+
+Add to `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "seldonframe": {
+      "command": "npx",
+      "args": ["-y", "@seldonframe/mcp"]
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Zed</strong></summary>
+
+Add to `settings.json`:
+
+```json
+{
+  "context_servers": {
+    "seldonframe": {
+      "source": "custom",
+      "command": "npx",
+      "args": ["-y", "@seldonframe/mcp"]
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Codex CLI</strong></summary>
+
+Add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.seldonframe]
+command = "npx"
+args = ["-y", "@seldonframe/mcp"]
+```
+
+Or one line: `codex mcp add seldonframe -- npx -y @seldonframe/mcp`
+
+</details>
+
+Once connected, restart your IDE (MCP connectors load at session start), then just say:
+
+```
+> Build a workspace for my client: [business name]. [city, state]. [services]. [phone, optional].
+```
+
+See the same six snippets, kept in sync, at [seldonframe.com/build](https://seldonframe.com/build#install).
+
+---
+
+## Self-host the whole thing
+
+Prefer to run it yourself? The entire monorepo is AGPL-3.0 — and there's a **prebuilt image**, so you don't even build it:
+
+```bash
+git clone https://github.com/seldonframe/seldonframe.git && cd seldonframe
+cp .env.docker.example .env.docker   # add your ANTHROPIC_API_KEY or OPENAI_API_KEY
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up   # pulls the prebuilt image
+```
+
+Brings up Postgres, migrations, and the app on `localhost:3000` — the same dashboard, generated public sites, and API as the hosted version. Multi-arch image (amd64 + arm64) at [`ghcr.io/seldonframe/seldonframe`](https://github.com/seldonframe/seldonframe/pkgs/container/seldonframe); or `docker compose up --build` to build from source. Bring your own LLM key (Anthropic or OpenAI); SMS/voice (Twilio), email (Resend), and 1,000+ integrations (Composio) are add-your-own-key. Full guide: **[QUICKSTART.md](QUICKSTART.md#self-host)**.
+
+---
+
+## When you're ready to scale
+
+Your agency hub is **[seldonframe.com/agencies](https://seldonframe.com/agencies)** — deploy branded client workspaces, set your own client pricing, and keep the master view. Builders can still publish portable agents through **[seldonframe.com/build](https://seldonframe.com/build)** and let other LLMs rent them over MCP.
+
+## Pricing — no surprises
+
+| | |
+|---|---|
+| **Self-host** | $0 — AGPL-3.0, the entire monorepo · [`docker compose up`](QUICKSTART.md#self-host) and you're running |
+| **Builder** | $29/mo · BYOK · workspaces for businesses you operate |
+| **Managed** | $49/mo · SeldonFrame-managed AI · one workspace |
+| **Agency Starter** | $99/mo · white-label · 10 client workspaces · 0% GMV |
+| **Agency Growth** | $199/mo · 30 client workspaces · 0% GMV |
+| **Agency Scale** | $299/mo · unlimited client workspaces · API/MCP + marketplace access · 0% GMV |
+| **Build before checkout** | Create the first client workspace free, then choose the hosted plan that matches your delivery needs |
+| **Marketplace sales** | 5% only when the marketplace brings the buyer |
+## Tech stack
+
+- **Next.js 16** (App Router) + **React 19** + **TypeScript** — one deployable app: dashboard, generated public sites, and API
+- **Drizzle ORM** on **Postgres** (Neon in production; any Postgres 15+ when self-hosting)
+- **Tailwind CSS 4**
+- **pnpm workspaces + Turborepo** (monorepo)
+- **MCP server** — [`@seldonframe/mcp`](https://www.npmjs.com/package/@seldonframe/mcp), plain Node, runs locally inside your IDE
+- **Anthropic / OpenAI** (bring your own key) · **Stripe** payments · **Twilio** voice/SMS · **Resend** email
+
+## Contributing
+
+The highest-leverage PR here is **an agent template or a vertical skill-pack** — merged templates ship to the marketplace where every SeldonFrame user can find them, and you can list your own paid variants alongside. Core, connector, and eval PRs are equally welcome.
+
+- Start with [CONTRIBUTING.md](CONTRIBUTING.md), then issues labeled `good first issue` / `help wanted`
+- House rule: agent-behavior changes ship with eval scenarios; runtime changes ship with tests
+
+## Community
+
+- 💬 [Discord](https://discord.gg/sbVUu976NW) — fastest way to get help, feedback, or just say hi
+- 🐦 [@themaxthule on X](https://x.com/themaxthule) — release notes, tips, dogfood notes
+- 📚 [Docs](https://seldonframe.com/docs) — deeper guides than this README
+- 🐛 [Issues](https://github.com/seldonframe/seldonframe/issues) · 📡 [Discussions](https://github.com/seldonframe/seldonframe/discussions)
+- ✉️ Partnerships: [hello@seldonframe.com](mailto:hello@seldonframe.com)
+
+## License
+
+[AGPL-3.0](LICENSE) for the whole monorepo. Self-host freely; if you modify it and run it as a network service, your modifications stay open. For closed-source embedding, the hosted plan is the commercial alternative — see [LICENSING.md](LICENSING.md). Same dual model as Mattermost, Plausible, and Postiz.
+
+<div align="center">
+
+**Build an agent. Sell it. Get paid. — from your IDE.**
+
+If this is the platform you've been looking for, [⭐ star the repo](https://github.com/seldonframe/seldonframe/stargazers) — it helps more builders find it.
+
+</div>

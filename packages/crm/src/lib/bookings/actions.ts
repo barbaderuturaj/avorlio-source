@@ -1,0 +1,2189 @@
+"use server";
+
+import { and, asc, eq, gte, inArray, lt, ne, sql } from "drizzle-orm";
+import { revalidatePath } from "next/cache";
+import { db, rawSql } from "@/db";
+import { activities, bookings, contacts, deals, organizations } from "@/db/schema";
+import { getCurrentUser, getOrgId } from "@/lib/auth/helpers";
+import { ensureDefaultPipelineForOrg } from "@/lib/deals/pipeline-defaults";
+import { assertWritable } from "@/lib/demo/server";
+import { emitSeldonEvent } from "@/lib/events/bus";
+import { createBookingCheckoutSession } from "@/lib/payments/actions";
+import { slotFitsFreeWindows } from "@/lib/agents/booking/booking-policy";
+import { getConnectedCalendarFreeWindows } from "@/lib/integrations/calendar-push";
+import { resolveBookingContactIdentity } from "./contact-identity";
+import { recordBookingOutcomeLearning } from "@/lib/soul/learning";
+import { buildVerifiedBusinessFacts } from "@/lib/landing/factual-grounding";
+import { sanitizePublicBookingDescription, sanitizePublicBookingIntakeFields, sanitizePublicBookingTitle } from "@/lib/bookings/public-booking-url";
+import { makeDefaultActivityUserResolverDeps, resolveOrgActivityUserId } from "@/lib/crm/activity-user";
+import { createPublicBookingActivityProjection, selectPublicBookingDealStage } from "@/lib/bookings/public-booking-crm";
+import { computeRescheduledEnd, intervalsOverlap, shouldSendRescheduleEmail as shouldSendRescheduleEmailPure } from "./calendar-math";
+import { sendBookingRescheduleEmail } from "@/lib/messaging/skills/booking-reschedule";
+import {
+  deleteGoogleCalendarBookingEvent,
+  reconcileGoogleCalendarBookings,
+  syncBookingWithGoogleCalendar,
+} from "./google-calendar-sync";
+import { buildMeetingUrl, resolveBookingProvider } from "./providers";
+// 2026-05-18 — lazy-resolve intake fields for workspaces created before
+// enhance-blocks ran the booking-intake field seeding (or whose creation
+// flow skipped it entirely, like the lean URL flow create_workspace_v2 →
+// complete_workspace_v2). Without this, /book renders the legacy
+// name+email+notes flow for every pre-v1.40 workspace — operator-reported
+// as "booking pages aren't SOUL-aware". The function is pure (in-memory
+// lookup), so it's safe to call on every booking page render.
+// 2026-07-16 — extracted to its own module (testable outside "use server")
+// and taught to classify from SOUL signals before trusting the visual
+// archetype: the look must never drive intake SEMANTICS when soul/settings
+// say what the business does.
+import { resolveIntakeFieldsFromSoul } from "./resolve-intake-fields";
+import { PUBLIC_BOOKING_WINDOW_DAYS } from "./booking-window";
+import { PUBLIC_BOOKING_BLOCKING_STATUSES } from "./conflict-policy";
+// Workspace-level booking availability + rules. Types + pure helpers live
+// in a NON-"use server" module so they can be imported anywhere. The public
+// slot generator + submit validation resolve availability/timezone/min-notice
+// from the workspace rules (organizations.settings.booking), falling back to
+// the appointment type's own availability when the workspace rules are unset.
+import {
+  type AvailabilityDayKey,
+  type AvailabilityDaySettings,
+  type AvailabilitySchedule,
+  type WorkspaceBookingRules,
+  clampBufferMinutes,
+  clampDurationMinutes,
+  clampMinNoticeMinutes,
+  computeSlotsForDay,
+  defaultAvailabilitySchedule,
+  normalizeAvailability,
+  normalizeMaxBookingsPerDay,
+  partsInTimezone,
+  resolveContextBookingRules,
+  toMinutes,
+  utcMomentForLocalTime,
+  weekdayKeys,
+} from "./workspace-rules";
+
+function deriveEndsAt(startsAt: Date, durationMinutes: number) {
+  return new Date(startsAt.getTime() + durationMinutes * 60_000);
+}
+
+type AtomicPublicBookingReservationInput = {
+  orgId: string;
+  bookingSlug: string;
+  localBookingDate: string;
+  contactId: string | null;
+  title: string;
+  fullName: string | null;
+  email: string | null;
+  notes: string | null;
+  provider: string;
+  status: "scheduled" | "pending_payment";
+  startsAt: Date;
+  endsAt: Date;
+  metadata: Record<string, unknown>;
+};
+
+async function reservePublicBookingSlotAtomically(
+  input: AtomicPublicBookingReservationInput,
+): Promise<{ bookingId: string } | null> {
+  // Neon HTTP has no interactive `db.transaction()`. The raw Neon
+  // client's `transaction([...])` is the atomic multi-statement
+  // primitive: the advisory lock is acquired in statement 1, then the
+  // final conflict recheck + insert happen in statement 2 while the
+  // transaction-scoped lock is held.
+  //
+  // Lock by workspace + workspace-local booking date, not exact start
+  // timestamp. That serializes overlapping slots with different starts
+  // for the same operator day, which is the production-safe HVAC V1
+  // tradeoff: correctness over same-day booking throughput.
+  const lockResource = `${input.orgId}:public-booking:${input.localBookingDate}`;
+  const metadataJson = JSON.stringify(input.metadata);
+
+  const lockQuery = rawSql`
+    SELECT pg_advisory_xact_lock(hashtextextended(${lockResource}, 0))
+  `;
+  const insertQuery = rawSql`
+    WITH conflicts AS MATERIALIZED (
+      SELECT 1
+      FROM bookings
+      WHERE org_id = ${input.orgId}::uuid
+        AND status <> 'template'
+        AND status = ANY(${PUBLIC_BOOKING_BLOCKING_STATUSES}::text[])
+        AND starts_at < ${input.endsAt}::timestamptz
+        AND ends_at > ${input.startsAt}::timestamptz
+      LIMIT 1
+    ),
+    inserted AS (
+      INSERT INTO bookings (
+        org_id,
+        contact_id,
+        title,
+        booking_slug,
+        full_name,
+        email,
+        notes,
+        provider,
+        status,
+        starts_at,
+        ends_at,
+        metadata
+      )
+      SELECT
+        ${input.orgId}::uuid,
+        ${input.contactId}::uuid,
+        ${input.title},
+        ${input.bookingSlug},
+        ${input.fullName},
+        ${input.email},
+        ${input.notes},
+        ${input.provider},
+        ${input.status},
+        ${input.startsAt}::timestamptz,
+        ${input.endsAt}::timestamptz,
+        ${metadataJson}::jsonb
+      WHERE NOT EXISTS (SELECT 1 FROM conflicts)
+      RETURNING id
+    )
+    SELECT id FROM inserted
+  `;
+
+  const [, insertResult] = await rawSql.transaction([lockQuery, insertQuery]);
+  const rows =
+    (insertResult as unknown as { rows?: Array<{ id: string }> }).rows ??
+    (insertResult as unknown as Array<{ id: string }>);
+  const bookingId = Array.isArray(rows) ? rows[0]?.id : null;
+  return bookingId ? { bookingId } : null;
+}
+
+function toBookingSlug(value: string) {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-");
+}
+
+// v1.40.1 — vertical-aware booking intake fields. Each appointment
+// type can define a custom set of additional questions the customer
+// fills out at booking time (address for trades, skin concern for
+// medspa, case type for legal, company size for B2B, etc.). Field
+// schema is populated during create_full_workspace based on the
+// classified aesthetic archetype; operators can edit per-appointment-
+// type from the dashboard later.
+export type BookingIntakeFieldType =
+  | "text"
+  | "textarea"
+  | "tel"
+  | "select"
+  | "radio";
+
+export type BookingIntakeField = {
+  /** Stable id used as the form key + storage key (e.g. "address",
+   *  "skin_concern", "issue_type"). Lowercase, snake_case. */
+  id: string;
+  /** Customer-facing label. */
+  label: string;
+  /** Input type. */
+  type: BookingIntakeFieldType;
+  /** Whether the customer must fill this out to submit. */
+  required?: boolean;
+  /** For select/radio: the choices. */
+  options?: string[];
+  /** Optional placeholder text for text/textarea/tel. */
+  placeholder?: string;
+  /** Optional help text under the input. */
+  helpText?: string;
+};
+
+type AppointmentTypeMeta = {
+  kind?: string;
+  durationMinutes?: number;
+  description?: string;
+  confirmationMessage?: string;
+  price?: number;
+  bufferBeforeMinutes?: number;
+  bufferAfterMinutes?: number;
+  maxBookingsPerDay?: number;
+  availability?: Partial<Record<AvailabilityDayKey, AvailabilityDaySettings>>;
+  /** v1.40.1 — vertical-aware booking form fields. When present, the
+   *  PublicBookingForm renders these as additional inputs after name +
+   *  email. When absent, defaults to the legacy fullName + email +
+   *  notes flow. */
+  intakeFields?: BookingIntakeField[];
+};
+
+type PublicBookingContext = {
+  orgId: string;
+  bookingSlug: string;
+  /** 2026-05-19 — appointment-type template row id (status='template').
+   *  Needed by `createBookingForCustomer` so the helper can resolve
+   *  the template's metadata (durationMinutes etc.) without an extra
+   *  lookup. May be null when bookingSlug='default' and no template
+   *  row exists yet (the legacy fallback path). */
+  bookingTemplateId: string | null;
+  appointmentName: string;
+  appointmentDescription: string;
+  durationMinutes: number;
+  confirmationMessage: string;
+  price: number;
+  availability: AvailabilitySchedule;
+  bufferBeforeMinutes: number;
+  bufferAfterMinutes: number;
+  /** Workspace-level cap on bookings per calendar day, or null for no cap. */
+  maxBookingsPerDay: number | null;
+  /** Workspace-level minimum lead time (minutes) before a slot is bookable.
+   *  0 when the workspace has no booking rules (back-compat). */
+  minNoticeMinutes: number;
+  /** v1.40.1 — vertical-aware booking form fields. Empty array if
+   *  the appointment type doesn't define any (legacy templates). */
+  intakeFields: BookingIntakeField[];
+  /** v1.40.2 — workspace IANA timezone (e.g. "America/Chicago").
+   *  Slots are generated AND displayed in this timezone so customer +
+   *  server agree on which moment in time the slot represents.
+   *  Pre-1.40.2 the slot generator used server-local time (UTC on
+   *  Vercel) but workspace hours are in operator's local TZ — when
+   *  the customer's browser parsed the resulting ambiguous strings
+   *  in their own TZ, slots that LOOKED valid were rejected by the
+   *  submit handler (which correctly validates in workspace TZ).
+   *  Returning workspace TZ here makes the whole flow consistent. */
+  workspaceTimezone: string;
+};
+
+// Day keys, defaultAvailabilitySchedule, toMinutes, normalizeAvailability,
+// partsInTimezone, and utcMomentForLocalTime now live in ./workspace-rules
+// (non-"use server") so the public slot route, the dashboard, and unit tests
+// can all import them. They're re-imported at the top of this file.
+//
+// normalizeTimeValue stays local — it's only used by the appointment-type
+// form parser below (parseAvailabilityFromForm).
+function normalizeTimeValue(value: unknown, fallback: string) {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  const trimmed = value.trim();
+
+  if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(trimmed)) {
+    return fallback;
+  }
+
+  return trimmed;
+}
+
+function resolveBufferMinutes(raw: unknown) {
+  const value = Number(raw);
+
+  if (!Number.isFinite(value) || value < 0) {
+    return 0;
+  }
+
+  return Math.min(120, Math.round(value));
+}
+
+function resolveMaxBookingsPerDay(raw: unknown) {
+  const value = Number(raw);
+
+  if (!Number.isFinite(value) || value <= 0) {
+    return 0;
+  }
+
+  return Math.min(50, Math.round(value));
+}
+
+function parseCheckedValue(value: FormDataEntryValue | null) {
+  if (value == null) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.toLowerCase();
+    return normalized === "true" || normalized === "1" || normalized === "on";
+  }
+
+  return true;
+}
+
+function parseAvailabilityFromForm(formData: FormData) {
+  const defaults = defaultAvailabilitySchedule();
+  let hasAnyField = false;
+
+  const parsed = weekdayKeys.reduce((acc, dayKey) => {
+    const enabledField =
+      formData.get(`availability.${dayKey}.enabled`) ??
+      formData.get(`availability[${dayKey}][enabled]`) ??
+      formData.get(`availability_${dayKey}_enabled`);
+    const startField =
+      formData.get(`availability.${dayKey}.start`) ??
+      formData.get(`availability[${dayKey}][start]`) ??
+      formData.get(`availability_${dayKey}_start`);
+    const endField =
+      formData.get(`availability.${dayKey}.end`) ??
+      formData.get(`availability[${dayKey}][end]`) ??
+      formData.get(`availability_${dayKey}_end`);
+
+    if (enabledField != null || startField != null || endField != null) {
+      hasAnyField = true;
+    }
+
+    const fallback = defaults[dayKey];
+    const enabled = parseCheckedValue(enabledField);
+    const start = normalizeTimeValue(startField, fallback.start);
+    const end = normalizeTimeValue(endField, fallback.end);
+
+    acc[dayKey] = {
+      enabled: enabled == null ? fallback.enabled : enabled,
+      start,
+      end,
+    };
+
+    return acc;
+  }, {} as AvailabilitySchedule);
+
+  return hasAnyField ? normalizeAvailability(parsed) : defaults;
+}
+
+function resolveDuration(duration: number | undefined) {
+  if (duration == null || !Number.isFinite(duration)) {
+    return 30;
+  }
+
+  return duration >= 60 ? 60 : 30;
+}
+
+// v1.40.2 — toDateTimeLocalValue removed. Pre-1.40.2 it produced
+// "YYYY-MM-DDTHH:MM" strings in server-local time (UTC on Vercel),
+// which the customer's browser then re-parsed in browser-local time,
+// creating a multi-hour drift between display and submit. Slots now
+// transit as full UTC ISO strings (date.toISOString()) — unambiguous
+// across both ends. The lone remaining mention in submitPublicBookingAction
+// is a comment noting why the strict slot-string match was relaxed.
+
+// partsInTimezone moved to ./workspace-rules (imported above) so the slot
+// generator + submit validation + dashboard share one TZ-correct helper.
+
+function normalizeVoiceConfirmation(rawSoul: unknown) {
+  const soul = (rawSoul as { voice?: { samplePhrases?: string[] } } | null) ?? null;
+  return soul?.voice?.samplePhrases?.[0] || "Your booking is confirmed.";
+}
+
+function sanitizePublicConfirmationMessage(message: string | null | undefined): string {
+  const trimmed = message?.trim();
+  if (!trimmed) return "Your booking is confirmed.";
+  if (/\b(calendar invite|reply to (?:that|the) email|email (?:will|should|is)|we'?ll send)\b/i.test(trimmed)) {
+    return "Your booking is confirmed.";
+  }
+  return trimmed;
+}
+
+async function resolvePublicBookingContext(orgSlug: string, bookingSlug: string): Promise<PublicBookingContext | null> {
+  const [org] = await db
+    .select({
+      id: organizations.id,
+      name: organizations.name,
+      soul: organizations.soul,
+      // v1.40.2 — fetch workspace timezone so slot generation +
+      // display happen in the operator's TZ, not server-local UTC.
+      timezone: organizations.timezone,
+      // Workspace-level booking availability + rules live in
+      // organizations.settings.booking. When present they drive
+      // availability/min-notice/buffer/cap; when absent we fall back to
+      // the appointment type's own metadata (back-compat).
+      settings: organizations.settings,
+      // 2026-05-18 — fetch the theme so we can lazy-resolve intake
+      // fields from theme.aestheticArchetype for workspaces created
+      // before enhance-blocks ran (or via the lean URL flow that
+      // doesn't fan out into enhance-blocks at all). See lazy-resolve
+      // block below.
+      theme: organizations.theme,
+    })
+    .from(organizations)
+    .where(eq(organizations.slug, orgSlug))
+    .limit(1);
+
+  if (!org) {
+    return null;
+  }
+
+  const [template] = await db
+    .select({
+      id: bookings.id,
+      title: bookings.title,
+      metadata: bookings.metadata,
+    })
+    .from(bookings)
+    .where(and(eq(bookings.orgId, org.id), eq(bookings.bookingSlug, bookingSlug), eq(bookings.status, "template")))
+    .limit(1);
+
+  if (!template && bookingSlug !== "default") {
+    return null;
+  }
+
+  const metadata = (template?.metadata as AppointmentTypeMeta | null) ?? null;
+  const confirmationMessage = sanitizePublicConfirmationMessage(
+    metadata?.confirmationMessage || normalizeVoiceConfirmation(org.soul),
+  );
+  // Per-type duration is preserved; availability + buffers + cap + min-notice
+  // come from the workspace rules, falling back to the type's metadata when
+  // organizations.settings.booking is unset.
+  const durationMinutes = resolveDuration(metadata?.durationMinutes);
+  const effectiveRules = resolveContextBookingRules({
+    workspaceSettings: org.settings,
+    typeAvailability: metadata?.availability,
+    typeBufferBeforeMinutes: resolveBufferMinutes(metadata?.bufferBeforeMinutes),
+    typeBufferAfterMinutes: resolveBufferMinutes(metadata?.bufferAfterMinutes),
+    typeMaxBookingsPerDay: resolveMaxBookingsPerDay(metadata?.maxBookingsPerDay),
+  });
+  const availability = effectiveRules.availability;
+  const bufferBeforeMinutes = effectiveRules.bufferBeforeMinutes;
+  const bufferAfterMinutes = effectiveRules.bufferAfterMinutes;
+  const maxBookingsPerDay = effectiveRules.maxBookingsPerDay;
+  const minNoticeMinutes = effectiveRules.minNoticeMinutes;
+
+  // 2026-05-18 — lazy-resolve intake fields (soul/settings vertical first,
+  // then theme.aestheticArchetype, then soul.industry hints) when the booking
+  // template doesn't have them pre-seeded. Solves the "booking pages
+  // aren't SOUL-aware" complaint for workspaces created before v1.40.1
+  // OR via the lean URL flow (create_workspace_v2) which doesn't run
+  // enhance-blocks. Pure in-memory lookup — no DB writes (the booking
+  // metadata stays as-is so operator-edited custom fields aren't
+  // clobbered the next time the page renders).
+  //
+  // 2026-05-18 (later) — operator reported "Roofs by Shiloh" still
+  // shows name+email only. Root cause: soul.industry empty AND theme
+  // archetype unset, so the original implementation returned []
+  // early. The classifier itself has a sensible "editorial-warm"
+  // catch-all — we now ALWAYS call it, passing the workspace name +
+  // appointment title as extra hints so "Roofs by Shiloh" / "Roof
+  // Inspection" land in editorial-warm even with no soul data.
+  const seededFields = Array.isArray(metadata?.intakeFields) ? metadata!.intakeFields : [];
+  const resolvedIntakeFields =
+    seededFields.length > 0
+      ? seededFields
+      : resolveIntakeFieldsFromSoul(
+          org.theme,
+          org.soul,
+          org.settings,
+          org.name,
+          template?.title ?? null,
+        );
+
+  const facts = buildVerifiedBusinessFacts(org.soul, org.settings);
+  const appointmentName = sanitizePublicBookingTitle(template?.title || "Consultation", facts);
+  const appointmentDescription = sanitizePublicBookingDescription(metadata?.description, facts);
+  const publicIntakeFields = sanitizePublicBookingIntakeFields(resolvedIntakeFields, facts);
+
+  return {
+    orgId: org.id,
+    bookingSlug,
+    bookingTemplateId: template?.id ?? null,
+    appointmentName,
+    appointmentDescription,
+    durationMinutes,
+    confirmationMessage,
+    price: Number.isFinite(metadata?.price) ? Number(metadata?.price) : 0,
+    availability,
+    bufferBeforeMinutes,
+    bufferAfterMinutes,
+    maxBookingsPerDay,
+    minNoticeMinutes,
+    // v1.40.1 — vertical-aware booking intake fields. Populated during
+    // create_full_workspace based on the classified archetype. Empty
+    // array for legacy templates (renders the default name+email+notes).
+    // 2026-05-18 — now falls back to archetype-driven lazy resolve so
+    // pre-v1.40 / lean-URL-flow workspaces also get the right fields.
+    intakeFields: publicIntakeFields,
+    // v1.40.2 — workspace IANA TZ. Falls back to UTC if unset.
+    workspaceTimezone: org.timezone || "UTC",
+  };
+}
+
+export async function getPublicBookingContext(orgSlug: string, bookingSlug: string) {
+  const context = await resolvePublicBookingContext(orgSlug, bookingSlug);
+
+  if (!context) {
+    return null;
+  }
+
+  return {
+    orgId: context.orgId,
+    bookingSlug: context.bookingSlug,
+    appointmentName: context.appointmentName,
+    appointmentDescription: context.appointmentDescription,
+    durationMinutes: context.durationMinutes,
+    confirmationMessage: context.confirmationMessage,
+    price: context.price,
+    // v1.40.1 — surface intake fields to the booking page.
+    intakeFields: context.intakeFields,
+    // v1.40.2 — workspace timezone for slot display + submit alignment.
+    workspaceTimezone: context.workspaceTimezone,
+  };
+}
+
+export async function listPublicBookingSlotsAction({
+  orgSlug,
+  bookingSlug,
+  date,
+}: {
+  orgSlug: string;
+  bookingSlug: string;
+  date: string;
+}) {
+  const context = await resolvePublicBookingContext(orgSlug, bookingSlug);
+
+  if (!context) {
+    return { slots: [] as string[], durationMinutes: 30 };
+  }
+
+  // v1.40.2 — slot generation happens entirely in workspace TZ. Slots
+  // transit as full UTC ISO strings (with Z); the client formats them in
+  // the workspace TZ for display and the server interprets them
+  // unambiguously. The availability window + min-notice come from the
+  // WORKSPACE rules (resolved in resolvePublicBookingContext, with
+  // per-type fallback for workspaces that have no settings.booking).
+  //
+  // The pure slot math lives in computeSlotsForDay (./workspace-rules) so
+  // it's unit-testable with an injected clock; this action keeps the DB
+  // I/O (booked-row lookup) + the booking-window guard.
+  const tz = context.workspaceTimezone;
+  const [yearStr, monthStr, dayStr] = date.split("-");
+  const year = parseInt(yearStr ?? "0", 10);
+  const month = parseInt(monthStr ?? "0", 10);
+  const day = parseInt(dayStr ?? "0", 10);
+  if (!year || !month || !day) {
+    return { slots: [] as string[], durationMinutes: context.durationMinutes };
+  }
+
+  const today = new Date();
+  // Window guards work fine in any TZ — the window has slop on both ends so
+  // DST shifts can't make a valid request fall outside. PUBLIC_BOOKING_WINDOW_DAYS
+  // is shared with the date picker so the selectable range and the
+  // available-slots range never drift apart.
+  const requestedNoon = utcMomentForLocalTime(year, month, day, 12, 0, tz);
+  const windowEnd = new Date(today.getTime() + PUBLIC_BOOKING_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  if (requestedNoon < today || requestedNoon > windowEnd) {
+    return { slots: [] as string[], durationMinutes: context.durationMinutes };
+  }
+
+  // Day window for conflict lookup: workspace-local day boundaries
+  // converted to UTC moments.
+  const dayStartUtc = utcMomentForLocalTime(year, month, day, 0, 0, tz);
+  const dayEndUtc = utcMomentForLocalTime(year, month, day + 1, 0, 0, tz);
+
+  const bookedRows = await db
+    .select({ startsAt: bookings.startsAt, endsAt: bookings.endsAt })
+    .from(bookings)
+    .where(
+      and(
+        eq(bookings.orgId, context.orgId),
+        ne(bookings.status, "template"),
+        inArray(bookings.status, [...PUBLIC_BOOKING_BLOCKING_STATUSES]),
+        gte(bookings.startsAt, dayStartUtc),
+        lt(bookings.startsAt, dayEndUtc),
+      ),
+    );
+
+  const { slots } = computeSlotsForDay({
+    rules: {
+      availability: context.availability,
+      minNoticeMinutes: context.minNoticeMinutes,
+      maxBookingsPerDay: context.maxBookingsPerDay,
+    },
+    date,
+    timezone: tz,
+    durationMinutes: context.durationMinutes,
+    bufferBeforeMinutes: context.bufferBeforeMinutes,
+    bufferAfterMinutes: context.bufferAfterMinutes,
+    bookedRows,
+    now: today,
+  });
+
+  // If the workspace has an org-level Google/Outlook calendar connected,
+  // public availability must also respect that calendar's real free/busy.
+  // No external connection => preserve native SeldonFrame availability.
+  // Connected calendar + no free windows => fail closed and offer no slots.
+  const externalAvailability = await getConnectedCalendarFreeWindows({
+    orgId: context.orgId,
+    date,
+    timezone: tz,
+  });
+
+  const publicSlots = externalAvailability.connected
+    ? slots.filter((iso) =>
+        slotFitsFreeWindows(
+          iso,
+          context.durationMinutes,
+          externalAvailability.windows,
+        ),
+      )
+    : slots;
+
+  return {
+    slots: publicSlots,
+    durationMinutes: context.durationMinutes,
+    // v1.40.2 — surface workspace TZ so the form can format slots
+    // and label the time zone clearly.
+    workspaceTimezone: tz,
+  };
+}
+
+// utcMomentForLocalTime moved to ./workspace-rules (imported above) — shared
+// by the slot generator, submit validation, and the pure slot math.
+
+// Workspace-level booking rules: read-modify-write organizations.settings.booking.
+//
+// Input shape (the UI form passes this structured object — NOT FormData —
+// so the dashboard can send the full per-day schedule + scalars in one call):
+//   availability?: partial per-day { enabled, start, end } for sunday..saturday
+//   minNoticeMinutes?: number (>= 0; default 0)
+//   defaultBufferMinutes?: number (clamped 0-120; default 0)
+//   defaultDurationMinutes?: number (clamped 30-180; default 30)
+//   maxBookingsPerDay?: number | null (positive int caps; null/0 = no cap)
+//   timezone?: string (IANA; when present, also updates organizations.timezone)
+//
+// The write uses jsonb_set on ARRAY['booking'] so sibling settings keys
+// (crmPersonality, blocks, soul_compile, …) are preserved under concurrent
+// writes (per L-03: never read-modify-write the whole settings blob in app
+// code). The booking object itself is replaced wholesale, which is correct —
+// the form always submits the complete rule set.
+export type UpdateWorkspaceBookingRulesInput = {
+  availability?: Partial<Record<AvailabilityDayKey, Partial<AvailabilityDaySettings>>>;
+  minNoticeMinutes?: number;
+  defaultBufferMinutes?: number;
+  defaultDurationMinutes?: number;
+  maxBookingsPerDay?: number | null;
+  timezone?: string;
+};
+
+export async function updateWorkspaceBookingRulesAction(
+  input: UpdateWorkspaceBookingRulesInput,
+): Promise<{ ok: true; rules: WorkspaceBookingRules; timezone: string | null }> {
+  assertWritable();
+
+  const orgId = await getOrgId();
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  // Normalize through the same pure helpers the reader uses, so what we
+  // persist round-trips identically through getWorkspaceBookingRules.
+  const rules: WorkspaceBookingRules = {
+    availability: normalizeAvailability(input.availability),
+    minNoticeMinutes: clampMinNoticeMinutes(input.minNoticeMinutes ?? 0),
+    defaultBufferMinutes: clampBufferMinutes(input.defaultBufferMinutes ?? 0),
+    defaultDurationMinutes: clampDurationMinutes(
+      input.defaultDurationMinutes === undefined ? 30 : input.defaultDurationMinutes,
+    ),
+    maxBookingsPerDay: normalizeMaxBookingsPerDay(
+      input.maxBookingsPerDay === null ? 0 : input.maxBookingsPerDay,
+    ),
+  };
+
+  const bookingJson = JSON.stringify(rules);
+
+  // Optional IANA timezone — only validate + update the column when provided.
+  const nextTimezone =
+    typeof input.timezone === "string" && isValidIanaTimezone(input.timezone)
+      ? input.timezone
+      : null;
+
+  const settingsSql = sql`
+    jsonb_set(
+      COALESCE(${organizations.settings}, '{}'::jsonb),
+      ARRAY['booking']::text[],
+      ${bookingJson}::jsonb,
+      true
+    )
+  ` as unknown as typeof organizations.$inferInsert.settings;
+
+  const [updated] = await db
+    .update(organizations)
+    .set(
+      nextTimezone
+        ? { settings: settingsSql, timezone: nextTimezone, updatedAt: new Date() }
+        : { settings: settingsSql, updatedAt: new Date() },
+    )
+    .where(eq(organizations.id, orgId))
+    .returning({ timezone: organizations.timezone });
+
+  // Refresh the dashboard so the saved rules surface on navigate-back.
+  revalidatePath("/bookings");
+
+  return { ok: true, rules, timezone: updated?.timezone ?? nextTimezone };
+}
+
+// Lightweight IANA timezone validity check — mirrors the schedule-timezone
+// validator's approach (Intl throws on an unknown zone). Avoids persisting a
+// garbage timezone that would later break partsInTimezone.
+function isValidIanaTimezone(tz: string): boolean {
+  if (!tz.trim()) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function createAppointmentTypeAction(formData: FormData) {
+  assertWritable();
+
+  const orgId = await getOrgId();
+  const user = await getCurrentUser();
+
+  if (!orgId || !user?.id) {
+    throw new Error("Unauthorized");
+  }
+
+  const name = String(formData.get("name") ?? "Consultation").trim() || "Consultation";
+  const duration = resolveDuration(Number(formData.get("durationMinutes") ?? 30));
+  const description = String(formData.get("description") ?? "").trim();
+  const price = Math.max(0, Number(formData.get("price") ?? 0));
+  const slugInput = String(formData.get("slug") ?? name);
+  const bookingSlug = toBookingSlug(slugInput || "consultation") || "consultation";
+  const availability = parseAvailabilityFromForm(formData);
+  const bufferBeforeMinutes = resolveBufferMinutes(formData.get("bufferBeforeMinutes"));
+  const bufferAfterMinutes = resolveBufferMinutes(formData.get("bufferAfterMinutes"));
+  const maxBookingsPerDay = resolveMaxBookingsPerDay(formData.get("maxBookingsPerDay"));
+
+  const now = new Date();
+
+  await db.insert(bookings).values({
+    orgId,
+    userId: user.id,
+    title: name,
+    bookingSlug,
+    fullName: null,
+    email: null,
+    notes: null,
+    provider: "manual",
+    status: "template",
+    startsAt: now,
+    endsAt: deriveEndsAt(now, duration),
+    metadata: {
+      kind: "appointment_type",
+      durationMinutes: duration,
+      description,
+      price,
+      availability: normalizeAvailability(availability),
+      bufferBeforeMinutes: bufferBeforeMinutes,
+      bufferAfterMinutes: bufferAfterMinutes,
+      maxBookingsPerDay: maxBookingsPerDay,
+    },
+  });
+  // 2026-05-17 — revalidate the listing page so the new appointment
+  // type appears without an operator-initiated refresh.
+  revalidatePath("/bookings");
+}
+
+// 2026-05-18 — FormData-shaped wrapper for the existing typed
+// updateBookingTypeAction. /bookings list page calls this from a slide-out
+// sheet so operators can edit appointment-type name / slug / duration /
+// description / price the same way they edit intake forms. Authoritative
+// validation still lives in the typed action below — this just unpacks
+// the form fields and threads them through.
+export async function editAppointmentTypeAction(formData: FormData) {
+  assertWritable();
+
+  const orgId = await getOrgId();
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const bookingId = String(formData.get("bookingId") ?? "").trim();
+  if (!bookingId) {
+    throw new Error("Booking ID is required");
+  }
+
+  const name = String(formData.get("name") ?? "").trim() || "Consultation";
+  const slug = String(formData.get("slug") ?? name);
+  const durationMinutes = Number(formData.get("durationMinutes") ?? 30);
+  const description = String(formData.get("description") ?? "").trim();
+  const price = Math.max(0, Number(formData.get("price") ?? 0));
+
+  await updateBookingTypeAction({
+    bookingId,
+    name,
+    slug,
+    durationMinutes,
+    description,
+    price,
+  });
+}
+
+export async function createBookingTypeForSeldonAction(input: {
+  name: string;
+  slug: string;
+  durationMinutes?: number;
+  description?: string;
+  price?: number;
+}) {
+  assertWritable();
+
+  const orgId = await getOrgId();
+  const user = await getCurrentUser();
+
+  if (!orgId || !user?.id) {
+    throw new Error("Unauthorized");
+  }
+
+  const name = String(input.name ?? "Consultation").trim() || "Consultation";
+  const slugInput = String(input.slug ?? name ?? "consultation");
+  const bookingSlug = toBookingSlug(slugInput) || "consultation";
+  const duration = resolveDuration(input.durationMinutes ?? 30);
+  const description = String(input.description ?? "").trim();
+  const price = Math.max(0, Number(input.price ?? 0));
+  const now = new Date();
+
+  const [created] = await db
+    .insert(bookings)
+    .values({
+      orgId,
+      userId: user.id,
+      title: name,
+      bookingSlug,
+      fullName: null,
+      email: null,
+      notes: null,
+      provider: "manual",
+      status: "template",
+      startsAt: now,
+      endsAt: deriveEndsAt(now, duration),
+      metadata: {
+        kind: "appointment_type",
+        durationMinutes: duration,
+        description,
+        price,
+        availability: defaultAvailabilitySchedule(),
+        bufferBeforeMinutes: 0,
+        bufferAfterMinutes: 0,
+        maxBookingsPerDay: 0,
+      },
+    })
+    .returning({ id: bookings.id, bookingSlug: bookings.bookingSlug, title: bookings.title });
+
+  return {
+    id: created?.id ?? null,
+    bookingSlug: created?.bookingSlug ?? bookingSlug,
+    name: created?.title ?? name,
+  };
+}
+
+export async function updateBookingTypeAction(input: {
+  bookingId: string;
+  name: string;
+  slug: string;
+  durationMinutes?: number;
+  description?: string;
+  price?: number;
+  availability?: AvailabilitySchedule;
+  bufferBeforeMinutes?: number;
+  bufferAfterMinutes?: number;
+  maxBookingsPerDay?: number;
+}) {
+  assertWritable();
+
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const bookingId = String(input.bookingId ?? "").trim();
+  const name = String(input.name ?? "").trim();
+  const slugInput = String(input.slug ?? name ?? "consultation");
+  const slug = toBookingSlug(slugInput) || "consultation";
+
+  if (!bookingId || !name) {
+    throw new Error("Booking ID and name are required");
+  }
+
+  const [existing] = await db
+    .select({ id: bookings.id, metadata: bookings.metadata })
+    .from(bookings)
+    .where(and(eq(bookings.orgId, orgId), eq(bookings.id, bookingId), eq(bookings.status, "template")))
+    .limit(1);
+
+  if (!existing) {
+    throw new Error("Booking type not found");
+  }
+
+  const metadata = (existing.metadata as AppointmentTypeMeta | null) ?? {};
+  const nextDuration = resolveDuration(input.durationMinutes ?? metadata.durationMinutes);
+  const nextAvailability = normalizeAvailability(input.availability ?? metadata.availability);
+  const nextBufferBefore = resolveBufferMinutes(input.bufferBeforeMinutes ?? metadata.bufferBeforeMinutes);
+  const nextBufferAfter = resolveBufferMinutes(input.bufferAfterMinutes ?? metadata.bufferAfterMinutes);
+  const nextMaxPerDay = resolveMaxBookingsPerDay(input.maxBookingsPerDay ?? metadata.maxBookingsPerDay);
+
+  await db
+    .update(bookings)
+    .set({
+      title: name,
+      bookingSlug: slug,
+      metadata: {
+        ...metadata,
+        kind: "appointment_type",
+        durationMinutes: nextDuration,
+        description: String(input.description ?? metadata.description ?? "").trim(),
+        price: Math.max(0, Number(input.price ?? metadata.price ?? 0)),
+        availability: nextAvailability,
+        bufferBeforeMinutes: nextBufferBefore,
+        bufferAfterMinutes: nextBufferAfter,
+        maxBookingsPerDay: nextMaxPerDay,
+      },
+      updatedAt: new Date(),
+    })
+    .where(and(eq(bookings.orgId, orgId), eq(bookings.id, bookingId), eq(bookings.status, "template")));
+
+  // 2026-05-17 — revalidate so edits show up in the bookings list
+  // immediately on navigate-back.
+  revalidatePath("/bookings");
+
+  return {
+    id: bookingId,
+    name,
+    bookingSlug: slug,
+  };
+}
+
+export async function listAppointmentTypes(orgIdOverride?: string) {
+  // v1.24.0 — accept orgId override for operator-portal mirror.
+  const orgId = orgIdOverride ?? (await getOrgId());
+
+  if (!orgId) {
+    return [];
+  }
+
+  return db
+    .select({
+      id: bookings.id,
+      title: bookings.title,
+      bookingSlug: bookings.bookingSlug,
+      metadata: bookings.metadata,
+      createdAt: bookings.createdAt,
+    })
+    .from(bookings)
+    .where(and(eq(bookings.orgId, orgId), eq(bookings.status, "template")))
+    .orderBy(asc(bookings.createdAt));
+}
+
+export async function listBookings(orgIdOverride?: string) {
+  // v1.24.0 — accept orgId override for operator-portal mirror.
+  const orgId = orgIdOverride ?? (await getOrgId());
+
+  if (!orgId) {
+    return [];
+  }
+
+  const rows = await db
+    .select()
+    .from(bookings)
+    .where(and(eq(bookings.orgId, orgId), ne(bookings.status, "template")))
+    .orderBy(asc(bookings.startsAt));
+
+  await reconcileGoogleCalendarBookings(
+    rows.map((row) => ({
+      bookingId: row.id,
+      status: row.status,
+      userId: row.userId,
+      externalEventId: row.externalEventId,
+    }))
+  );
+
+  return rows;
+}
+
+export async function createBookingAction(formData: FormData) {
+  assertWritable();
+
+  const orgId = await getOrgId();
+  const user = await getCurrentUser();
+
+  if (!orgId || !user?.id) {
+    throw new Error("Unauthorized");
+  }
+
+  let contactId = String(formData.get("contactId") ?? "").trim() || null;
+
+  // Job details captured for the booking regardless of new-vs-existing
+  // contact. The `contacts` table has no address column, so when the
+  // operator provides an address we fold it into the booking notes as an
+  // "Address: …" line (see the notes assembly below).
+  const notesInput = String(formData.get("notes") ?? "").trim();
+  const addressInput = String(formData.get("newContactAddress") ?? "").trim();
+
+  if (contactId) {
+    const [contact] = await db
+      .select({ id: contacts.id })
+      .from(contacts)
+      .where(and(eq(contacts.orgId, orgId), eq(contacts.id, contactId)))
+      .limit(1);
+
+    if (!contact) {
+      throw new Error("Contact not found");
+    }
+  } else {
+    // Inline "create new contact" path from the booking-create popover. When
+    // the operator typed a name that matched no existing contact, the form
+    // carries the new contact's details instead of a contactId. Create the
+    // contacts row first, then link it so the booking emits booking.created
+    // exactly like the link-existing path below.
+    const newFirstName = String(formData.get("newContactFirstName") ?? "").trim();
+    if (newFirstName) {
+      const newLastName = String(formData.get("newContactLastName") ?? "").trim();
+      const newEmail = String(formData.get("newContactEmail") ?? "").trim();
+      const newPhone = String(formData.get("newContactPhone") ?? "").trim();
+
+      // Find-or-create by email. The contacts table has a unique
+      // (orgId, lower(email)) index, so a repeat customer — or a reused email
+      // during testing — would make a blind insert throw
+      // (contacts_org_lower_email_uniq). When the email already belongs to a
+      // contact in this org, LINK that existing contact instead of inserting.
+      // A blank/NULL email never conflicts (Postgres treats NULLs as distinct).
+      if (newEmail) {
+        const [existing] = await db
+          .select({ id: contacts.id })
+          .from(contacts)
+          .where(
+            and(
+              eq(contacts.orgId, orgId),
+              sql`lower(${contacts.email}) = ${newEmail.toLowerCase()}`,
+            ),
+          )
+          .limit(1);
+        if (existing) {
+          contactId = existing.id;
+        }
+      }
+
+      if (!contactId) {
+        const [createdContact] = await db
+          .insert(contacts)
+          .values({
+            orgId,
+            firstName: newFirstName,
+            lastName: newLastName || null,
+            email: newEmail || null,
+            phone: newPhone || null,
+            status: "lead",
+            source: "dashboard-booking",
+          })
+          .returning({ id: contacts.id });
+
+        if (!createdContact) {
+          throw new Error("Could not create contact");
+        }
+        contactId = createdContact.id;
+      }
+    }
+  }
+
+  // Assemble the booking notes: when an address was supplied (new-contact
+  // path) prepend it as an "Address: …" line so the job site is captured on
+  // the booking even though contacts have no address column.
+  const bookingNotes =
+    [addressInput ? `Address: ${addressInput}` : "", notesInput]
+      .filter(Boolean)
+      .join("\n")
+      .trim() || null;
+
+  const startsAt = new Date(String(formData.get("startsAt") ?? ""));
+
+  if (Number.isNaN(startsAt.getTime())) {
+    throw new Error("Invalid booking start time");
+  }
+
+  const durationMinutes = Number(formData.get("durationMinutes") ?? 30);
+  const provider = await resolveBookingProvider(String(formData.get("provider") ?? "") || null);
+
+  const [created] = await db
+    .insert(bookings)
+    .values({
+      orgId,
+      contactId,
+      userId: user.id,
+      title: String(formData.get("title") ?? "Consultation"),
+      bookingSlug: String(formData.get("bookingSlug") ?? "default"),
+      fullName: String(formData.get("fullName") ?? "") || null,
+      email: String(formData.get("email") ?? "") || null,
+      notes: bookingNotes,
+      provider,
+      status: "scheduled",
+      startsAt,
+      endsAt: deriveEndsAt(startsAt, Number.isFinite(durationMinutes) ? durationMinutes : 30),
+      metadata: {
+        source: "dashboard",
+        integrationConfigured: provider !== "manual",
+      },
+    })
+    .returning({ id: bookings.id, contactId: bookings.contactId });
+
+  if (!created) {
+    throw new Error("Could not create booking");
+  }
+
+  const fallbackMeetingUrl = buildMeetingUrl(provider, created.id);
+  let externalEventId: string | null = fallbackMeetingUrl ? created.id : null;
+  let meetingUrl: string | null = fallbackMeetingUrl;
+
+  if (provider === "google-calendar") {
+    const googleSynced = await syncBookingWithGoogleCalendar({
+      bookingId: created.id,
+      userId: user.id,
+      title: String(formData.get("title") ?? "Consultation"),
+      notes: String(formData.get("notes") ?? "") || null,
+      startsAt,
+      endsAt: deriveEndsAt(startsAt, Number.isFinite(durationMinutes) ? durationMinutes : 30),
+    });
+
+    if (googleSynced.externalEventId || googleSynced.meetingUrl) {
+      externalEventId = googleSynced.externalEventId;
+      meetingUrl = googleSynced.meetingUrl;
+    }
+  }
+
+  if (meetingUrl || externalEventId) {
+    await db
+      .update(bookings)
+      .set({ meetingUrl, externalEventId, updatedAt: new Date() })
+      .where(and(eq(bookings.orgId, orgId), eq(bookings.id, created.id)));
+  }
+
+  if (created.contactId) {
+    await emitSeldonEvent("booking.created", {
+      appointmentId: created.id,
+      contactId: created.contactId,
+    }, { orgId: orgId });
+  }
+
+  // Refresh the bookings calendar/list so a newly-created booking appears
+  // immediately instead of requiring a hard refresh.
+  revalidatePath("/bookings");
+
+  return { id: created.id };
+}
+
+export async function completeBookingAction(bookingId: string) {
+  assertWritable();
+
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const [row] = await db
+    .update(bookings)
+    .set({ status: "completed", completedAt: new Date(), updatedAt: new Date() })
+    .where(and(eq(bookings.orgId, orgId), eq(bookings.id, bookingId)))
+    .returning({
+      id: bookings.id,
+      contactId: bookings.contactId,
+      startsAt: bookings.startsAt,
+      title: bookings.title,
+      notes: bookings.notes,
+      endsAt: bookings.endsAt,
+      userId: bookings.userId,
+      externalEventId: bookings.externalEventId,
+    });
+
+  if (row) {
+    await syncBookingWithGoogleCalendar({
+      bookingId: row.id,
+      userId: row.userId,
+      title: row.title,
+      notes: row.notes,
+      startsAt: row.startsAt,
+      endsAt: row.endsAt,
+      externalEventId: row.externalEventId,
+    });
+  }
+
+  if (row?.contactId) {
+    await emitSeldonEvent("booking.completed", {
+      appointmentId: row.id,
+      contactId: row.contactId,
+    }, { orgId: orgId });
+  }
+
+  if (row) {
+    await recordBookingOutcomeLearning({
+      orgId,
+      startsAt: row.startsAt,
+      status: "completed",
+    });
+  }
+}
+
+export async function cancelBookingAction(bookingId: string) {
+  assertWritable();
+
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const [row] = await db
+    .update(bookings)
+    .set({ status: "cancelled", cancelledAt: new Date(), updatedAt: new Date() })
+    .where(and(eq(bookings.orgId, orgId), eq(bookings.id, bookingId)))
+    .returning({ id: bookings.id, contactId: bookings.contactId, userId: bookings.userId, externalEventId: bookings.externalEventId });
+
+  if (row) {
+    await deleteGoogleCalendarBookingEvent({
+      userId: row.userId,
+      externalEventId: row.externalEventId,
+    });
+  }
+
+  if (row?.contactId) {
+    await emitSeldonEvent("booking.cancelled", {
+      appointmentId: row.id,
+      contactId: row.contactId,
+    }, { orgId: orgId });
+  }
+
+  // Refresh the bookings calendar/list so a cancelled card drops off
+  // immediately when the operator cancels from the booking-actions modal.
+  revalidatePath("/bookings");
+}
+
+// Inline notes editing from the booking-actions modal on /bookings. The
+// operator can jot job details ("gate code 1234", "park on the street",
+// service-specific notes) straight onto a booking without opening the
+// contact. Scoped to the caller's org. Returns the saved value so the
+// client can reconcile its optimistic state.
+export async function updateBookingNotesAction(bookingId: string, notes: string) {
+  assertWritable();
+
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const trimmed = notes.trim();
+
+  const [row] = await db
+    .update(bookings)
+    .set({ notes: trimmed || null, updatedAt: new Date() })
+    .where(and(eq(bookings.orgId, orgId), eq(bookings.id, bookingId)))
+    .returning({ id: bookings.id, notes: bookings.notes });
+
+  if (!row) {
+    throw new Error("Booking not found");
+  }
+
+  // Refresh the bookings calendar/list so the saved notes surface on the
+  // next render of the card modal.
+  revalidatePath("/bookings");
+
+  return { id: row.id, notes: row.notes };
+}
+
+// 2026-05-18 — public customer-managed cancel. The booking confirmation
+// email + SMS now include a URL like /booking/manage/<id>?token=<signed>
+// so the customer can cancel without re-authenticating. This action is
+// the SECURE counterpart to cancelBookingAction (which requires
+// getOrgId + session auth). Here, the HMAC-signed token IS the auth.
+//
+// Idempotent: cancelling an already-cancelled booking returns ok=true
+// without re-emitting the event so we don't double-fire the
+// booking.cancelled outbound message.
+export async function cancelBookingByTokenAction(input: {
+  bookingId: string;
+  token: string;
+}): Promise<
+  | { ok: true; alreadyCancelled: boolean }
+  | { ok: false; error: string }
+> {
+  const { signBookingManageToken: _sign, verifyBookingManageToken } =
+    await import("./manage-token");
+  void _sign;
+
+  if (!input.bookingId || !input.token) {
+    return { ok: false, error: "missing_token_or_id" };
+  }
+  if (!verifyBookingManageToken(input.bookingId, input.token)) {
+    return { ok: false, error: "invalid_token" };
+  }
+
+  const [row] = await db
+    .select({
+      id: bookings.id,
+      orgId: bookings.orgId,
+      status: bookings.status,
+      contactId: bookings.contactId,
+      userId: bookings.userId,
+      externalEventId: bookings.externalEventId,
+    })
+    .from(bookings)
+    .where(eq(bookings.id, input.bookingId))
+    .limit(1);
+  if (!row) {
+    return { ok: false, error: "booking_not_found" };
+  }
+  if (row.status === "cancelled") {
+    return { ok: true, alreadyCancelled: true };
+  }
+
+  await db
+    .update(bookings)
+    .set({ status: "cancelled", cancelledAt: new Date(), updatedAt: new Date() })
+    .where(eq(bookings.id, row.id));
+
+  // Soft-fail Google Calendar cleanup — never block the cancel.
+  try {
+    await deleteGoogleCalendarBookingEvent({
+      userId: row.userId,
+      externalEventId: row.externalEventId,
+    });
+  } catch (err) {
+    console.warn(
+      JSON.stringify({
+        event: "cancelBookingByTokenAction.gcal_delete_failed",
+        bookingId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+  }
+
+  // Fire booking.cancelled so the messaging dispatcher sends the
+  // cancellation confirmation. Same event the auth'd path emits.
+  if (row.contactId) {
+    await emitSeldonEvent(
+      "booking.cancelled",
+      {
+        appointmentId: row.id,
+        contactId: row.contactId,
+      },
+      { orgId: row.orgId },
+    );
+  }
+
+  revalidatePath(`/booking/manage/${row.id}`);
+
+  return { ok: true, alreadyCancelled: false };
+}
+
+export async function markBookingNoShowAction(bookingId: string) {
+  assertWritable();
+
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const [row] = await db
+    .update(bookings)
+    .set({ status: "no_show", updatedAt: new Date() })
+    .where(and(eq(bookings.orgId, orgId), eq(bookings.id, bookingId)))
+    .returning({
+      id: bookings.id,
+      contactId: bookings.contactId,
+      startsAt: bookings.startsAt,
+      title: bookings.title,
+      notes: bookings.notes,
+      endsAt: bookings.endsAt,
+      userId: bookings.userId,
+      externalEventId: bookings.externalEventId,
+    });
+
+  if (row) {
+    await syncBookingWithGoogleCalendar({
+      bookingId: row.id,
+      userId: row.userId,
+      title: row.title,
+      notes: row.notes,
+      startsAt: row.startsAt,
+      endsAt: row.endsAt,
+      externalEventId: row.externalEventId,
+    });
+  }
+
+  if (row?.contactId) {
+    await emitSeldonEvent("booking.no_show", {
+      appointmentId: row.id,
+      contactId: row.contactId,
+    }, { orgId: orgId });
+  }
+
+  if (row) {
+    await recordBookingOutcomeLearning({
+      orgId,
+      startsAt: row.startsAt,
+      status: "no_show",
+    });
+  }
+}
+
+export async function submitPublicBookingAction({
+  orgSlug,
+  bookingSlug,
+  fullName,
+  email,
+  notes,
+  startsAt,
+  intakeResponses,
+}: {
+  orgSlug: string;
+  bookingSlug: string;
+  fullName: string;
+  /** Voice R1 — OPTIONAL. The web booking page + text chatbot always send an
+   *  email; the voice receptionist for a phone-first vertical (plumber/HVAC)
+   *  sends none and we resolve the contact by phone instead. Empty/absent →
+   *  the nullable email columns store null. */
+  email?: string;
+  notes?: string;
+  startsAt: string;
+  /** v1.40.1 — vertical-aware intake field responses keyed by field id.
+   *  e.g. { address: "1234 Main St", urgency: "Today", issue_type: "..." }
+   *  Stored on the booking row's metadata so the operator sees actionable
+   *  context the moment the lead lands in their CRM. The canonical "phone"
+   *  key (when present) is ALSO used to resolve the contact when no email
+   *  was provided. */
+  intakeResponses?: Record<string, string>;
+}) {
+  assertWritable();
+
+  // v1.3.3 — structured logging at every throw. The route handler
+  // catches and returns 500; without these logs we couldn't tell
+  // which validation step rejected the booking.
+  const baseLogContext = {
+    org_slug: orgSlug,
+    booking_slug: bookingSlug,
+    starts_at: startsAt,
+  };
+  const rejectAndThrow = (
+    reason: string,
+    details: Record<string, unknown>,
+  ): never => {
+    console.error(
+      JSON.stringify({
+        event: "submit_public_booking_rejected",
+        reason,
+        ...baseLogContext,
+        ...details,
+      }),
+    );
+    throw new Error(`${reason}: ${JSON.stringify(details).slice(0, 200)}`);
+  };
+
+  const bookingContext = await resolvePublicBookingContext(orgSlug, bookingSlug);
+
+  if (!bookingContext) {
+    return rejectAndThrow("booking_context_not_found", {
+      hint: "no organizations row for orgSlug, or no bookings row with status='template' for that bookingSlug",
+    });
+  }
+
+  // 2026-05-18 — derive structured contact data from the public form.
+  // Operator reported the contact's PHONE was empty even though the
+  // booking form's SOUL-aware fields ask for phone. Root cause: the
+  // submit action only wrote firstName + email to contacts and stored
+  // everything else on booking metadata. Now we ALSO sync:
+  //   - first/last name split from fullName
+  //   - phone (if the intake form captured one)
+  //   - structured intake responses → contact.customFields so the
+  //     operator sees address / urgency / scope / timeline / budget
+  //     on the contact's record, not buried inside booking metadata
+  const responses = intakeResponses ?? {};
+  const trimmedName = fullName.trim();
+  const nameParts = trimmedName.split(/\s+/);
+  const firstName = nameParts.length > 0 ? nameParts[0] : trimmedName;
+  const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : null;
+  // Intake field keys come from booking-intake-fields.ts. Phone may
+  // arrive as "phone" (most archetypes) or with a custom id; pull
+  // the canonical one. Address: "address" across archetypes.
+  const intakePhone =
+    typeof responses.phone === "string" && responses.phone.trim().length > 0
+      ? responses.phone.trim()
+      : null;
+
+  // Voice R1 — decide how to resolve the contact. Web booking + text chatbot
+  // always send an email → match/create by email (UNCHANGED behavior). The
+  // voice receptionist for a phone-first vertical sends no email → match/create
+  // by phone, and store NULL (never "") for the nullable email columns.
+  const identity = resolveBookingContactIdentity({ email, phone: intakePhone });
+  // The value written to the nullable email columns (booking + contact).
+  const effectiveEmail = identity.storedEmail;
+
+  // Build the (orgId, email|phone) match predicate from the identity. "none"
+  // (no contact method at all) skips the lookup → orphan path below.
+  const contactMatch =
+    identity.matchBy === "email" && identity.email
+      ? and(eq(contacts.orgId, bookingContext.orgId), eq(contacts.email, identity.email))
+      : identity.matchBy === "phone" && identity.phone
+        ? and(eq(contacts.orgId, bookingContext.orgId), eq(contacts.phone, identity.phone))
+        : null;
+
+  const existingRows = contactMatch
+    ? await db
+        .select({ id: contacts.id, phone: contacts.phone, customFields: contacts.customFields, lastName: contacts.lastName })
+        .from(contacts)
+        .where(contactMatch)
+        .limit(1)
+    : [];
+  const existing = existingRows[0];
+
+  let contactId = existing?.id ?? null;
+
+  if (!contactId) {
+    const [createdContact] = await db
+      .insert(contacts)
+      .values({
+        orgId: bookingContext.orgId,
+        firstName,
+        lastName,
+        email: effectiveEmail,
+        phone: intakePhone,
+        status: "lead",
+        source: "booking",
+        customFields: { ...responses },
+      })
+      .returning({ id: contacts.id });
+
+    contactId = createdContact?.id ?? null;
+
+    if (contactId) {
+      await emitSeldonEvent("contact.created", { contactId }, { orgId: bookingContext.orgId });
+    }
+  } else {
+    // 2026-05-18 — backfill missing fields on an existing contact when
+    // the booking form gave us more data than we previously had. Never
+    // clobber an existing phone / lastName / customFields with empty
+    // values; only fill blanks. customFields merges shallowly with the
+    // previous JSON so older keys (e.g. from a prior booking) survive.
+    const updates: Record<string, unknown> = {};
+    if (!existing.phone && intakePhone) updates.phone = intakePhone;
+    if (!existing.lastName && lastName) updates.lastName = lastName;
+    const existingCustom = (existing.customFields as Record<string, unknown> | null) ?? {};
+    const mergedCustom = { ...existingCustom, ...responses };
+    if (Object.keys(responses).length > 0) {
+      updates.customFields = mergedCustom;
+    }
+    if (Object.keys(updates).length > 0) {
+      await db
+        .update(contacts)
+        .set({ ...updates, updatedAt: new Date() })
+        .where(eq(contacts.id, contactId));
+    }
+  }
+
+  const bookingStart = new Date(startsAt);
+
+  if (Number.isNaN(bookingStart.getTime())) {
+    return rejectAndThrow("invalid_start_time", {
+      received: startsAt,
+      hint: "starts_at must be a parseable ISO 8601 datetime",
+    });
+  }
+
+  // Enforce the workspace minimum-notice window server-side (defense in
+  // depth — the slot generator already hides too-soon slots, but a crafted
+  // POST must not bypass it). minNoticeMinutes is 0 for workspaces without
+  // booking rules, so this is a no-op there.
+  if (bookingContext.minNoticeMinutes > 0) {
+    const earliestStartMs = Date.now() + bookingContext.minNoticeMinutes * 60_000;
+    if (bookingStart.getTime() < earliestStartMs) {
+      return rejectAndThrow("slot_within_min_notice", {
+        requested_start: bookingStart.toISOString(),
+        min_notice_minutes: bookingContext.minNoticeMinutes,
+        earliest_start: new Date(earliestStartMs).toISOString(),
+      });
+    }
+  }
+
+  // v1.3.2 — TIMEZONE-AWARE slot validation.
+  //
+  // The previous strict check `availableSlots.slots.includes(toDateTimeLocalValue(bookingStart))`
+  // compared format strings produced from server-local time
+  // (Vercel = UTC). The client picked a slot in the WORKSPACE'S
+  // timezone (e.g. "Wed 4pm Vancouver"), which `toISOString()` ships
+  // as a UTC moment ("Wed 23:00 UTC"). On the server, getHours()
+  // returns 23, slot generation produces ["09:00", "09:30", ...,
+  // "16:30"] in UTC — no match → "Selected slot is no longer
+  // available" rejected every valid booking attempt.
+  //
+  // New design: derive workspace-local components from the UTC
+  // moment via Intl, then validate against the personality/template
+  // availability in the SAME workspace TZ frame. This is the
+  // correct semantic model — bookings happen in the BUSINESS'S
+  // local time, not the server's, and not the visitor's.
+  const [orgRow] = await db
+    .select({ timezone: organizations.timezone })
+    .from(organizations)
+    .where(eq(organizations.id, bookingContext.orgId))
+    .limit(1);
+  const workspaceTz = orgRow?.timezone || "UTC";
+
+  const localParts = partsInTimezone(bookingStart, workspaceTz);
+  const dayAvailability = bookingContext.availability[localParts.weekday];
+  if (!dayAvailability?.enabled) {
+    return rejectAndThrow("day_not_available", {
+      weekday_in_workspace_tz: localParts.weekday,
+      workspace_timezone: workspaceTz,
+      day_availability: dayAvailability ?? null,
+      all_availability_keys: Object.keys(bookingContext.availability),
+    });
+  }
+  const slotMinuteOfDay = localParts.hour * 60 + localParts.minute;
+  const dayStartMinutes = toMinutes(dayAvailability.start);
+  const dayEndMinutes = toMinutes(dayAvailability.end);
+  if (slotMinuteOfDay < dayStartMinutes || slotMinuteOfDay >= dayEndMinutes) {
+    return rejectAndThrow("slot_outside_business_hours", {
+      slot_local_hhmm: `${localParts.hour}:${String(localParts.minute).padStart(2, "0")}`,
+      slot_minute_of_day: slotMinuteOfDay,
+      workspace_timezone: workspaceTz,
+      weekday: localParts.weekday,
+      day_start: dayAvailability.start,
+      day_end: dayAvailability.end,
+      day_start_minutes: dayStartMinutes,
+      day_end_minutes: dayEndMinutes,
+    });
+  }
+  // Snap-to-grid check: slot must align to a 15-minute boundary so
+  // we don't accept arbitrarily-offset bookings. 15 (not 30) so a
+  // 60-min duration can still anchor at :15 / :45 if the personality
+  // wants finer granularity later.
+  if (slotMinuteOfDay % 15 !== 0) {
+    return rejectAndThrow("slot_off_grid", {
+      slot_local_hhmm: `${localParts.hour}:${String(localParts.minute).padStart(2, "0")}`,
+      slot_minute_of_day: slotMinuteOfDay,
+      modulo_15: slotMinuteOfDay % 15,
+      hint: "client must pick slots aligned to :00, :15, :30, :45 boundaries in the workspace TZ",
+    });
+  }
+  // Check for overlap with existing real bookings on the same day.
+  const dayStartUtc = new Date(bookingStart);
+  dayStartUtc.setUTCHours(0, 0, 0, 0);
+  const dayEndUtc = new Date(dayStartUtc);
+  dayEndUtc.setUTCDate(dayEndUtc.getUTCDate() + 1);
+  // 2026-05-18 — conflict check now scoped to the whole workspace
+  // (no eq(bookingSlug)). Previously we'd scope to a single
+  // appointment-type slug, which meant a workspace with multiple
+  // types ("default", "free-roof-inspection", "site-visit") could
+  // accidentally double-book the operator's time at 12pm across
+  // different types. The operator only has one calendar — guard
+  // against ALL appointment types overlapping at the same instant.
+  // Also include pending_payment in the conflict set so a half-paid
+  // booking blocks a parallel reservation until checkout completes
+  // (or expires). status='template' rows are always excluded.
+  const conflicts = await db
+    .select({ startsAt: bookings.startsAt, endsAt: bookings.endsAt })
+    .from(bookings)
+    .where(
+      and(
+        eq(bookings.orgId, bookingContext.orgId),
+        ne(bookings.status, "template"),
+        inArray(bookings.status, [...PUBLIC_BOOKING_BLOCKING_STATUSES]),
+        gte(bookings.startsAt, dayStartUtc),
+        lt(bookings.startsAt, dayEndUtc),
+      ),
+    );
+  const slotEnd = deriveEndsAt(bookingStart, bookingContext.durationMinutes);
+  const overlap = conflicts.some((row) => {
+    const s = new Date(row.startsAt).getTime();
+    const e = new Date(row.endsAt).getTime();
+    return bookingStart.getTime() < e && slotEnd.getTime() > s;
+  });
+  if (overlap) {
+    return rejectAndThrow("slot_already_booked", {
+      conflict_count: conflicts.length,
+      requested_start: bookingStart.toISOString(),
+      requested_end: slotEnd.toISOString(),
+    });
+  }
+
+  // External-calendar race-condition guard.
+  //
+  // The public slot picker already filters against Google/Outlook, but the
+  // calendar can change between page load and submit. Re-check the exact
+  // requested interval immediately before creating the booking so a stale
+  // browser or crafted request cannot double-book an externally busy time.
+  const externalDate = [
+    String(localParts.year).padStart(4, "0"),
+    String(localParts.month).padStart(2, "0"),
+    String(localParts.day).padStart(2, "0"),
+  ].join("-");
+
+  const externalAvailability = await getConnectedCalendarFreeWindows({
+    orgId: bookingContext.orgId,
+    date: externalDate,
+    timezone: workspaceTz,
+  });
+
+  if (
+    externalAvailability.connected &&
+    !slotFitsFreeWindows(
+      bookingStart.toISOString(),
+      bookingContext.durationMinutes,
+      externalAvailability.windows,
+    )
+  ) {
+    return rejectAndThrow("external_calendar_conflict", {
+      requested_start: bookingStart.toISOString(),
+      requested_end: slotEnd.toISOString(),
+      workspace_timezone: workspaceTz,
+    });
+  }
+
+  const provider = await resolveBookingProvider(null);
+
+  // Final reservation gate: acquire a transaction-scoped advisory lock,
+  // re-check SeldonFrame overlaps, then insert the booking in the same
+  // Neon raw transaction. This closes the concurrent public-submit race.
+  const bookingStatus = bookingContext.price > 0 ? "pending_payment" : "scheduled";
+  let createdBookingId: string | null = null;
+  // Tracks whether booking.created was already emitted so the downstream
+  // block below skips its own emit to avoid double-firing confirmations.
+  let helperEmittedBookingCreated = false;
+  const publicBookingFullName =
+    contactId
+      ? [firstName, lastName].filter((part): part is string => Boolean(part)).join(" ") || null
+      : fullName;
+  const reservation = await reservePublicBookingSlotAtomically({
+    orgId: bookingContext.orgId,
+    bookingSlug,
+    localBookingDate: externalDate,
+    contactId,
+    title: "Booked consultation",
+    fullName: publicBookingFullName,
+    email: effectiveEmail,
+    notes: notes ?? null,
+    provider,
+    status: bookingStatus,
+    startsAt: bookingStart,
+    endsAt: slotEnd,
+    metadata: {
+      source: "public_page",
+      appointmentType: bookingContext.appointmentName,
+      durationMinutes: bookingContext.durationMinutes,
+      price: bookingContext.price,
+      intakeResponses: intakeResponses ?? {},
+    },
+  });
+  if (!reservation) {
+    return rejectAndThrow("slot_already_booked", {
+      requested_start: bookingStart.toISOString(),
+      requested_end: slotEnd.toISOString(),
+      lock_scope: "org_local_booking_date",
+    });
+  }
+  createdBookingId = reservation.bookingId;
+  helperEmittedBookingCreated = bookingStatus === "scheduled";
+  if (helperEmittedBookingCreated && contactId) {
+    try {
+      await emitSeldonEvent(
+        "booking.created",
+        {
+          appointmentId: createdBookingId,
+          contactId,
+        },
+        { orgId: bookingContext.orgId },
+      );
+    } catch (err) {
+      console.error(
+        JSON.stringify({
+          event: "public_booking.booking_created_event_failed",
+          orgId: bookingContext.orgId,
+          bookingId: createdBookingId,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    }
+  }
+  const createdBooking = createdBookingId ? { id: createdBookingId } : null;
+
+  if (createdBooking?.id) {
+    if (bookingContext.price > 0) {
+      const checkout = await createBookingCheckoutSession({
+        orgId: bookingContext.orgId,
+        bookingId: createdBooking.id,
+        contactId,
+        // Voice R1 — a phone-only caller may book a paid type; Stripe accepts
+        // an empty email (just won't prefill it). Confirmation/receipt then
+        // rides SMS via the booking.created trigger.
+        customerEmail: effectiveEmail ?? "",
+        amount: bookingContext.price,
+        successPath: `/book/${orgSlug}/${bookingSlug}?success=1`,
+        cancelPath: `/book/${orgSlug}/${bookingSlug}?canceled=1`,
+      });
+
+      return {
+        success: true,
+        bookingId: createdBooking.id,
+        startsAt: bookingStart.toISOString(),
+        confirmationMessage: bookingContext.confirmationMessage,
+        checkoutUrl: checkout.checkoutUrl,
+      };
+    }
+
+    const [bookingRow] = await db
+      .select({
+        id: bookings.id,
+        title: bookings.title,
+        notes: bookings.notes,
+        startsAt: bookings.startsAt,
+        endsAt: bookings.endsAt,
+        userId: bookings.userId,
+        provider: bookings.provider,
+      })
+      .from(bookings)
+      .where(and(eq(bookings.orgId, bookingContext.orgId), eq(bookings.id, createdBooking.id)))
+      .limit(1);
+
+    const fallbackMeetingUrl = buildMeetingUrl(provider, createdBooking.id);
+    let externalEventId: string | null = fallbackMeetingUrl ? createdBooking.id : null;
+    let meetingUrl: string | null = fallbackMeetingUrl;
+
+    if (bookingRow?.provider === "google-calendar") {
+      const googleSynced = await syncBookingWithGoogleCalendar({
+        bookingId: bookingRow.id,
+        userId: bookingRow.userId,
+        title: bookingRow.title,
+        notes: bookingRow.notes,
+        startsAt: bookingRow.startsAt,
+        endsAt: bookingRow.endsAt,
+      });
+
+      if (googleSynced.externalEventId || googleSynced.meetingUrl) {
+        externalEventId = googleSynced.externalEventId;
+        meetingUrl = googleSynced.meetingUrl;
+      }
+    }
+
+    if (meetingUrl || externalEventId) {
+      await db
+        .update(bookings)
+        .set({ meetingUrl, externalEventId, updatedAt: new Date() })
+        .where(and(eq(bookings.orgId, bookingContext.orgId), eq(bookings.id, createdBooking.id)));
+    }
+
+    if (contactId) {
+      // 2026-05-19 (Phase 3 Task 3.3) — when the shared helper ran, it
+      // already emitted booking.created; only emit here in the orphan
+      // / legacy-template fallback paths to preserve semantics.
+      if (!helperEmittedBookingCreated) {
+        await emitSeldonEvent("booking.created", {
+          appointmentId: createdBooking.id,
+          contactId,
+        }, { orgId: bookingContext.orgId });
+      }
+
+      // v1.28.4 — fire-and-forget the post-booking 24h reminder workflow.
+      // bookingReminderWorkflow durably sleeps until startsAt-24h, then
+      // sends an SMS (if Twilio configured) or email (if Resend); writes
+      // an activity row in either case. Skips internally if the booking
+      // is already <24h away or gets cancelled before fire time.
+      try {
+        const { start } = await import("workflow/api");
+        const { bookingReminderWorkflow } = await import(
+          "@/lib/workflows/booking-reminder"
+        );
+        await start(bookingReminderWorkflow, [createdBooking.id]);
+      } catch (err) {
+        // Don't fail the booking on workflow trigger errors. Log and
+        // continue — the booking row exists; the reminder is best-effort.
+        console.error(
+          `[submitPublicBookingAction] booking_reminder_workflow_start_failed bookingId=${createdBooking.id} err=${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      // v1.3.4 — surface the booking in the CRM pipeline kanban.
+      //
+      // Root-cause fix for "bookings don't appear in /deals after a
+      // visitor books on the public page": until now,
+      // `submitPublicBookingAction` only inserted into `bookings` +
+      // `activities` + `contacts`. The kanban reads `deals`, so the
+      // visitor's expressed intent never showed up where operators
+      // actually triage their pipeline.
+      //
+      // Design choices:
+      //   - Use the org's default pipeline. `ensureDefaultPipelineForOrg`
+      //     lazy-seeds one if missing, so legacy workspaces created
+      //     before pipeline-seeding was wired into createAnonymousWorkspace
+      //     still get a kanban entry.
+      //   - Land the deal at the FIRST stage (Lead / "New Lead" /
+      //     equivalent) — operators move it through their funnel as
+      //     the booking becomes a paying customer.
+      //   - Use the booking price as the deal value. For free
+      //     consultations this lands at $0; operators can edit later.
+      //   - Stamp `customFields.bookingId` so future booking events
+      //     (no-show, completed, canceled) can reconcile back to this
+      //     deal instead of creating duplicates.
+      //   - Wrap in try/catch + structured log: a deal-insert failure
+      //     must NOT roll back the booking itself. The visitor's
+      //     booking is the contract; the kanban entry is operator UX.
+      let createdDealId: string | null = null;
+      try {
+        const pipeline = await ensureDefaultPipelineForOrg(bookingContext.orgId);
+        // v1.5.1 — smart stage selection. A booking that just landed in
+        // the system represents a confirmed appointment, NOT a cold
+        // inquiry. Pre-1.5.1 we landed every deal at index 0 ("Lead" /
+        // "Inquiry"), which made the kanban inaccurate the moment a
+        // visitor booked — operators had to manually move every deal up
+        // a stage. Now we look for a stage whose name suggests
+        // "appointment confirmed" (booked / scheduled / trial /
+        // appointment / consultation) and use it; fall back to first
+        // stage when no such stage exists. Personalities that DO declare
+        // a "Trial Lesson Booked" / "Estimate Scheduled" / "Consult
+        // Booked" stage automatically get the right behavior; everything
+        // else lands at first stage as before.
+        const stages = pipeline.stages ?? [];
+        const selectedStage = selectPublicBookingDealStage(stages);
+        const stageName = selectedStage.stage;
+        const stageProbability = selectedStage.probability;
+
+        const [createdDeal] = await db
+          .insert(deals)
+          .values({
+            orgId: bookingContext.orgId,
+            contactId,
+            pipelineId: pipeline.id,
+            title: `${bookingContext.appointmentName} — ${fullName}`,
+            stage: stageName,
+            probability: stageProbability,
+            value: String(bookingContext.price ?? 0),
+            customFields: {
+              source: "public-booking",
+              bookingId: createdBooking.id,
+              bookingSlug,
+              appointmentName: bookingContext.appointmentName,
+              durationMinutes: bookingContext.durationMinutes,
+              startsAt: bookingStart.toISOString(),
+            },
+          })
+          .returning({ id: deals.id });
+        createdDealId = createdDeal?.id ?? null;
+
+        console.log(
+          JSON.stringify({
+            event: "public_booking_deal_created",
+            ...baseLogContext,
+            booking_id: createdBooking.id,
+            deal_id: createdDeal?.id ?? null,
+            pipeline_id: pipeline.id,
+            stage: stageName,
+            stage_match: selectedStage.matched ? "smart" : "first_stage_fallback",
+            available_stages: stages.map((s) => s.name),
+          }),
+        );
+      } catch (err) {
+        // Deal insertion failed — log but don't roll back. The
+        // booking is already saved; an operator can manually create
+        // a deal from the booking row in the admin UI if needed.
+        console.error(
+          JSON.stringify({
+            event: "public_booking_deal_failed",
+            ...baseLogContext,
+            booking_id: createdBooking.id,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+      }
+
+      try {
+        await createPublicBookingActivityProjection(
+          {
+            orgId: bookingContext.orgId,
+            contactId,
+            dealId: createdDealId,
+            bookingId: createdBooking.id,
+            bookingSlug,
+            appointmentName: bookingContext.appointmentName,
+            startsAt: bookingStart,
+            notes: notes ?? null,
+            intakeResponses: responses,
+          },
+          {
+            resolveActivityUserId: (orgId) =>
+              resolveOrgActivityUserId(orgId, makeDefaultActivityUserResolverDeps()),
+            createActivity: async (values) => {
+              await db.insert(activities).values({
+                orgId: values.orgId,
+                userId: values.userId,
+                contactId: values.contactId,
+                dealId: values.dealId,
+                type: values.type,
+                subject: values.subject,
+                body: values.body,
+                metadata: values.metadata,
+                scheduledAt: values.scheduledAt,
+              });
+            },
+            log: (event, level) => {
+              const line = JSON.stringify({ ...event, ...baseLogContext });
+              if (level === "error") console.error(line);
+              else if (level === "warn") console.warn(line);
+              else console.log(line);
+            },
+          },
+        );
+      } catch (err) {
+        console.error(
+          JSON.stringify({
+            event: "public_booking_activity_failed",
+            ...baseLogContext,
+            booking_id: createdBooking.id,
+            contact_id: contactId,
+            deal_id: createdDealId,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+      }
+
+      // v1.6.0 — brain trigger: append a dated observation to the
+      // workspace's pipeline/booked-appointments.md note. Over time this
+      // becomes a record of "what kinds of customers actually book us"
+      // that the IDE agent reads when generating future blocks (e.g.
+      // hero copy that highlights the demographic that's actually
+      // converting). Best-effort — failures don't roll back the booking.
+      try {
+        const { appendToBrainNote } = await import("@/lib/brain/store");
+        const localTime = (() => {
+          try {
+            const parts = partsInTimezone(bookingStart, workspaceTz);
+            return `${parts.weekday} ${parts.hour}:${String(parts.minute).padStart(2, "0")}`;
+          } catch {
+            return bookingStart.toISOString();
+          }
+        })();
+        await appendToBrainNote({
+          orgId: bookingContext.orgId,
+          scope: "workspace",
+          path: "pipeline/booked-appointments.md",
+          paragraph: `**${bookingContext.appointmentName}** booked for ${localTime} (${workspaceTz}). Lead source: public-booking. Email domain: ${effectiveEmail ? effectiveEmail.split("@")[1] ?? "unknown" : "n/a (phone booking)"}.`,
+          metadata: {
+            type: "fact",
+            tags: ["booking", "conversion"],
+            source: `trigger:booking.created:${createdBooking.id}`,
+            related_block_types: ["hero", "cta", "booking"],
+          },
+        });
+      } catch (err) {
+        console.warn(
+          JSON.stringify({
+            event: "brain_trigger_booking_failed",
+            ...baseLogContext,
+            booking_id: createdBooking.id,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+      }
+    }
+  }
+
+  return {
+    success: true,
+    bookingId: createdBooking?.id ?? null,
+    startsAt: bookingStart.toISOString(),
+    confirmationMessage: bookingContext.confirmationMessage,
+    checkoutUrl: null as string | null,
+  };
+}
+
+// ─── TASK A: the reschedule gate `shouldSendRescheduleEmail` lives in
+//     ./calendar-math (imported above as shouldSendRescheduleEmailPure). It is
+//     NOT re-exported here — a "use server" file may only export async functions.
+
+// ─── TASK A: reschedule booking action ────────────────────────────────────────
+
+export async function rescheduleBookingAction(input: {
+  bookingId: string;
+  newStartsAtISO: string;
+  notify: boolean;
+}): Promise<{ ok: true } | { ok: false; error: "not_found" | "conflict" }> {
+  const orgId = await getOrgId();
+  if (!orgId) return { ok: false, error: "not_found" };
+
+  const [current] = await db
+    .select()
+    .from(bookings)
+    .where(
+      and(
+        eq(bookings.orgId, orgId),
+        eq(bookings.id, input.bookingId),
+        ne(bookings.status, "template"),
+      ),
+    )
+    .limit(1);
+  if (!current) return { ok: false, error: "not_found" };
+
+  const newStart = new Date(input.newStartsAtISO);
+  // Ensure startsAt/endsAt are Date objects (Drizzle may return strings).
+  const oldStart = current.startsAt instanceof Date ? current.startsAt : new Date(current.startsAt);
+  const oldEnd = current.endsAt instanceof Date ? current.endsAt : new Date(current.endsAt);
+  const newEnd = computeRescheduledEnd(oldStart, oldEnd, newStart);
+
+  const others = await db
+    .select({ id: bookings.id, startsAt: bookings.startsAt, endsAt: bookings.endsAt })
+    .from(bookings)
+    .where(
+      and(
+        eq(bookings.orgId, orgId),
+        ne(bookings.id, current.id),
+        inArray(bookings.status, [...PUBLIC_BOOKING_BLOCKING_STATUSES]),
+      ),
+    );
+
+  const conflict = others.some((r) => {
+    const rStart = r.startsAt instanceof Date ? r.startsAt : new Date(r.startsAt);
+    const rEnd = r.endsAt instanceof Date ? r.endsAt : new Date(r.endsAt);
+    return intervalsOverlap(newStart, newEnd, rStart, rEnd);
+  });
+  if (conflict) return { ok: false, error: "conflict" };
+
+  await db
+    .update(bookings)
+    .set({ startsAt: newStart, endsAt: newEnd, updatedAt: new Date() })
+    .where(and(eq(bookings.orgId, orgId), eq(bookings.id, current.id)));
+
+  if (
+    shouldSendRescheduleEmailPure({
+      notify: input.notify,
+      contactId: current.contactId,
+      status: current.status,
+    })
+  ) {
+    await sendBookingRescheduleEmail({
+      orgId,
+      bookingId: current.id,
+      oldStartsAt: oldStart,
+      newStartsAt: newStart,
+    }).catch(() => {});
+  }
+
+  revalidatePath("/bookings");
+  return { ok: true };
+}
+
+// ─── TASK B: create blocked-time action ───────────────────────────────────────
+
+export async function createBlockedTimeAction(input: {
+  label: string;
+  startsAtISO: string;
+  durationMinutes: number;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const orgId = await getOrgId();
+  if (!orgId) return { ok: false, error: "not_found" };
+
+  const startsAt = new Date(input.startsAtISO);
+  const endsAt = new Date(startsAt.getTime() + input.durationMinutes * 60_000);
+
+  await db.insert(bookings).values({
+    orgId,
+    title: input.label.trim() || "Blocked",
+    status: "blocked",
+    contactId: null,
+    provider: "manual",
+    bookingSlug: "blocked",
+    startsAt,
+    endsAt,
+  });
+
+  revalidatePath("/bookings");
+  return { ok: true };
+}

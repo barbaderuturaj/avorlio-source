@@ -1,0 +1,322 @@
+// ChatGPT App MCP — the DI'd request handler core.
+//
+// This is the method-dispatch flow for the PUBLIC ChatGPT MCP server, lifted out
+// of the route into a dependency-injected function returning a plain
+// { status, body }. The route (app/api/chatgpt/mcp/route.ts) is a thin wrapper
+// that binds the REAL deps (createAnonymousWorkspace + IP rate-limit,
+// listMarketplaceAgentsFromDb, the bearer→org resolve + agent clone) and maps
+// the result onto NextResponse.
+//
+// Mirrors lib/marketplace/agent-mcp-handler.ts, but:
+//   - NO auth gate. The ChatGPT server is public/keyless by design (the magic
+//     first-run vision). build_workspace mints an anonymous workspace bearer
+//     that threads deploy_agent later in the SAME conversation.
+//   - Three high-level tools (build/browse/deploy) instead of the rental `ask`.
+//   - Every tools/call emits BOTH a human `content` text block AND a
+//     `structuredContent` object so Apps-SDK clients can render rich UI.
+//
+// WHY DI not module-mocking: the repo prefers dependency injection over
+// node:test mock.module (tsx's CJS interop makes mock.module unreliable). So all
+// branching (each tool, validation errors, a dep that throws, a dep that returns
+// ok:false) is exercised with fakes — no real DB, no network.
+
+import {
+  parseJsonRpcRequest,
+  jsonRpcResult,
+  jsonRpcError,
+  toolTextResult,
+  buildInitializeResult,
+  JSONRPC_METHOD_NOT_FOUND,
+  JSONRPC_INVALID_PARAMS,
+  type JsonRpcId,
+} from "@/lib/marketplace/agent-mcp-rpc";
+import {
+  buildChatGptToolsList,
+  parseBuildWorkspaceArgs,
+  parseBrowseArgs,
+  parseDeployArgs,
+  extractOpenAiMeta,
+  formatMarketplaceList,
+  formatBuildResult,
+  formatDeployResult,
+  BUILD_WORKSPACE_TOOL,
+  BROWSE_MARKETPLACE_TOOL,
+  DEPLOY_AGENT_TOOL,
+  type BuildWorkspaceArgs,
+  type OpenAiCallMeta,
+} from "./chatgpt-mcp-rpc";
+import { CHATGPT_WIDGET_RESOURCES, getChatGptWidgetResourceContent } from "./widgets";
+import type { MarketplaceAgentRow } from "@/lib/marketplace/agent-listings";
+import { captureMcpToolCall } from "@/lib/analytics/mcp-capture";
+
+/** MCP server `instructions` (returned on initialize). ChatGPT + Codex read this
+ *  alongside the tool metadata to understand the cross-tool flow. Kept concise +
+ *  self-contained in the first ~512 chars per the Apps SDK guidance. */
+export const CHATGPT_SERVER_INSTRUCTIONS =
+  "SeldonFrame builds a complete front office (public website, booking page, intake form, CRM, and AI chatbot) for a local service business from one short description, then lets you add free AI agents to it. Typical flow: call build_workspace first to create the workspace and get a workspace_token, then browse_marketplace to list free agents, then deploy_agent with that token plus an agent slug. build_workspace needs no login and returns a live public URL. This server never charges a card and never links out to make a purchase.";
+
+/** The result of building an anonymous workspace (the route maps the real
+ *  createAnonymousWorkspace return onto this). The workspaceToken threads
+ *  deploy_agent later in the same conversation. */
+export type BuildWorkspaceResult = {
+  url: string;
+  claimUrl?: string;
+  workspaceToken: string;
+  /** The business name, as given. Additive field (2026-07-15 widgets v2) —
+   *  rendered on the build-result widget alongside the live URL. */
+  name?: string;
+};
+
+/** The result of deploying an agent. Free agents instantiate inline (url).
+ *  ok:false carries a friendly error — including "this agent isn't available
+ *  to install through ChatGPT" for a paid/non-free agent. NEVER carries a
+ *  claim/purchase URL or a price; paid agents are managed on seldonframe.com,
+ *  not through ChatGPT. */
+export type DeployAgentResult = {
+  ok: boolean;
+  name?: string;
+  url?: string;
+  error?: string;
+};
+
+export type ChatGptMcpDeps = {
+  /** Create a complete anonymous workspace from the parsed build args. Rate-
+   *  limits per ChatGPT user via meta.subject (_meta["openai/subject"]) with a
+   *  coarse per-IP backstop — see rate-limit-plan.ts (throws a friendly Error
+   *  on limit → surfaces as a tool isError). */
+  buildWorkspace: (args: BuildWorkspaceArgs, meta: OpenAiCallMeta) => Promise<BuildWorkspaceResult>;
+  /** List published marketplace agents, filtered. Public — no auth. */
+  browse: (filters: { query?: string; niche?: string }) => Promise<MarketplaceAgentRow[]>;
+  /** Deploy an agent into the workspace identified by the bearer token. */
+  deploy: (args: { workspaceToken: string; slug: string }) => Promise<DeployAgentResult>;
+  /** Current time (injected for determinism). */
+  now: () => Date;
+};
+
+export type RpcOutcome = {
+  status: number;
+  /** null body → 202/no-content (notification ack). */
+  body: Record<string, unknown> | null;
+};
+
+/** Shape an MCP tools/call success: a human text block PLUS structuredContent
+ *  (the raw machine-readable object) for Apps-SDK clients that render rich UI,
+ *  PLUS an optional top-level `_meta` — the WIDGET-ONLY channel (delivered to
+ *  the rendered component, never to the model — unlike structuredContent,
+ *  which is model-visible and must mirror the declared outputSchema exactly). */
+function toolResult(
+  text: string,
+  structured: Record<string, unknown>,
+  meta?: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...toolTextResult(text),
+    structuredContent: structured,
+    ...(meta ? { _meta: meta } : {}),
+  };
+}
+
+/**
+ * Handle one JSON-RPC request against the public ChatGPT MCP server. Pure over
+ * its deps: parse → (notification ack) → route method. tools/list + tools/call
+ * are PUBLIC (no auth gate). Returns { status, body }.
+ */
+export async function handleChatGptRpc(rawBody: string, deps: ChatGptMcpDeps): Promise<RpcOutcome> {
+  const parsed = parseJsonRpcRequest(rawBody);
+  if (!parsed.ok) {
+    return { status: 200, body: jsonRpcError(parsed.id, parsed.error.code, parsed.error.message) };
+  }
+  const { id, method, params, isNotification } = parsed.request;
+
+  // Notifications (e.g. notifications/initialized) get a 202 + no body.
+  if (isNotification) {
+    return { status: 202, body: null };
+  }
+
+  switch (method) {
+    case "initialize":
+      return {
+        status: 200,
+        body: jsonRpcResult(id, {
+          ...buildInitializeResult({ agentName: "SeldonFrame" }),
+          // This server ALSO speaks resources/list + resources/read (the two
+          // widget resources) — advertise the capability. buildInitializeResult
+          // is shared with the agent-marketplace rental endpoint (which does
+          // NOT support resources), so we add it here rather than in the
+          // shared helper.
+          capabilities: { tools: {}, prompts: {}, resources: {} },
+          instructions: CHATGPT_SERVER_INSTRUCTIONS,
+        }),
+      };
+
+    case "ping":
+      return { status: 200, body: jsonRpcResult(id, {}) };
+
+    case "tools/list":
+      // Public — no auth gate. ChatGPT discovers the three tools freely.
+      return { status: 200, body: jsonRpcResult(id, buildChatGptToolsList()) };
+
+    case "tools/call":
+      return handleToolsCall(id, params, deps);
+
+    case "resources/list":
+      // Public — no auth gate, same as tools/list. The two widget resources
+      // (build-result card + agent carousel).
+      return {
+        status: 200,
+        body: jsonRpcResult(id, {
+          resources: CHATGPT_WIDGET_RESOURCES.map(({ uri, name, description, mimeType }) => ({
+            uri,
+            name,
+            description,
+            mimeType,
+          })),
+        }),
+      };
+
+    case "resources/read": {
+      const uri = typeof params.uri === "string" ? params.uri : "";
+      const content = getChatGptWidgetResourceContent(uri);
+      if (!content) {
+        return {
+          status: 200,
+          body: jsonRpcError(id, JSONRPC_INVALID_PARAMS, `Unknown resource: ${uri || "(none)"}`),
+        };
+      }
+      return { status: 200, body: jsonRpcResult(id, { contents: [content] }) };
+    }
+
+    default:
+      return { status: 200, body: jsonRpcError(id, JSONRPC_METHOD_NOT_FOUND, `Method not found: ${method}`) };
+  }
+}
+
+async function handleToolsCall(
+  id: JsonRpcId,
+  params: Record<string, unknown>,
+  deps: ChatGptMcpDeps,
+): Promise<RpcOutcome> {
+  const toolName = typeof params.name === "string" ? params.name : "";
+  const args =
+    typeof params.arguments === "object" && params.arguments !== null && !Array.isArray(params.arguments)
+      ? (params.arguments as Record<string, unknown>)
+      : {};
+  // OpenAI stamps _meta["openai/subject"] (anonymized per-user id — the
+  // rate-limit + analytics key) and _meta["openai/session"] on tool calls.
+  const meta = extractOpenAiMeta(params);
+
+  switch (toolName) {
+    case BUILD_WORKSPACE_TOOL: {
+      const parsed = parseBuildWorkspaceArgs(args);
+      if (!parsed.ok) {
+        return { status: 200, body: jsonRpcError(id, JSONRPC_INVALID_PARAMS, `Invalid params: ${parsed.error}`) };
+      }
+      return runTool(id, toolName, args, meta, deps, async () => {
+        const result = await deps.buildWorkspace(parsed.value, meta);
+        // The widget reads the token from result._meta (widget-only channel,
+        // hidden from the model). structuredContent ALSO carries workspaceToken
+        // (an existing, required outputSchema field) — kept for backward
+        // compatibility per the additive-only contract; see the task report
+        // for the tradeoff.
+        return toolResult(formatBuildResult(result), { ...result }, {
+          "seldonframe/workspaceToken": result.workspaceToken,
+        });
+      });
+    }
+
+    case BROWSE_MARKETPLACE_TOOL: {
+      const parsed = parseBrowseArgs(args);
+      if (!parsed.ok) {
+        return { status: 200, body: jsonRpcError(id, JSONRPC_INVALID_PARAMS, `Invalid params: ${parsed.error}`) };
+      }
+      return runTool(id, toolName, args, meta, deps, async () => {
+        const rows = await deps.browse(parsed.value);
+        // structuredContent mirrors the DECLARED output schema exactly — the
+        // raw MarketplaceAgentRow carries extra columns (price, rating, …)
+        // that the free-utility surface deliberately does not emit.
+        const agents = rows.map((row) => ({
+          slug: row.slug,
+          name: row.name,
+          description: row.description,
+          niche: row.niche,
+        }));
+        return toolResult(formatMarketplaceList(rows), { agents });
+      });
+    }
+
+    case DEPLOY_AGENT_TOOL: {
+      const parsed = parseDeployArgs(args);
+      if (!parsed.ok) {
+        return { status: 200, body: jsonRpcError(id, JSONRPC_INVALID_PARAMS, `Invalid params: ${parsed.error}`) };
+      }
+      return runTool(id, toolName, args, meta, deps, async () => {
+        const result = await deps.deploy({ workspaceToken: parsed.value.workspace_token, slug: parsed.value.agent_slug });
+        if (!result.ok) {
+          // A handled failure (e.g. expired token, unknown slug) → tool-level
+          // isError, NOT a transport error. The text is the friendly message.
+          return toolTextResult(result.error ?? "Could not deploy that agent.", true);
+        }
+        return toolResult(
+          formatDeployResult({ name: result.name ?? "the agent", url: result.url }),
+          { ...result },
+        );
+      });
+    }
+
+    default:
+      return {
+        status: 200,
+        body: jsonRpcError(
+          id,
+          JSONRPC_METHOD_NOT_FOUND,
+          `Unknown tool: ${toolName || "(none)"}. Valid tools: ${BUILD_WORKSPACE_TOOL}, ${BROWSE_MARKETPLACE_TOOL}, ${DEPLOY_AGENT_TOOL}.`,
+        ),
+      };
+  }
+}
+
+/**
+ * Run a tool body, converting any THROW into a tool-level isError result (HTTP
+ * 200) rather than a transport 500. This is the fail-safe boundary: a rate-limit
+ * throw from buildWorkspace, a DB hiccup in browse, etc. all surface to ChatGPT
+ * as a readable error inside the assistant turn — the connection stays healthy.
+ */
+async function runTool(
+  id: JsonRpcId,
+  toolName: string,
+  args: Record<string, unknown>,
+  meta: OpenAiCallMeta,
+  deps: ChatGptMcpDeps,
+  body: () => Promise<Record<string, unknown>>,
+): Promise<RpcOutcome> {
+  const startedAt = Date.now();
+  // PostHog MCP-analytics ($mcp_tool_call) — fire-and-silent, no-op without a
+  // configured key, never blocks/throws into this response path. This server
+  // is public/keyless (no bearer, no resolvable org at call time — see the
+  // file header). OpenAI's anonymized per-user subject (when present) becomes
+  // the distinct id so one ChatGPT user's build→browse→deploy funnel
+  // correlates; otherwise fall back to "anonymous" per the helper's contract.
+  const capture = (success: boolean, errorCode?: string) =>
+    captureMcpToolCall({
+      surface: "chatgpt",
+      tool: toolName,
+      distinctId: meta.subject ? `openai_${meta.subject}` : "anonymous",
+      orgId: null,
+      success,
+      durationMs: Date.now() - startedAt,
+      errorCode: errorCode ?? null,
+      argKeys: Object.keys(args),
+    });
+
+  try {
+    const result = await body();
+    const isToolError = (result as { isError?: boolean }).isError === true;
+    capture(!isToolError, isToolError ? "tool_error" : undefined);
+    return { status: 200, body: jsonRpcResult(id, result) };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[chatgpt-mcp] tool_error ts=${deps.now().toISOString()} err=${message}`);
+    capture(false, "exception");
+    return { status: 200, body: jsonRpcResult(id, toolTextResult(message, true)) };
+  }
+}

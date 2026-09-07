@@ -1,0 +1,364 @@
+"use server";
+
+import { and, eq, sql } from "drizzle-orm";
+import { revalidatePath } from "next/cache";
+import { db } from "@/db";
+import { contacts, intakeForms, intakeSubmissions, organizations } from "@/db/schema";
+import { getOrgId } from "@/lib/auth/helpers";
+import { getSoul } from "@/lib/soul/server";
+import { emitSeldonEvent } from "@/lib/events/bus";
+import { dispatchWebhook } from "@/lib/utils/webhooks";
+import { assertWritable } from "@/lib/demo/server";
+import type { IntakeFormField } from "@/db/schema/intake-forms";
+import { validatePublicIntakeAnswers } from "@/lib/forms/validation";
+
+function toSlug(value: string) {
+  return (
+    value
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9\s-]/g, "")
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-") || "intake-form"
+  );
+}
+
+function normalizeFields(input: unknown): IntakeFormField[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  const normalized: IntakeFormField[] = [];
+
+  for (const item of input) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+
+    const field = item as {
+      key?: unknown;
+      label?: unknown;
+      type?: unknown;
+      required?: unknown;
+      options?: unknown;
+    };
+
+    const label = String(field.label ?? "").trim();
+
+    if (!label) {
+      continue;
+    }
+
+    const key = String(field.key ?? "").trim() || toSlug(label || "field");
+    const type = String(field.type ?? "text").trim() || "text";
+    const required = Boolean(field.required);
+    const options = Array.isArray(field.options)
+      ? field.options.map((option) => String(option).trim()).filter(Boolean)
+      : undefined;
+
+    normalized.push({
+      key,
+      label,
+      type,
+      required,
+      options: options && options.length > 0 ? options : undefined,
+    });
+  }
+
+  return normalized;
+}
+
+export async function listForms() {
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    return [];
+  }
+
+  return db
+    .select({
+      id: intakeForms.id,
+      orgId: intakeForms.orgId,
+      name: intakeForms.name,
+      slug: intakeForms.slug,
+      fields: intakeForms.fields,
+      settings: intakeForms.settings,
+      contentHtml: intakeForms.contentHtml,
+      contentCss: intakeForms.contentCss,
+      isActive: intakeForms.isActive,
+      createdAt: intakeForms.createdAt,
+      updatedAt: intakeForms.updatedAt,
+      submissionCount: sql<number>`count(${intakeSubmissions.id})::int`,
+    })
+    .from(intakeForms)
+    .leftJoin(intakeSubmissions, eq(intakeSubmissions.formId, intakeForms.id))
+    .where(eq(intakeForms.orgId, orgId))
+    .groupBy(intakeForms.id);
+}
+
+export async function createSuggestedFormAction() {
+  assertWritable();
+
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const soul = await getSoul();
+
+  if (!soul?.suggestedIntakeForm) {
+    throw new Error("Soul intake template missing");
+  }
+
+  await db.insert(intakeForms).values({
+    orgId,
+    name: soul.suggestedIntakeForm.name,
+    slug: "default-intake",
+    fields: soul.suggestedIntakeForm.fields,
+  });
+  // 2026-05-17 — revalidate the listing page so the new form appears
+  // without an operator-initiated refresh.
+  revalidatePath("/forms");
+}
+
+export async function createFormAction(formData: FormData) {
+  assertWritable();
+
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const name = String(formData.get("name") ?? "").trim() || "New Intake Form";
+  const slugInput = String(formData.get("slug") ?? name);
+  const slug = toSlug(slugInput);
+  const fieldsRaw = String(formData.get("fields") ?? "[]");
+
+  let parsedFields: unknown = [];
+  try {
+    parsedFields = JSON.parse(fieldsRaw);
+  } catch {
+    parsedFields = [];
+  }
+
+  const fields = normalizeFields(parsedFields);
+
+  const [created] = await db
+    .insert(intakeForms)
+    .values({
+      orgId,
+      name,
+      slug,
+      fields,
+    })
+    .returning({ id: intakeForms.id });
+
+  // 2026-05-17 — revalidate /forms list + the new form's edit page so
+  // navigating back from the create-drawer doesn't show a stale list.
+  revalidatePath("/forms");
+  if (created?.id) {
+    revalidatePath(`/forms/${created.id}/edit`);
+  }
+  return { id: created?.id ?? null };
+}
+
+export async function updateFormAction(formData: FormData) {
+  assertWritable();
+
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const formId = String(formData.get("formId") ?? "").trim();
+  const name = String(formData.get("name") ?? "").trim();
+  const slugInput = String(formData.get("slug") ?? "").trim();
+  const fieldsRaw = String(formData.get("fields") ?? "[]");
+
+  if (!formId || !name || !slugInput) {
+    throw new Error("Form ID, name, and slug are required");
+  }
+
+  let parsedFields: unknown = [];
+  try {
+    parsedFields = JSON.parse(fieldsRaw);
+  } catch {
+    parsedFields = [];
+  }
+
+  const fields = normalizeFields(parsedFields);
+
+  await db
+    .update(intakeForms)
+    .set({
+      name,
+      slug: toSlug(slugInput),
+      fields,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(intakeForms.orgId, orgId), eq(intakeForms.id, formId)));
+
+  // 2026-05-17 — revalidate list + this form's edit page so operator
+  // sees their changes immediately on navigation.
+  revalidatePath("/forms");
+  revalidatePath(`/forms/${formId}/edit`);
+  return { success: true };
+}
+
+export async function submitPublicIntakeAction({
+  orgSlug,
+  formSlug,
+  data,
+}: {
+  orgSlug: string;
+  formSlug: string;
+  data: Record<string, unknown>;
+}) {
+  assertWritable();
+
+  const [org] = await db
+    .select({ id: organizations.id })
+    .from(organizations)
+    .where(eq(organizations.slug, orgSlug))
+    .limit(1);
+
+  if (!org) {
+    throw new Error("Organization not found");
+  }
+
+  const [form] = await db
+    .select({ id: intakeForms.id, orgId: intakeForms.orgId })
+    .from(intakeForms)
+    .where(and(eq(intakeForms.orgId, org.id), eq(intakeForms.slug, formSlug)))
+    .limit(1);
+
+  if (!form) {
+    throw new Error("Form not found");
+  }
+
+  const [formFields] = await db
+    .select({ fields: intakeForms.fields })
+    .from(intakeForms)
+    .where(eq(intakeForms.id, form.id))
+    .limit(1);
+  const validationError = validatePublicIntakeAnswers(formFields?.fields ?? [], data);
+  if (validationError) throw new Error(validationError);
+
+  const email = typeof data.email === "string" ? data.email.trim() : null;
+
+  let contactId: string | null = null;
+
+  if (email) {
+    const [existing] = await db
+      .select()
+      .from(contacts)
+      .where(and(eq(contacts.orgId, form.orgId), eq(contacts.email, email)))
+      .limit(1);
+
+    if (existing) {
+      contactId = existing.id;
+    } else {
+      const [created] = await db
+        .insert(contacts)
+        .values({
+          orgId: form.orgId,
+          firstName: String(data.name ?? "New"),
+          email,
+          status: "lead",
+        })
+        .returning();
+
+      contactId = created?.id ?? null;
+
+      if (created?.id) {
+        await emitSeldonEvent("contact.created", { contactId: created.id }, { orgId: form.orgId });
+      }
+    }
+  }
+
+  await db.insert(intakeSubmissions).values({
+    orgId: form.orgId,
+    formId: form.id,
+    contactId,
+    data,
+  });
+
+  await dispatchWebhook({
+    orgId: form.orgId,
+    event: "intake.submitted",
+    payload: { orgSlug, formSlug, data, contactId },
+  });
+
+  if (contactId) {
+    await emitSeldonEvent("form.submitted", {
+      formId: form.id,
+      contactId,
+      data,
+    }, { orgId: form.orgId });
+
+    // 2026-06-25 — unified agent model P1 (T4): a submitted intake form IS a new
+    // lead. Emit the canonical `lead.created` event (the builder's KNOWN_EVENTS
+    // "new lead" slug) so any event-triggered agent — the speed-to-lead instant
+    // acknowledgement — fires. We carry orgId in the payload because the
+    // in-memory bus listener can't see emit-options.orgId. Additive: existing
+    // form.submitted consumers are untouched.
+    await emitSeldonEvent("lead.created", {
+      contactId,
+      orgId: form.orgId,
+      source: "form.submitted",
+      formId: form.id,
+    }, { orgId: form.orgId });
+  }
+
+  return { success: true };
+}
+
+/**
+ * P0-1: list intake submissions for the current operator's workspace,
+ * with the linked contact joined in. Used by /dashboard/forms/[id] to
+ * surface customer-submitted intake responses (previously invisible —
+ * the data landed in `intake_submissions` but no UI ever read it).
+ *
+ * Pass `formId` to scope to a single form, or omit to get every
+ * submission for the workspace (useful for a top-level inbox view).
+ *
+ * Returns rows newest-first; capped to 100 to keep server-component
+ * pages snappy. Operators wanting more should hit the API.
+ */
+export async function listIntakeSubmissions(opts: { formId?: string } = {}) {
+  const orgId = await getOrgId();
+  if (!orgId) return [];
+
+  const conditions = [eq(intakeSubmissions.orgId, orgId)];
+  if (opts.formId) conditions.push(eq(intakeSubmissions.formId, opts.formId));
+
+  const rows = await db
+    .select({
+      id: intakeSubmissions.id,
+      formId: intakeSubmissions.formId,
+      contactId: intakeSubmissions.contactId,
+      data: intakeSubmissions.data,
+      createdAt: intakeSubmissions.createdAt,
+      contactFirstName: contacts.firstName,
+      contactLastName: contacts.lastName,
+      contactEmail: contacts.email,
+      contactPhone: contacts.phone,
+      contactStatus: contacts.status,
+      formName: intakeForms.name,
+      formSlug: intakeForms.slug,
+    })
+    .from(intakeSubmissions)
+    .leftJoin(contacts, eq(intakeSubmissions.contactId, contacts.id))
+    .leftJoin(intakeForms, eq(intakeSubmissions.formId, intakeForms.id))
+    .where(conditions.length === 1 ? conditions[0] : and(...conditions))
+    .orderBy(intakeSubmissions.createdAt)
+    .limit(100);
+
+  // Drizzle `orderBy` without explicit direction defaults to ASC; we
+  // want newest-first. Reverse here rather than importing `desc` for
+  // one call site.
+  return rows.reverse();
+}

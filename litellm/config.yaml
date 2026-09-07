@@ -1,0 +1,38 @@
+model_list:
+  - model_name: claude-opus-4-7
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+
+  - model_name: claude-haiku-4-5
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: gemini/gemini-3.5-flash-lite
+      api_key: os.environ/GEMINI_API_KEY
+
+  - model_name: claude-sonnet-4-5-20250929
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+
+  - model_name: claude-sonnet-4-20250514
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+
+  - model_name: claude-3-5-sonnet-latest
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+
+router_settings:
+  num_retries: 5
+  retry_after: 10
+  timeout: 120
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

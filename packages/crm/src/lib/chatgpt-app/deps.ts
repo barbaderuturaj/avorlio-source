@@ -1,0 +1,355 @@
+// ChatGPT App MCP — the REAL dependency factory.
+//
+// Binds the DI'd handler (chatgpt-mcp-handler.ts) to the EXISTING SeldonFrame
+// functions. This module is the ONLY place in the ChatGPT path that touches the
+// DB / env / rate-limiter — the handler + wire layer stay pure and unit-tested.
+//
+// NOT a "use server" file (it exports a const factory + plain async functions),
+// so it can export non-async values. The route imports buildRealDeps() and
+// hands the result to handleChatGptRpc.
+//
+// FREE-UTILITY ONLY + COMMERCE-FREE (OpenAI App-policy compliance): deploy()
+// NEVER charges and NEVER links out to a purchase. browse() returns ONLY free
+// agents, deploy() installs ONLY free agents, and a paid/non-free slug returns
+// a friendly ok:false message with NO claim/purchase URL, NO price, and NO CTA.
+// No Stripe call, no checkout, no outbound purchase direction — so the app's
+// "links/directs users out to make purchases" answer is NO.
+//
+// "Free" is decided via storefrontPriceFromRow(...).isPaid — the SAME
+// model-aware pricing read the storefront uses — NOT the raw `price` column.
+// A listing can be free on `price` (0) yet paid under `priceModel: "monthly"`
+// (its amount lives in monthly_price_cents); reading `price` alone would let
+// that listing slip through as "free". Both the browse filter and the deploy
+// gate below read the full pricing-menu columns for this reason.
+
+import { and, eq } from "drizzle-orm";
+import { db } from "@/db";
+import { marketplaceListings } from "@/db/schema/marketplace";
+import { agentTemplates } from "@/db/schema/agent-templates";
+import type { AgentBlueprint } from "@/db/schema/agents";
+import {
+  createAnonymousWorkspace,
+  buildWorkspaceUrls,
+  buildStructuredWorkspaceUrls,
+} from "@/lib/billing/anonymous-workspace";
+import {
+  buildInstalledAgentTemplate,
+  listMarketplaceAgentsFromDb,
+  type AgentListingForBuyer,
+  type MarketplaceAgentRow,
+} from "@/lib/marketplace/agent-listings";
+import { storefrontPriceFromRow } from "@/lib/marketplace/pricing-model";
+import { resolveUniqueTemplateSlug } from "@/lib/agent-templates/store";
+import {
+  STARTER_TEMPLATES,
+  instantiateStarter,
+  buildDefaultInstantiateDeps,
+} from "@/lib/agent-templates/starter-pack";
+import { runR1LandingStep } from "@/lib/landing/r1-landing-step";
+import { validateRawWorkspaceToken } from "@/lib/auth/workspace-token";
+import { checkRateLimit } from "@/lib/utils/rate-limit";
+import type {
+  ChatGptMcpDeps,
+  BuildWorkspaceResult,
+  DeployAgentResult,
+} from "./chatgpt-mcp-handler";
+import {
+  assembleWorkspaceSource,
+  withChatGptRef,
+  type BuildWorkspaceArgs,
+  type OpenAiCallMeta,
+} from "./chatgpt-mcp-rpc";
+import { buildWorkspaceRateLimitChecks } from "./rate-limit-plan";
+
+const WORKSPACE_BASE_DOMAIN =
+  process.env.WORKSPACE_BASE_DOMAIN?.trim() || "app.seldonframe.com";
+const APP_URL = (process.env.NEXT_PUBLIC_APP_URL || "https://app.seldonframe.com").replace(/\/$/, "");
+
+// The curated FREE starter agents (the 6 SeldonFrame house starters) mapped to
+// the marketplace row shape, so browse_marketplace ALWAYS returns real,
+// deployable agents — even before any marketplace listing is published. They are
+// always free; deploy_agent forks them via instantiateStarter.
+const STARTER_ROWS: MarketplaceAgentRow[] = STARTER_TEMPLATES.map((s) => ({
+  id: s.id,
+  slug: s.id,
+  name: s.name,
+  description: s.summary,
+  niche: s.category,
+  tags: [],
+  price: 0,
+  agentType: s.type,
+  installCount: 0,
+  rating: 0,
+  reviewCount: 0,
+  isFeatured: false,
+  previewImageUrl: null,
+}));
+const STARTER_IDS = new Set(STARTER_TEMPLATES.map((s) => s.id));
+
+/** A friendly Error whose message surfaces to ChatGPT as a tool isError result
+ *  (the handler catches throws → tool-level error, never a transport 500). */
+class FriendlyToolError extends Error {}
+
+/**
+ * Build a workspace from the parsed build args. Rate-limits 3/hr + 10/day per
+ * ChatGPT USER (_meta["openai/subject"] — ChatGPT calls share OpenAI's egress
+ * IPs, so an IP key alone would collapse the channel) with a coarse per-IP
+ * backstop; calls without a subject keep the strict per-IP keys the anonymous
+ * /api/v1/workspace/create route uses. Plan in rate-limit-plan.ts. On limit,
+ * throws a friendly Error → the handler turns it into a tool isError so
+ * ChatGPT shows the message instead of failing the connection.
+ */
+async function buildWorkspace(
+  ip: string,
+  args: BuildWorkspaceArgs,
+  meta: OpenAiCallMeta,
+): Promise<BuildWorkspaceResult> {
+  // Funnel correlation: subject ties builds to one anonymized ChatGPT user,
+  // session to one conversation. Never PII — both are OpenAI-minted opaque ids.
+  console.log(
+    `[chatgpt-mcp] build_workspace subject=${meta.subject ?? "-"} session=${meta.session ?? "-"} ip=${ip}`,
+  );
+
+  const checks = buildWorkspaceRateLimitChecks(ip, meta.subject);
+  const results = await Promise.all(checks.map((c) => checkRateLimit(c.key, c.limit, c.windowMs)));
+  if (results.some((ok) => !ok)) {
+    throw new FriendlyToolError(
+      "Workspace creation is limited to 3 per hour and 10 per day. Please try again later, or sign up at app.seldonframe.com to create more.",
+    );
+  }
+
+  // `source` folds description + location + phone + website into one string
+  // that seeds the workspace Soul (no LLM call on this path).
+  const source = assembleWorkspaceSource({
+    description: args.description,
+    website_url: args.website_url,
+    city: args.city,
+    state: args.state,
+    phone: args.phone,
+  });
+
+  const result = await createAnonymousWorkspace({
+    name: args.business_name,
+    source: source || null,
+    phone: args.phone ?? null,
+    city: args.city ?? null,
+    state: args.state ?? null,
+    description: args.description ?? null,
+  });
+
+  // Upgrade the generic seed landing to the archetype-themed R-framework
+  // landing — the SAME step /clients/new runs (run-create-from-url.ts) right
+  // after createAnonymousWorkspace. Without it the public page is the basic
+  // "Trusted Local Service" default instead of the vertical-specific design
+  // (bold-urgency for HVAC/plumbing, clinical-trust for dental, …). Best-effort
+  // and keyed on the platform Anthropic key (the same fallback the URL flow
+  // uses); runR1LandingStep never throws, so on any failure the seed landing
+  // simply remains and we fall back to the subdomain URL below.
+  let r1Ok = false;
+  const platformKey = process.env.ANTHROPIC_API_KEY?.trim();
+  if (platformKey) {
+    const r1 = await runR1LandingStep({
+      workspaceId: result.orgId,
+      facts: {
+        business_name: result.name,
+        city: args.city ?? "",
+        state: args.state ?? "",
+        phone: args.phone ?? "",
+        services: [],
+        business_description: args.description ?? "",
+      },
+      byokKey: platformKey,
+      // Keep the keyless tool call snappy (MCP clients can time out): the main
+      // landing is what matters in chat. Per-service detail sub-pages are extra
+      // LLM calls — skip them here; the operator can regenerate the full
+      // multi-page site later from the dashboard.
+      skipServicePages: true,
+    });
+    r1Ok = r1.ok;
+  }
+
+  const urls = buildWorkspaceUrls(result.slug, WORKSPACE_BASE_DOMAIN, result.orgId);
+  // The single-click, token-scoped admin URL (no signup; 7-day token).
+  const structured = buildStructuredWorkspaceUrls(result.slug, WORKSPACE_BASE_DOMAIN, result.orgId, {
+    bearerToken: result.bearerToken,
+  });
+
+  // The R-framework landing renders at /w/<slug> — the SAME public URL
+  // /clients/new surfaces (ready/page.tsx: `${APP_BASE}/w/${slug}`). Point the
+  // operator there when it rendered; otherwise fall back to the subdomain home
+  // (which still serves the seed landing, never a 404).
+  const publicUrl = r1Ok ? `${APP_URL}/w/${result.slug}` : urls.home;
+
+  // ref=chatgpt on both URLs → ChatGPT-attributed visits/claims are measurable.
+  return {
+    url: withChatGptRef(publicUrl),
+    claimUrl: structured.admin_url ? withChatGptRef(structured.admin_url) : undefined,
+    workspaceToken: result.bearerToken,
+    // Additive (2026-07-15 widgets v2) — the business name, rendered on the
+    // build-result widget alongside the live URL.
+    name: args.business_name,
+  };
+}
+
+/** The columns the deploy path reads off a marketplace_listings row. The full
+ *  pricing-menu set (not just `price`) drives the free-vs-paid branch via
+ *  storefrontPriceFromRow — a `monthly`/`per_usage`/`per_outcome` listing keeps
+ *  `price` at 0 and carries its amount in the matching *_cents column, so
+ *  reading `price` alone would misclassify it as free. The agent fields drive
+ *  the clone. */
+const DEPLOY_LISTING_COLUMNS = {
+  id: marketplaceListings.id,
+  slug: marketplaceListings.slug,
+  name: marketplaceListings.name,
+  kind: marketplaceListings.kind,
+  price: marketplaceListings.price,
+  priceModel: marketplaceListings.priceModel,
+  monthlyPriceCents: marketplaceListings.monthlyPriceCents,
+  perCallPriceCents: marketplaceListings.perCallPriceCents,
+  perOutcomePriceCents: marketplaceListings.perOutcomePriceCents,
+  outcomeType: marketplaceListings.outcomeType,
+  agentType: marketplaceListings.agentType,
+  agentBlueprint: marketplaceListings.agentBlueprint,
+} as const;
+
+/**
+ * Deploy a marketplace agent into the workspace identified by the bearer token.
+ *
+ *   - Resolve the target org from the workspace_token (the bearer encodes the
+ *     orgId). Invalid/expired → ok:false with a friendly message.
+ *   - Resolve the PUBLISHED kind:'agent' listing by slug.
+ *   - FREE (storefrontPriceFromRow(...).isPaid === false): clone the blueprint
+ *     into the buyer org as a fresh DRAFT agent_templates row (the same clone
+ *     the install action does), and return the workspace admin URL.
+ *   - PAID (isPaid === true): ok:false with a friendly message pointing at
+ *     seldonframe.com. NO claim/purchase URL, NO price, NO CTA — this tool
+ *     never charges and never links out to buy anything.
+ */
+async function deploy(input: { workspaceToken: string; slug: string }): Promise<DeployAgentResult> {
+  const resolved = await validateRawWorkspaceToken(input.workspaceToken);
+  if (!resolved) {
+    return { ok: false, error: "That workspace link expired — build one first." };
+  }
+  const orgId = resolved.orgId;
+
+  // Curated FREE starter agent? Fork it into the workspace via instantiateStarter
+  // (no marketplace listing required — these are always available + always free).
+  const starter = STARTER_TEMPLATES.find((s) => s.id === input.slug);
+  if (starter) {
+    const res = await instantiateStarter(
+      { builderOrgId: orgId, starterId: starter.id },
+      buildDefaultInstantiateDeps(),
+    );
+    if (!res.ok) {
+      return { ok: false, error: "Could not add that agent — please try again." };
+    }
+    return {
+      ok: true,
+      name: starter.name,
+      url: withChatGptRef(
+        `${APP_URL}/admin/${encodeURIComponent(orgId)}?token=${encodeURIComponent(input.workspaceToken)}`,
+      ),
+    };
+  }
+
+  const [listing] = await db
+    .select(DEPLOY_LISTING_COLUMNS)
+    .from(marketplaceListings)
+    .where(
+      and(
+        eq(marketplaceListings.slug, input.slug),
+        eq(marketplaceListings.isPublished, true),
+        eq(marketplaceListings.kind, "agent"),
+      ),
+    )
+    .limit(1);
+
+  if (!listing) {
+    return { ok: false, error: `No published agent found with slug "${input.slug}". Try browse_marketplace first.` };
+  }
+
+  // PAID (any pricing model) → NOT added from ChatGPT, and NO purchase link.
+  // The app stays free-utility-only (OpenAI App-policy compliance); premium
+  // agents are explored/managed later on seldonframe.com, never sold or
+  // linked-to in-chat. storefrontPriceFromRow reads the SELECTED pricing
+  // model's column (not just the legacy `price` field), so a monthly/
+  // per-usage/per-outcome listing is correctly classified as paid even though
+  // `price` itself is 0.
+  if (storefrontPriceFromRow(listing).isPaid) {
+    return {
+      ok: false,
+      error: `"${listing.name}" isn't available to install through ChatGPT — try one of the free agents from browse_marketplace instead.`,
+    };
+  }
+
+  // FREE → clone the listing's blueprint into the buyer org (fresh DRAFT row).
+  const args = buildInstalledAgentTemplate(
+    {
+      id: listing.id,
+      slug: listing.slug,
+      name: listing.name,
+      kind: listing.kind,
+      agentType: listing.agentType,
+      agentBlueprint: listing.agentBlueprint as AgentBlueprint | null,
+    } satisfies AgentListingForBuyer,
+    orgId,
+  );
+
+  const existing = await db
+    .select({ slug: agentTemplates.slug })
+    .from(agentTemplates)
+    .where(eq(agentTemplates.builderOrgId, orgId));
+  const slug = resolveUniqueTemplateSlug(args.name, existing.map((r) => r.slug));
+
+  const [created] = await db
+    .insert(agentTemplates)
+    .values({ ...args, slug })
+    .returning({ id: agentTemplates.id });
+
+  if (!created) {
+    return { ok: false, error: "Could not install the agent — please try again." };
+  }
+
+  // Token-scoped admin URL so the operator lands in their workspace to review
+  // and publish the freshly-installed draft agent (no signup; 7-day token).
+  return {
+    ok: true,
+    name: listing.name,
+    url: withChatGptRef(
+      `${APP_URL}/admin/${encodeURIComponent(orgId)}?token=${encodeURIComponent(input.workspaceToken)}`,
+    ),
+  };
+}
+
+/**
+ * Build the real deps for one request. `ip` is read from the request headers
+ * and serves as the build_workspace rate-limit BACKSTOP; the strict limit keys
+ * on the per-user _meta["openai/subject"] the handler extracts per call.
+ */
+export function buildRealDeps(ip: string): ChatGptMcpDeps {
+  return {
+    buildWorkspace: (args, meta) => buildWorkspace(ip, args, meta),
+    browse: async (filters) => {
+      const q = filters.query?.trim().toLowerCase();
+      const niche = filters.niche?.trim().toLowerCase();
+      // Always-available curated FREE starter agents first (so the app is never
+      // empty — even with zero published marketplace listings).
+      const starters = STARTER_ROWS.filter((r) => {
+        if (niche && r.niche.toLowerCase() !== niche) return false;
+        if (q && !`${r.name} ${r.description ?? ""}`.toLowerCase().includes(q)) return false;
+        return true;
+      });
+      // Plus any FREE published marketplace listings (paid excluded under ANY
+      // pricing model — storefrontPriceFromRow reads the SELECTED model's
+      // column, not just the legacy `price` field, so a monthly/per-usage/
+      // per-outcome listing with price:0 is still correctly excluded here;
+      // any starter-id collision de-dupes to the starter).
+      const listings = (
+        await listMarketplaceAgentsFromDb({ q: filters.query, niche: filters.niche })
+      ).filter((r) => !storefrontPriceFromRow(r).isPaid && !STARTER_IDS.has(r.slug));
+      return [...starters, ...listings];
+    },
+    deploy,
+    now: () => new Date(),
+  };
+}

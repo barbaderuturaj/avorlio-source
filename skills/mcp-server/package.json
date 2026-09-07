@@ -1,0 +1,61 @@
+{
+  "name": "@seldonframe/mcp",
+  "version": "1.61.0",
+  "mcpName": "io.github.seldonframe/mcp",
+  "description": "Open-source GoHighLevel alternative for agencies. 146+ MCP tools that let Claude Code spin up white-labeled client workspaces — CRM, booking, intake forms, landing pages, AI chatbot, and pre-wired agent archetypes (speed-to-lead, missed-call-text-back, review-requester) — in minutes. MIT-licensed connector (platform: AGPL-3.0).",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "seldonframe-mcp": "src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "check:syntax": "node --check --input-type=module < src/index.js && node --check --input-type=module < src/client.js && node --check --input-type=module < src/tools.js && node --check --input-type=module < src/welcome.js && node --check --input-type=module < src/security.js",
+    "test": "node --test tests/*.test.mjs",
+    "prepublishOnly": "npm run check:syntax && npm run test",
+    "build:mcpb": "npm ci --omit=dev && npx @anthropic-ai/mcpb pack . seldonframe.mcpb"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "seldonframe",
+    "ai",
+    "agents",
+    "business-os",
+    "claude-code",
+    "crm",
+    "gohighlevel-alternative",
+    "gohighlevel",
+    "agency",
+    "whitelabel",
+    "partner-agency",
+    "booking",
+    "intake-form",
+    "landing-page",
+    "local-service-business",
+    "sms",
+    "twilio",
+    "ai-receptionist",
+    "ai-chatbot",
+    "missed-call"
+  ],
+  "homepage": "https://seldonframe.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seldonframe/seldonframe.git",
+    "directory": "skills/mcp-server"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

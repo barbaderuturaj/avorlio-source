@@ -1,0 +1,475 @@
+@layer components {
+  /*
+    Square UI class reference (source of truth):
+    - templates/dashboard-2/components/ui/card.tsx
+      - card shell: "bg-card text-card-foreground ... rounded-xl border ... shadow-sm"
+    - templates/dashboard-2/components/ui/button.tsx
+      - base: "inline-flex items-center justify-center ... rounded-md text-sm font-medium transition-all ..."
+      - default: "bg-primary text-primary-foreground hover:bg-primary/90"
+      - outline: "border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground"
+      - ghost: "hover:bg-accent hover:text-accent-foreground"
+    - templates/dashboard-2/components/ui/input.tsx
+      - input shell: "border-input h-9 w-full ... rounded-md border bg-transparent ... shadow-xs"
+  */
+  .sf-public .crm-card {
+    border: 1px solid var(--sf-border);
+    background: var(--sf-card-bg);
+    color: var(--sf-text);
+    border-radius: var(--sf-radius);
+    box-shadow: none;
+  }
+
+  .sf-public .crm-button-primary {
+    border-radius: var(--sf-radius);
+    background: var(--sf-primary);
+    color: #fff;
+  }
+
+  .sf-public .crm-button-primary:hover {
+    background: color-mix(in oklab, var(--sf-primary) 88%, black 12%);
+  }
+
+  .sf-public .crm-input {
+    border: 1px solid var(--sf-border);
+    background: color-mix(in oklab, var(--sf-bg) 85%, var(--sf-card-bg) 15%);
+    color: var(--sf-text);
+    border-radius: var(--sf-radius);
+    box-shadow: none;
+  }
+
+  .sf-public .crm-input::placeholder {
+    color: var(--sf-muted);
+  }
+
+  .sf-public .crm-input:focus-visible {
+    border-color: var(--sf-accent);
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--sf-accent) 45%, transparent 55%);
+  }
+
+  .crm-card {
+    border: 1px solid var(--border);
+    background: linear-gradient(180deg, var(--card) 0%, color-mix(in srgb, var(--card) 94%, transparent) 100%);
+    color: var(--card-foreground);
+    border-radius: 1rem;
+    box-shadow: var(--shadow-card);
+    backdrop-filter: blur(14px);
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast);
+    padding: 1.5rem;
+  }
+
+  .crm-card:hover {
+    border-color: color-mix(in srgb, var(--border) 100%, transparent);
+    box-shadow: var(--shadow-card-hover);
+    transform: translateY(-1px);
+  }
+
+  .glass-card {
+    border: 1px solid var(--border);
+    background: linear-gradient(180deg, color-mix(in srgb, var(--card) 94%, transparent) 0%, color-mix(in srgb, var(--card) 88%, transparent) 100%);
+    border-radius: 1.25rem;
+    box-shadow: var(--shadow-card);
+    backdrop-filter: blur(20px);
+  }
+
+  .crm-button-primary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    white-space: nowrap;
+    border-radius: 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--primary) 32%, transparent);
+    background: var(--primary);
+    color: var(--primary-foreground);
+    font-size: 0.875rem;
+    font-weight: 500;
+    box-shadow: 0 10px 24px color-mix(in srgb, var(--primary) 16%, transparent);
+    transition: transform var(--transition-fast), box-shadow var(--transition-fast), background-color var(--transition-fast), border-color var(--transition-fast);
+    outline: none;
+  }
+
+  .crm-button-primary:hover {
+    background: color-mix(in srgb, var(--primary) 90%, transparent);
+    box-shadow: 0 14px 30px color-mix(in srgb, var(--primary) 20%, transparent);
+    transform: translateY(-1px);
+  }
+
+  /* 2026-05-17 — uniform "press" affordance so every primary CTA
+     gives the same tactile feedback when clicked. Reduced-motion
+     consumers are handled by the .crm-pressable media query in
+     globals.css; CSS itself doesn't need a guard here because the
+     transform property is overridden when --transition-fast is
+     `0ms` (which the reduced-motion token override sets). */
+  .crm-button-primary:active:not(:disabled) {
+    transform: translateY(0) scale(0.98);
+  }
+
+  .crm-button-primary:focus-visible {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 50%, transparent);
+  }
+
+  .crm-button-primary:disabled {
+    pointer-events: none;
+    opacity: 0.5;
+  }
+
+  .crm-button-secondary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    white-space: nowrap;
+    border-radius: 0.75rem;
+    border: 1px solid var(--border);
+    background: linear-gradient(180deg, color-mix(in srgb, var(--card) 82%, transparent) 0%, color-mix(in srgb, var(--card) 70%, transparent) 100%);
+    color: var(--foreground);
+    font-size: 0.875rem;
+    font-weight: 500;
+    box-shadow: var(--shadow-xs);
+    transition: transform var(--transition-fast), box-shadow var(--transition-fast), background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+    outline: none;
+  }
+
+  .crm-button-secondary:hover {
+    background: var(--accent);
+    color: var(--accent-foreground);
+    border-color: color-mix(in srgb, var(--border) 100%, transparent);
+    transform: translateY(-1px);
+  }
+
+  .crm-button-secondary:active:not(:disabled) {
+    transform: translateY(0) scale(0.98);
+  }
+
+  .crm-button-secondary:focus-visible {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 50%, transparent);
+  }
+
+  .crm-button-secondary:disabled {
+    pointer-events: none;
+    opacity: 0.5;
+  }
+
+  .crm-button-ghost {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    white-space: nowrap;
+    border-radius: 0.75rem;
+    border: 0;
+    background: transparent;
+    color: var(--foreground);
+    font-size: 0.875rem;
+    font-weight: 500;
+    transition: transform var(--transition-fast), background-color var(--transition-fast), color var(--transition-fast);
+    outline: none;
+  }
+
+  .crm-button-ghost:hover {
+    background: var(--accent);
+    color: var(--accent-foreground);
+    transform: translateY(-1px);
+  }
+
+  .crm-button-ghost:active:not(:disabled) {
+    transform: translateY(0) scale(0.98);
+  }
+
+  .crm-button-ghost:focus-visible {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 50%, transparent);
+  }
+
+  .crm-button-ghost:disabled {
+    pointer-events: none;
+    opacity: 0.5;
+  }
+
+  .crm-input {
+    border: 1px solid var(--input);
+    background: color-mix(in srgb, var(--card) 74%, transparent);
+    color: var(--foreground);
+    border-radius: 0.75rem;
+    min-height: 2.25rem;
+    width: 100%;
+    min-width: 0;
+    padding: 0.25rem 0.75rem;
+    font-size: 0.875rem;
+    box-shadow: var(--shadow-xs);
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast), color var(--transition-fast), background-color var(--transition-fast);
+    outline: none;
+  }
+
+  .crm-input::placeholder {
+    color: var(--muted-foreground);
+  }
+
+  .crm-input:focus-visible {
+    border-color: var(--ring);
+    background: color-mix(in srgb, var(--card) 88%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 22%, transparent), var(--shadow-xs);
+  }
+
+  .crm-input:disabled {
+    pointer-events: none;
+    opacity: 0.5;
+  }
+
+  .crm-card table {
+    border-collapse: collapse;
+  }
+
+  .crm-card thead,
+  .crm-card thead tr,
+  .crm-card thead th {
+    background: transparent;
+    border: 0;
+  }
+
+  .crm-card thead th {
+    padding-top: 0.75rem;
+    padding-bottom: 0.75rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: color-mix(in srgb, var(--foreground) 40%, transparent);
+    border-left: 0;
+    border-right: 0;
+  }
+
+  .crm-card tbody td {
+    border-left: 0;
+    border-right: 0;
+    border-bottom: 0;
+    color: color-mix(in srgb, var(--foreground) 80%, transparent);
+    font-size: 0.875rem;
+  }
+
+  .crm-table-row {
+    border-bottom: 0;
+    transition: background-color var(--transition-fast);
+  }
+
+  .crm-table-row > td {
+    min-height: 52px;
+    padding-top: 0.875rem;
+    padding-bottom: 0.875rem;
+  }
+
+  .crm-table-row:hover {
+    background: hsl(var(--color-surface-overlay) / 0.05);
+  }
+
+  .crm-table-row[data-selected="true"] {
+    background: color-mix(in srgb, var(--primary) 8%, transparent);
+  }
+
+  .crm-badge {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--primary) 10%, transparent);
+    color: var(--primary);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.2;
+    padding: 2px 8px;
+  }
+
+  .crm-modal-backdrop {
+    background: rgb(0 0 0 / 40%);
+    backdrop-filter: blur(4px);
+    transition: opacity var(--transition-normal);
+  }
+
+  .crm-modal-surface {
+    border-radius: 16px;
+    box-shadow: var(--shadow-modal);
+    transform-origin: center;
+    transition: transform var(--transition-normal), opacity var(--transition-normal);
+  }
+
+  .crm-command-palette {
+    border-radius: 16px;
+    box-shadow: var(--shadow-modal);
+    animation: page-enter var(--transition-normal) both;
+  }
+
+  .crm-sidebar {
+    width: 240px;
+    border-radius: 0;
+    background: linear-gradient(180deg, var(--sidebar) 0%, color-mix(in srgb, var(--sidebar) 96%, transparent) 100%);
+    border-right: 1px solid var(--sidebar-border);
+    padding: 0;
+    transition: width var(--transition-slow);
+    /* 2026-05-17 — Vercel-style: keep the sidebar scrollable so it never
+       traps content on tall menus, but hide the chrome of the scrollbar.
+       It reads as one clean column instead of a UI-track-with-thumb. */
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .crm-sidebar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .dark .crm-sidebar {
+    background: linear-gradient(180deg, var(--sidebar) 0%, color-mix(in srgb, var(--sidebar) 98%, transparent) 100%);
+    border-color: var(--sidebar-border);
+  }
+
+  .crm-sidebar-link {
+    /* 2026-05-18 — bumped to Supabase-style spacing per operator feedback
+       ("they look a bit too thin"). Supabase + Linear + Vercel dashboard
+       use ~36-40px rows with 14px text; we were at 32px with 13px which
+       felt cramped on dense surfaces. New defaults are the comfortable
+       baseline; large surface like Settings still feels balanced. */
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;             /* 12px icon→text */
+    min-height: 2.375rem;     /* 38px mobile */
+    padding-top: 0.375rem;
+    padding-bottom: 0.375rem;
+    border-radius: 0.625rem;
+    background: transparent;
+    color: var(--muted-foreground);
+    font-size: 0.875rem;      /* 14px — Supabase/Linear baseline */
+    line-height: 1.25rem;
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), transform var(--transition-fast), box-shadow var(--transition-fast);
+  }
+
+  @media (min-width: 640px) {
+    .crm-sidebar-link {
+      min-height: 2.25rem;    /* 36px desktop — generous but not loose */
+    }
+  }
+
+  .crm-sidebar-icon {
+    color: var(--muted-foreground);
+    transition: color var(--transition-fast);
+  }
+
+  .crm-sidebar-text {
+    color: var(--muted-foreground);
+    transition: color var(--transition-fast);
+  }
+
+  /* 2026-06-27 — calm direction-A (matches the editor/studio reskin):
+     a quiet hover wash, no lift. The old translateY(-1px) made every
+     nav row bob on hover, which read as restless against the calm
+     hairline chrome. Hover just softens the background + ink. */
+  .crm-sidebar-link:hover {
+    background: color-mix(in srgb, var(--sidebar-accent) 55.00%, transparent);
+    border-color: transparent;
+    color: var(--foreground);
+  }
+
+  .crm-sidebar-link:hover .crm-sidebar-icon {
+    color: var(--foreground);
+  }
+
+  .crm-sidebar-link:hover .crm-sidebar-text {
+    color: var(--foreground);
+  }
+
+  /* 2026-06-27 — calm direction-A active state: an accent-SOFT pill
+     (the mockup's `background:var(--accent-soft); color:var(--accent-
+     tint-fg)`). Live-token mapping: a soft tint of --primary (the brand
+     green light / teal dark) with --primary ink + icon, no border, no
+     drop-shadow. Replaces the old loud gradient + `0 10px 24px` dark
+     shadow, which fought the hairline chrome. The label weight bump is
+     handled in markup (font-medium on the active row). */
+  .crm-sidebar-link[data-active="true"] {
+    background: color-mix(in srgb, var(--primary) 12%, transparent);
+    border-color: transparent;
+    box-shadow: none;
+    color: var(--primary);
+  }
+
+  .crm-sidebar-link[data-active="true"] .crm-sidebar-icon {
+    color: var(--primary);
+  }
+
+  .crm-sidebar-link[data-active="true"] .crm-sidebar-text {
+    color: var(--primary);
+  }
+
+  .crm-topbar-input {
+    border: 1px solid var(--border);
+    border-radius: 0.875rem;
+    background: color-mix(in srgb, var(--card) 80%, transparent);
+    color: var(--foreground);
+    min-height: 2.75rem;
+    box-shadow: var(--shadow-xs);
+  }
+
+  @media (min-width: 640px) {
+    .crm-topbar-input {
+      min-height: 2.375rem;
+    }
+  }
+
+  .crm-topbar-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 2.75rem;
+    width: 2.75rem;
+    border-radius: 0.875rem;
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--card) 86%, transparent);
+    color: var(--muted-foreground);
+    box-shadow: var(--shadow-xs);
+    transition: background-color var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast), transform var(--transition-fast), box-shadow var(--transition-fast);
+  }
+
+  @media (min-width: 640px) {
+    .crm-topbar-icon-btn {
+      height: 2.375rem;
+      width: 2.375rem;
+    }
+  }
+
+  /* 2026-06-27 — calm direction-A: topbar icon buttons (theme toggle,
+     notifications bell, user menu) soften on hover without the
+     translateY lift — the mockup's header controls sit still on a
+     hairline. The :active press scale below stays as the click
+     affordance. */
+  .crm-topbar-icon-btn:hover {
+    background: var(--accent);
+    border-color: var(--border);
+    color: var(--foreground);
+  }
+
+  .crm-topbar-icon-btn:active:not(:disabled) {
+    transform: translateY(0) scale(0.96);
+  }
+
+  .dark .crm-topbar-icon-btn {
+    border-color: var(--border);
+    background: color-mix(in srgb, var(--card) 88%, transparent);
+  }
+
+  .crm-toast {
+    border-radius: 10px;
+    box-shadow: var(--shadow-dropdown);
+    animation: page-enter var(--transition-normal) both;
+  }
+
+  .crm-tooltip {
+    border-radius: 8px;
+    background: var(--foreground);
+    color: var(--background);
+    box-shadow: var(--shadow-dropdown);
+    transform: scale(0.95);
+    opacity: 0;
+    transition: transform var(--transition-fast), opacity var(--transition-fast);
+  }
+
+  .crm-tooltip[data-open="true"] {
+    transform: scale(1);
+    opacity: 1;
+  }
+}

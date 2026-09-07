@@ -1,0 +1,444 @@
+{
+  "$schema": "./schema.json",
+  "version": 1,
+  "workspace": {
+    "name": "[Your HVAC Business]",
+    "industry": "hvac",
+    "tagline": "HVAC service for your home.",
+    "theme": {
+      "mode": "light",
+      "accent": "#1E40AF",
+      "displayFont": "cal-sans",
+      "bodyFont": "inter",
+      "radiusScale": "default",
+      "logoUrl": null,
+      "heroImageUrl": null
+    },
+    "contact": {
+      "phone": "",
+      "emergencyPhone": null,
+      "email": null,
+      "address": {
+        "street": "[Street address]",
+        "city": "[City]",
+        "region": "[State]",
+        "postalCode": "[Postal code]",
+        "country": "US"
+      },
+      "hours": {
+        "mon": null,
+        "tue": null,
+        "wed": null,
+        "thu": null,
+        "fri": null,
+        "sat": null,
+        "sun": null
+      },
+      "timezone": "America/Chicago",
+      "serviceArea": "[Service area]"
+    }
+  },
+  "landing": {
+    "renderer": "general-service-v1",
+    "sections": [
+      {
+        "type": "hero",
+        "eyebrow": "Heating, cooling, installation, and maintenance",
+        "headline": "HVAC service for your home",
+        "subhead": "Get help with heating, cooling, installation, and maintenance.",
+        "ctaPrimary":   { "label": "Book service", "href": "/book", "kind": "primary" },
+        "ctaSecondary": { "label": "Request service", "href": "/intake", "kind": "secondary" },
+        "imageUrl": null,
+        "variant": "split-image-right"
+      },
+      {
+        "type": "services-grid",
+        "headline": "HVAC services",
+        "subhead": "Heating, cooling, installation, maintenance, and indoor air quality service categories.",
+        "layout": "grid-3",
+        "items": [
+          {
+            "icon": "Wind",
+            "title": "AC repair",
+            "description": "Service for cooling issues, airflow problems, thermostat concerns, and AC system troubleshooting.",
+            "category": "Cooling"
+          },
+          {
+            "icon": "Flame",
+            "title": "Heating repair",
+            "description": "Service for heating systems, furnaces, heat pumps, and related comfort concerns.",
+            "category": "Heating"
+          },
+          {
+            "icon": "Settings2",
+            "title": "HVAC installation",
+            "description": "Installation support for heating and cooling equipment. Contact the team to ask about equipment and brand options.",
+            "category": "Install"
+          },
+          {
+            "icon": "CalendarCheck",
+            "title": "Maintenance",
+            "description": "Maintenance visits for heating and cooling systems. Contact the team to confirm available service options.",
+            "category": "Maintenance"
+          },
+          {
+            "icon": "Wind",
+            "title": "Indoor air quality",
+            "description": "Support for indoor air quality questions, including filtration, humidity, ventilation, and related equipment options.",
+            "category": "IAQ"
+          }
+        ]
+      },
+      {
+        "type": "about",
+        "headline": "HVAC support",
+        "body": "Use this page to request help with heating, cooling, installation, maintenance, or indoor air quality needs.",
+        "photoUrl": null,
+        "ownerName": "[Owner Name]",
+        "ownerTitle": "Owner & Lead Technician"
+      },
+      {
+        "type": "mid-cta",
+        "headline": "Need HVAC help?",
+        "subhead": "Book a service appointment or send a request with the details of your heating or cooling need.",
+        "ctaPrimary":   { "label": "Book service", "href": "/book", "kind": "primary" },
+        "ctaSecondary": { "label": "Request service", "href": "/intake", "kind": "secondary" },
+        "embedQuoteForm": true
+      },
+      {
+        "type": "testimonials",
+        "headline": "[Verified customer reviews]",
+        "items": []
+      },
+      {
+        "type": "service-area",
+        "headline": "Service area",
+        "description": "[Service area]"
+      },
+      {
+        "type": "faq",
+        "headline": "Frequently asked questions",
+        "items": [
+          {
+            "question": "How do I check availability?",
+            "answer": "Contact the team to confirm current availability."
+          },
+          {
+            "question": "How does pricing work?",
+            "answer": "Pricing depends on the work required. Contact the team for current pricing."
+          },
+          {
+            "question": "What equipment brands are available?",
+            "answer": "Contact the team to ask about equipment and brand options."
+          },
+          {
+            "question": "What HVAC services can I request?",
+            "answer": "You can request help with AC repair, heating repair, HVAC installation, maintenance, indoor air quality, or another heating and cooling need."
+          },
+          {
+            "question": "Are payment or financing options available?",
+            "answer": "Contact the team to ask about available payment or financing options."
+          },
+          {
+            "question": "Where can I find licensing and insurance information?",
+            "answer": "Contact the team for current licensing and insurance information."
+          }
+        ]
+      },
+      {
+        "type": "footer",
+        "showHours": false,
+        "showAddress": false,
+        "showServiceArea": false,
+        "social": [],
+        "legal": [
+          { "label": "Privacy", "href": "/privacy" },
+          { "label": "Terms",   "href": "/terms" }
+        ]
+      }
+    ]
+  },
+  "booking": {
+    "renderer": "calcom-month-v1",
+    "eventType": {
+      "title": "HVAC service appointment",
+      "description": "Schedule a time to discuss your heating or cooling service needs.",
+      "durationMinutes": 45,
+      "location": { "kind": "on-site-customer" },
+      "bufferMinutes": 30
+    },
+    "availability": {
+      "weekly": {
+        "mon": [7, 19],
+        "tue": [7, 19],
+        "wed": [7, 19],
+        "thu": [7, 19],
+        "fri": [7, 19],
+        "sat": [8, 16],
+        "sun": null
+      },
+      "blackoutDates": [],
+      "leadTimeHours": 4,
+      "advanceWindowDays": 30
+    },
+    "formFields": [
+      { "id": "name",    "label": "Full name",       "type": "text",  "required": true,  "placeholder": "Jane Smith" },
+      { "id": "email",   "label": "Email",           "type": "email", "required": true,  "placeholder": "you@example.com" },
+      { "id": "phone",   "label": "Best phone",      "type": "phone", "required": true,  "placeholder": "Your phone number" },
+      { "id": "address", "label": "Service address", "type": "text",  "required": true,  "placeholder": "123 Main St, [City]" },
+      {
+        "id": "service",
+        "label": "What can we help with?",
+        "type": "select",
+        "required": true,
+        "options": ["AC not cooling", "Heating not working", "New system install", "Seasonal tune-up", "Indoor air quality", "Other"]
+      },
+      {
+        "id": "notes",
+        "label": "Anything else we should know?",
+        "type": "textarea",
+        "required": false,
+        "placeholder": "System age, recent issues, accessibility, pets at home, etc."
+      }
+    ],
+    "confirmation": {
+      "headline": "Your appointment request was received",
+      "message": "Thanks - we received your appointment request. Contact the team for current availability.",
+      "successRedirectUrl": null
+    }
+  },
+  "intake": {
+    "renderer": "formbricks-stack-v1",
+    "title": "Tell us about the job",
+    "description": "Share your heating or cooling service request.",
+    "questions": [
+      { "id": "fullName", "type": "text",  "label": "What's your name?",         "required": true },
+      { "id": "phone",    "type": "phone", "label": "Best phone to reach you?",  "required": true,
+        "helper": "Share the best number for follow-up." },
+      { "id": "email",    "type": "email", "label": "Email",                     "required": false },
+      { "id": "address",  "type": "text",  "label": "Service address",           "required": true,
+        "helper": "Just the street and city is fine." },
+      {
+        "id": "issueType",
+        "type": "multi-select",
+        "label": "What's going on?",
+        "helper": "Pick all that apply.",
+        "required": true,
+        "options": [
+          "AC not cooling",
+          "Heating not working",
+          "Strange noise or smell",
+          "Thermostat issue",
+          "New system installation",
+          "Seasonal tune-up",
+          "Indoor air quality concern",
+          "Other"
+        ]
+      },
+      {
+        "id": "urgency",
+        "type": "select",
+        "label": "How urgent is this?",
+        "required": true,
+        "options": [
+          "Needs attention soon",
+          "Flexible timing",
+          "Planning ahead"
+        ]
+      },
+      {
+        "id": "details",
+        "type": "textarea",
+        "label": "Anything else the team should know?",
+        "helper": "System age, recent repairs, access notes, or other details that may help with your request.",
+        "required": false,
+        "validation": { "maxLength": 1000 }
+      }
+    ],
+    "completion": {
+      "headline": "Thanks - we received your service request",
+      "message": "Thanks - we received your service request. You can book an appointment online or contact the team for current availability.",
+      "cta": {
+        "label": "Book service",
+        "href": "/book",
+        "kind": "primary"
+      }
+    }
+  },
+  "admin": {
+    "renderer": "twenty-shell-v1",
+    "sidebarOrder": ["contacts", "deals", "service_calls", "equipment", "technicians", "activities"],
+    "objects": [
+      {
+        "id": "contacts",
+        "label": "Contacts",
+        "icon": "User",
+        "fields": [
+          { "id": "name",    "label": "Name",    "type": "text",  "required": true,  "showInSidebar": true },
+          { "id": "email",   "label": "Email",   "type": "email" },
+          { "id": "phone",   "label": "Phone",   "type": "phone", "showInSidebar": true },
+          { "id": "address", "label": "Service address", "type": "text",     "showInSidebar": true },
+          { "id": "source",  "label": "Source",  "type": "select", "options": ["Website", "Referral", "Google", "Repeat customer", "Other"] },
+          { "id": "notes",   "label": "Notes",   "type": "longtext" }
+        ],
+        "views": [
+          {
+            "id": "all-contacts",
+            "label": "All contacts",
+            "kind": "table",
+            "isDefault": true,
+            "table": {
+              "columns": ["name", "phone", "address", "source"],
+              "sortBy": { "field": "name", "direction": "asc" }
+            }
+          }
+        ]
+      },
+      {
+        "id": "deals",
+        "label": "Deals",
+        "icon": "Briefcase",
+        "fields": [
+          { "id": "name",      "label": "Deal name", "type": "text",     "required": true,  "showInSidebar": true },
+          { "id": "contact",   "label": "Contact",   "type": "relation", "relationTo": "contacts", "showInSidebar": true },
+          { "id": "amount",    "label": "Amount",    "type": "currency" },
+          { "id": "stage",     "label": "Stage",     "type": "select",   "required": true,
+            "options": ["Lead", "Estimate scheduled", "Quoted", "Approved", "Installed", "Lost"], "showInSidebar": true },
+          { "id": "service",   "label": "Service type", "type": "select",
+            "options": ["AC repair", "Heating repair", "New install", "Maintenance", "IAQ", "Emergency"] },
+          { "id": "close_date", "label": "Expected close", "type": "date" }
+        ],
+        "views": [
+          {
+            "id": "pipeline",
+            "label": "Pipeline",
+            "kind": "kanban",
+            "isDefault": true,
+            "kanban": {
+              "stageField": "stage",
+              "stages": ["Lead", "Estimate scheduled", "Quoted", "Approved", "Installed", "Lost"],
+              "cardFields": ["contact", "amount", "service"],
+              "aggregate": { "field": "amount", "kind": "sum" }
+            }
+          }
+        ]
+      },
+      {
+        "id": "service_calls",
+        "label": "Service calls",
+        "icon": "Wrench",
+        "fields": [
+          { "id": "scheduled_for", "label": "When",     "type": "datetime", "required": true,  "showInSidebar": true },
+          { "id": "contact",      "label": "Customer", "type": "relation", "relationTo": "contacts", "required": true, "showInSidebar": true },
+          { "id": "technician",   "label": "Tech",     "type": "relation", "relationTo": "technicians", "showInSidebar": true },
+          { "id": "service",      "label": "Service",  "type": "select",
+            "options": ["AC repair", "Heating repair", "New install", "Maintenance", "IAQ", "Emergency"], "required": true },
+          { "id": "status",       "label": "Status",   "type": "select",
+            "options": ["Scheduled", "On the way", "On site", "Complete", "Rescheduled", "Cancelled"], "required": true, "showInSidebar": true },
+          { "id": "urgency",      "label": "Urgency",  "type": "select", "options": ["Routine", "Urgent", "Emergency"] },
+          { "id": "notes",        "label": "Notes",    "type": "longtext" }
+        ],
+        "views": [
+          {
+            "id": "today",
+            "label": "Today",
+            "kind": "table",
+            "isDefault": true,
+            "table": {
+              "columns": ["scheduled_for", "contact", "technician", "service", "status", "urgency"],
+              "sortBy": { "field": "scheduled_for", "direction": "asc" }
+            }
+          },
+          {
+            "id": "by-status",
+            "label": "By status",
+            "kind": "kanban",
+            "kanban": {
+              "stageField": "status",
+              "stages": ["Scheduled", "On the way", "On site", "Complete"],
+              "cardFields": ["contact", "service", "technician"]
+            }
+          }
+        ]
+      },
+      {
+        "id": "equipment",
+        "label": "Equipment",
+        "icon": "Settings2",
+        "fields": [
+          { "id": "contact",       "label": "Customer", "type": "relation", "relationTo": "contacts", "required": true, "showInSidebar": true },
+          { "id": "kind",          "label": "Type",     "type": "select",
+            "options": ["Central AC", "Furnace", "Heat pump", "Mini-split", "Boiler", "Air handler", "Thermostat", "Other"], "required": true, "showInSidebar": true },
+          { "id": "brand",         "label": "Brand",    "type": "text",     "showInSidebar": true },
+          { "id": "model",         "label": "Model",    "type": "text" },
+          { "id": "serial",        "label": "Serial",   "type": "text" },
+          { "id": "installed_at",   "label": "Installed", "type": "date" },
+          { "id": "warranty_until", "label": "Warranty until", "type": "date" },
+          { "id": "last_serviced",  "label": "Last serviced", "type": "date" },
+          { "id": "notes",         "label": "Notes",    "type": "longtext" }
+        ],
+        "views": [
+          {
+            "id": "all-equipment",
+            "label": "All equipment",
+            "kind": "table",
+            "isDefault": true,
+            "table": {
+              "columns": ["contact", "kind", "brand", "installed_at", "warranty_until", "last_serviced"],
+              "sortBy": { "field": "last_serviced", "direction": "desc" }
+            }
+          }
+        ]
+      },
+      {
+        "id": "technicians",
+        "label": "Technicians",
+        "icon": "HardHat",
+        "fields": [
+          { "id": "name",       "label": "Name",  "type": "text",  "required": true,  "showInSidebar": true },
+          { "id": "phone",      "label": "Phone", "type": "phone", "showInSidebar": true },
+          { "id": "role",       "label": "Role",  "type": "select",
+            "options": ["Service tech", "Install tech", "Lead tech", "Dispatcher", "Apprentice"], "showInSidebar": true },
+          { "id": "active",     "label": "Active", "type": "boolean" }
+        ],
+        "views": [
+          {
+            "id": "roster",
+            "label": "Roster",
+            "kind": "table",
+            "isDefault": true,
+            "table": {
+              "columns": ["name", "phone", "role", "active"],
+              "sortBy": { "field": "name", "direction": "asc" }
+            }
+          }
+        ]
+      },
+      {
+        "id": "activities",
+        "label": "Activities",
+        "icon": "Activity",
+        "fields": [
+          { "id": "subject",   "label": "Subject", "type": "text",     "required": true,  "showInSidebar": true },
+          { "id": "kind",      "label": "Kind",    "type": "select",
+            "options": ["Call", "Email", "SMS", "Visit", "Note"], "showInSidebar": true },
+          { "id": "contact",   "label": "Contact", "type": "relation", "relationTo": "contacts" },
+          { "id": "occurred_at","label": "When",    "type": "datetime", "showInSidebar": true },
+          { "id": "body",      "label": "Notes",   "type": "longtext" }
+        ],
+        "views": [
+          {
+            "id": "timeline",
+            "label": "Timeline",
+            "kind": "table",
+            "isDefault": true,
+            "table": {
+              "columns": ["subject", "kind", "contact", "occurred_at"],
+              "sortBy": { "field": "occurred_at", "direction": "desc" }
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

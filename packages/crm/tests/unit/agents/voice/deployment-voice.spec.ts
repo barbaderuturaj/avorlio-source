@@ -1,0 +1,533 @@
+// ICP-3 — tests for loadDeploymentVoiceContext (deployment-voice.ts).
+//
+// The deployment voice path composes a persona from the agent TEMPLATE's
+// blueprint and the deployment's CLIENT identity, but scopes the tool-execution
+// context + timezone/intake to the BUILDER's org (so book_appointment lands in
+// the builder's workspace calendar — per-client calendar is a LATER refinement).
+// This test locks that assembly:
+//   - blueprint comes from the template (greeting/voice/capabilities/customSkillMd)
+//   - the persona speaks AS THE CLIENT (deployment.clientName); the builder's own
+//     soul (industry / services / facts) must NOT leak into the instructions
+//   - timezone + intakeFields come from the builder org
+//   - the ctx is scoped to builderOrgId (NOT the template's builderOrgId by
+//     accident — same value here, but the ctx.orgId must be the builder org)
+//   - testMode:false (a real booking, the ICP-3 payoff)
+// DI the loaders + the template fetch + the persona inputs (repo convention) so
+// there is no DB / network.
+
+import { describe, test } from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  loadDeploymentVoiceContext,
+  type DeploymentVoiceDeps,
+} from "../../../../src/lib/agents/voice/deployment-voice";
+import type { Deployment } from "../../../../src/db/schema/deployments";
+import type { AgentTemplate } from "../../../../src/db/schema/agent-templates";
+import type { AgentBlueprint } from "../../../../src/db/schema/agents";
+import type { BookingIntakeField } from "../../../../src/lib/bookings/actions";
+
+const STABLE_CONV = "conv-deploy-fixed";
+
+const DEPLOYMENT: Deployment = {
+  id: "dep-1",
+  builderOrgId: "builder-org-1",
+  agentTemplateId: "tmpl-1",
+  clientName: "Bright Smile Dental",
+  clientContact: null,
+  clientContext: null,
+  surface: "phone",
+  phoneNumber: "+18335550100",
+  phoneNumberSid: null,
+  numberOrigin: null,
+  calendarRef: null,
+  bookingMode: "native",
+  externalBookingUrl: null,
+  bookingPolicy: null,
+  customization: null,
+  clientOrgId: null,
+  portalInvitedAt: null,
+  priceCents: 0,
+  stripeSubscriptionId: null,
+  stripeCustomerId: null,
+  status: "active",
+  createdAt: new Date("2026-06-01T00:00:00Z"),
+  updatedAt: new Date("2026-06-01T00:00:00Z"),
+};
+
+const TEMPLATE_BLUEPRINT: AgentBlueprint = {
+  archetype: "voice-receptionist",
+  capabilities: ["look_up_availability", "book_appointment"],
+  greeting: "Thanks for calling Bright Smile Dental!",
+  voice: "marin",
+  faq: [{ q: "Do you take walk-ins?", a: "By appointment only." }],
+};
+
+const TEMPLATE: AgentTemplate = {
+  id: "tmpl-1",
+  builderOrgId: "builder-org-1",
+  name: "Dental Receptionist",
+  slug: "dental-receptionist",
+  type: "voice_receptionist",
+  blueprint: TEMPLATE_BLUEPRINT,
+  status: "tested",
+  evalScore: 90,
+  createdAt: new Date("2026-06-01T00:00:00Z"),
+  updatedAt: new Date("2026-06-01T00:00:00Z"),
+};
+
+const BUILDER_FIELDS: BookingIntakeField[] = [
+  { id: "reason", type: "text", label: "Reason for visit", required: true },
+];
+
+function baseDeps(): DeploymentVoiceDeps {
+  return {
+    getAgentTemplate: async (id: string) => {
+      assert.equal(id, "tmpl-1", "loads the deployment's template");
+      return TEMPLATE;
+    },
+    // The builder-org persona inputs. The blueprint here is the builder's OWN
+    // voice agent blueprint and must be OVERRIDDEN by the template's. The soul is
+    // the BUILDER's business (Seldon Studio, an agency) and must be DROPPED — the
+    // deployed agent speaks as the CLIENT, never the builder. Only timezone +
+    // intakeFields are consumed. Every field below uses a recognizable sentinel
+    // so a leak is unambiguous.
+    loadVoicePersonaInputs: async (orgId: string) => {
+      assert.equal(orgId, "builder-org-1", "tz/intake come from the builder org");
+      return {
+        soul: {
+          businessName: "Seldon Studio Agency",
+          businessDescription: "BUILDER-SOUL-LEAK we build AI agents for SMBs",
+          services: [{ name: "BUILDER-SERVICE-LEAK agent deployment" }],
+        },
+        timezone: "America/New_York",
+        blueprint: { greeting: "WRONG — builder's own greeting", voice: "cedar" } as AgentBlueprint,
+        intakeFields: BUILDER_FIELDS,
+      };
+    },
+    getVoiceAgentId: async (orgId: string) => {
+      assert.equal(orgId, "builder-org-1");
+      return "builder-voice-agent";
+    },
+    generateConversationId: () => STABLE_CONV,
+  };
+}
+
+describe("loadDeploymentVoiceContext — template blueprint + builder-org tools", () => {
+  test("ctx is scoped to the builder org, testMode false, fresh conversation id", async () => {
+    const result = await loadDeploymentVoiceContext({
+      deployment: DEPLOYMENT,
+      now: new Date("2026-06-01T17:00:00Z"),
+      deps: baseDeps(),
+    });
+    assert.ok(result, "resolves a context");
+    assert.equal(result!.ctx.orgId, "builder-org-1");
+    assert.equal(result!.ctx.agentId, "builder-voice-agent");
+    assert.equal(result!.ctx.conversationId, STABLE_CONV);
+    assert.equal(result!.ctx.testMode, false);
+    assert.equal(result!.ctx.timezone, "America/New_York");
+  });
+
+  test("persona uses the TEMPLATE blueprint (greeting/voice), not the builder's own", async () => {
+    const result = await loadDeploymentVoiceContext({
+      deployment: DEPLOYMENT,
+      now: new Date("2026-06-01T17:00:00Z"),
+      deps: baseDeps(),
+    });
+    // greeting + voice surfaced for the call must come from the template.
+    assert.equal(result!.greeting, "Thanks for calling Bright Smile Dental!");
+    assert.equal(result!.audioVoice, "marin");
+    // The composed instructions are built from the template blueprint — its FAQ
+    // answer must appear, and the builder's wrong greeting must NOT leak in.
+    assert.match(result!.instructions, /By appointment only\./);
+    assert.doesNotMatch(result!.instructions, /WRONG — builder's own greeting/);
+  });
+
+  test("persona speaks AS THE CLIENT — client name in, builder soul facts out", async () => {
+    const result = await loadDeploymentVoiceContext({
+      deployment: DEPLOYMENT,
+      now: new Date("2026-06-01T17:00:00Z"),
+      deps: baseDeps(),
+    });
+    // The persona header names the CLIENT (deployment.clientName), so the agent
+    // introduces itself as the client's receptionist.
+    assert.match(result!.instructions, /Bright Smile Dental/);
+    // The builder's OWN soul must NOT leak — neither its business name nor any of
+    // its facts (description / services). This is the bug this phase fixes: a
+    // deployed agent must never pitch the builder's business to the client's
+    // callers. baseDeps() returns a builder soul stuffed with sentinels.
+    assert.doesNotMatch(result!.instructions, /Seldon Studio Agency/);
+    assert.doesNotMatch(result!.instructions, /BUILDER-SOUL-LEAK/);
+    assert.doesNotMatch(result!.instructions, /BUILDER-SERVICE-LEAK/);
+    // builder-org appointment intake fields still drive the booking instruction
+    // (booking lands in the builder calendar — that part is unchanged).
+    assert.match(result!.instructions, /reason/);
+  });
+
+  test("returns null when the template can't be loaded (degrade to fallback)", async () => {
+    const deps = baseDeps();
+    deps.getAgentTemplate = async () => null;
+    const result = await loadDeploymentVoiceContext({
+      deployment: DEPLOYMENT,
+      now: new Date("2026-06-01T17:00:00Z"),
+      deps,
+    });
+    assert.equal(result, null);
+  });
+
+  test("passes builderOrgId + agentId through for transcript persistence", async () => {
+    const result = await loadDeploymentVoiceContext({
+      deployment: DEPLOYMENT,
+      now: new Date("2026-06-01T17:00:00Z"),
+      deps: baseDeps(),
+    });
+    // The webhook persists the transcript to the builder org with this agent id.
+    assert.equal(result!.transcriptOrgId, "builder-org-1");
+    assert.equal(result!.transcriptAgentId, "builder-voice-agent");
+  });
+});
+
+describe("loadDeploymentVoiceContext — speaks the CLIENT's services + FAQ", () => {
+  // The deployment now carries the CLIENT's captured business context. The
+  // persona must surface the client's OWN services + FAQ (so the agent answers
+  // as them), the client's FAQ must OVERRIDE the template's, and the BUILDER's
+  // soul must STILL never leak. Sentinels make any leak/miss unambiguous.
+  const DEPLOYMENT_WITH_CONTEXT: Deployment = {
+    ...DEPLOYMENT,
+    clientContext: {
+      soul: {
+        businessName: "Bright Smile Dental",
+        businessDescription: "CLIENT-DESC-XYZ a cosmetic + family dental practice",
+        services: [
+          { name: "CLIENT-SVC-XYZ teeth whitening", description: "in-office, one visit" },
+        ],
+      },
+      faq: [{ q: "Do you offer financing?", a: "CLIENT-FAQ-XYZ yes, 0% for 12 months." }],
+    },
+  };
+
+  test("composed instructions contain the client's service + FAQ + name", async () => {
+    const result = await loadDeploymentVoiceContext({
+      deployment: DEPLOYMENT_WITH_CONTEXT,
+      now: new Date("2026-06-01T17:00:00Z"),
+      deps: baseDeps(),
+    });
+    assert.ok(result);
+    // The client's own service + FAQ answer + name all surface.
+    assert.match(result!.instructions, /CLIENT-SVC-XYZ teeth whitening/);
+    assert.match(result!.instructions, /CLIENT-FAQ-XYZ yes, 0% for 12 months\./);
+    assert.match(result!.instructions, /CLIENT-DESC-XYZ/);
+    assert.match(result!.instructions, /Bright Smile Dental/);
+  });
+
+  test("the client's FAQ OVERRIDES the template's FAQ", async () => {
+    const result = await loadDeploymentVoiceContext({
+      deployment: DEPLOYMENT_WITH_CONTEXT,
+      now: new Date("2026-06-01T17:00:00Z"),
+      deps: baseDeps(),
+    });
+    // Client FAQ in…
+    assert.match(result!.instructions, /Do you offer financing\?/);
+    // …and the TEMPLATE's FAQ answer ("By appointment only.") is replaced, not
+    // appended. The template Q ("Do you take walk-ins?") must be gone too.
+    assert.doesNotMatch(result!.instructions, /By appointment only\./);
+    assert.doesNotMatch(result!.instructions, /Do you take walk-ins\?/);
+  });
+
+  test("the BUILDER's soul STILL never leaks, even with a client context present", async () => {
+    const result = await loadDeploymentVoiceContext({
+      deployment: DEPLOYMENT_WITH_CONTEXT,
+      now: new Date("2026-06-01T17:00:00Z"),
+      deps: baseDeps(),
+    });
+    assert.doesNotMatch(result!.instructions, /Seldon Studio Agency/);
+    assert.doesNotMatch(result!.instructions, /BUILDER-SOUL-LEAK/);
+    assert.doesNotMatch(result!.instructions, /BUILDER-SERVICE-LEAK/);
+  });
+
+  test("no clientContext → name-only fallback (today's behavior, no client facts)", async () => {
+    // DEPLOYMENT has clientContext: null. The persona names the client but
+    // surfaces NO client services/FAQ-from-context, and the template FAQ stands.
+    const result = await loadDeploymentVoiceContext({
+      deployment: DEPLOYMENT,
+      now: new Date("2026-06-01T17:00:00Z"),
+      deps: baseDeps(),
+    });
+    assert.ok(result);
+    assert.match(result!.instructions, /Bright Smile Dental/);
+    // No client-context sentinels (there was no context).
+    assert.doesNotMatch(result!.instructions, /CLIENT-SVC-XYZ/);
+    assert.doesNotMatch(result!.instructions, /CLIENT-FAQ-XYZ/);
+    // The TEMPLATE's FAQ is used (not overridden), so its answer is present.
+    assert.match(result!.instructions, /By appointment only\./);
+    // And the builder soul still never leaks.
+    assert.doesNotMatch(result!.instructions, /BUILDER-SOUL-LEAK/);
+  });
+
+  test("clientContext with a name overrides the clientName for the persona header", async () => {
+    const renamed: Deployment = {
+      ...DEPLOYMENT,
+      clientName: "Fallback Name Co",
+      clientContext: { soul: { businessName: "Captured Brand Name" } },
+    };
+    const result = await loadDeploymentVoiceContext({
+      deployment: renamed,
+      now: new Date("2026-06-01T17:00:00Z"),
+      deps: baseDeps(),
+    });
+    assert.match(result!.instructions, /Captured Brand Name/);
+  });
+});
+
+describe("loadDeploymentVoiceContext — per-deployment persona (customization)", () => {
+  // P1 (per-deployment customization): the deployed agent's spoken greeting, TTS
+  // voice, and script come from resolveDeploymentPersona(template defaults +
+  // deployment.customization). This locks the three substitutions + the
+  // placeholder-leak fix. baseDeps() supplies a template greeting/voice; the
+  // template here carries a customSkillMd with a {placeholder} so we can prove
+  // the script's tokens are filled/dropped (the live "thanks for calling
+  // {business name}" leak).
+  const FIXED_NOW = new Date("2026-06-01T17:00:00Z");
+
+  // A template whose greeting + script carry {placeholders}. The script is the
+  // operator's verbatim customSkillMd — the one place a literal {token} leaks.
+  const PLACEHOLDER_TEMPLATE: AgentTemplate = {
+    ...TEMPLATE,
+    blueprint: {
+      ...TEMPLATE_BLUEPRINT,
+      greeting: "Thanks for calling {business_name}!",
+      customSkillMd:
+        "You are the receptionist for {business name}. Always close with: have a great {time_of_day}.",
+    } as AgentBlueprint,
+  };
+
+  function placeholderDeps(): DeploymentVoiceDeps {
+    const deps = baseDeps();
+    deps.getAgentTemplate = async () => PLACEHOLDER_TEMPLATE;
+    return deps;
+  }
+
+  test("customization.greeting fully overrides the spoken greeting", async () => {
+    const deployment: Deployment = {
+      ...DEPLOYMENT,
+      customization: { greeting: "Hey there, Max ABC here — how can I help?" },
+    };
+    const result = await loadDeploymentVoiceContext({
+      deployment,
+      now: FIXED_NOW,
+      deps: baseDeps(),
+    });
+    assert.ok(result);
+    assert.equal(result!.greeting, "Hey there, Max ABC here — how can I help?");
+  });
+
+  test("customization.voiceId overrides the TTS voice; absent → template voice", async () => {
+    const withVoice: Deployment = {
+      ...DEPLOYMENT,
+      customization: { voiceId: "shimmer" },
+    };
+    const r1 = await loadDeploymentVoiceContext({ deployment: withVoice, now: FIXED_NOW, deps: baseDeps() });
+    assert.equal(r1!.audioVoice, "shimmer");
+
+    // No voiceId override → the template blueprint voice ("marin") stands.
+    const r2 = await loadDeploymentVoiceContext({
+      deployment: { ...DEPLOYMENT, customization: { greeting: "hi" } },
+      now: FIXED_NOW,
+      deps: baseDeps(),
+    });
+    assert.equal(r2!.audioVoice, "marin");
+  });
+
+  test("template greeting {business_name} fills from customization.businessInfo.name", async () => {
+    const deployment: Deployment = {
+      ...DEPLOYMENT,
+      // No greeting override, but a business name → the template greeting's
+      // {business_name} token is filled with it.
+      customization: { businessInfo: { name: "Max ABC" } },
+    };
+    const result = await loadDeploymentVoiceContext({
+      deployment,
+      now: FIXED_NOW,
+      deps: placeholderDeps(),
+    });
+    assert.ok(result);
+    assert.equal(result!.greeting, "Thanks for calling Max ABC!");
+  });
+
+  test("template greeting {business_name} falls back to clientName when no businessInfo", async () => {
+    // DEPLOYMENT.clientName = "Bright Smile Dental", no customization → the
+    // greeting's {business_name} fills from clientName (never read as a literal).
+    const result = await loadDeploymentVoiceContext({
+      deployment: DEPLOYMENT,
+      now: FIXED_NOW,
+      deps: placeholderDeps(),
+    });
+    assert.ok(result);
+    assert.equal(result!.greeting, "Thanks for calling Bright Smile Dental!");
+    assert.doesNotMatch(result!.greeting!, /[{}]/);
+  });
+
+  test("script {placeholders} are filled/dropped — NO literal { survives in the prompt (leak fix)", async () => {
+    // The template's customSkillMd has {business name} (fills from clientName) and
+    // {time_of_day} (no var → dropped cleanly). The composed instructions must
+    // contain the filled business name and ZERO literal braces. This is the exact
+    // live "thanks for calling BUSINESS NAME, have a great TIME OF DAY" leak.
+    const result = await loadDeploymentVoiceContext({
+      deployment: DEPLOYMENT, // no businessInfo → business_name fills from clientName
+      now: FIXED_NOW,
+      deps: placeholderDeps(),
+    });
+    assert.ok(result);
+    // The {business name} token was filled with the client name…
+    assert.match(result!.instructions, /You are the receptionist for Bright Smile Dental\./);
+    // …the {time_of_day} token (no var) was dropped, leaving clean prose…
+    assert.match(result!.instructions, /have a great\./);
+    // …and the script contributes NO literal single-brace placeholder. (We assert
+    // on the operator-script line specifically — the platform skill body uses
+    // {{double}} tokens that are out of scope for this fill.)
+    const scriptLine = result!.instructions
+      .split("\n")
+      .find((l) => l.includes("You are the receptionist for Bright Smile Dental"));
+    assert.ok(scriptLine, "the filled script line is present");
+    assert.doesNotMatch(scriptLine!, /[{}]/);
+  });
+
+  test("no customization → greeting/voice/instructions are byte-for-byte today's persona", async () => {
+    // The control: with customization:null, the persona equals exactly what the
+    // template produced before this change (greeting + voice verbatim; the
+    // composed instructions identical). DEPLOYMENT.customization is null.
+    const withCustomization = await loadDeploymentVoiceContext({
+      deployment: DEPLOYMENT,
+      now: FIXED_NOW,
+      deps: baseDeps(),
+    });
+    assert.ok(withCustomization);
+    // greeting/voice come straight from the template blueprint (no placeholders).
+    assert.equal(withCustomization!.greeting, "Thanks for calling Bright Smile Dental!");
+    assert.equal(withCustomization!.audioVoice, "marin");
+    // No literal placeholder anywhere in the prompt either.
+    assert.doesNotMatch(withCustomization!.instructions, /\{business/i);
+  });
+});
+
+describe("loadDeploymentVoiceContext — threads the booking mode into ctx", () => {
+  // ICP-3: the deployment's bookingMode + externalBookingUrl must land on
+  // ctx.booking so the deployed agent's tools can branch (native vs handoff).
+  // Workspace/operator agents never set ctx.booking — proven elsewhere; here
+  // we lock that the DEPLOYMENT path populates it.
+  const FIXED_NOW = new Date("2026-06-01T17:00:00Z");
+
+  test("threads external_link booking (mode + url) into ctx", async () => {
+    const deployment: Deployment = {
+      ...DEPLOYMENT,
+      bookingMode: "external_link",
+      externalBookingUrl: "https://book.acme.test/clientx",
+    };
+    const result = await loadDeploymentVoiceContext({
+      deployment,
+      now: FIXED_NOW,
+      deps: baseDeps(),
+    });
+    assert.ok(result);
+    assert.equal(result!.ctx.booking?.mode, "external_link");
+    assert.equal(result!.ctx.booking?.externalUrl, "https://book.acme.test/clientx");
+  });
+
+  test("defaults to native when bookingMode is the default", async () => {
+    const deployment: Deployment = {
+      ...DEPLOYMENT,
+      bookingMode: "native",
+      externalBookingUrl: null,
+    };
+    const result = await loadDeploymentVoiceContext({
+      deployment,
+      now: FIXED_NOW,
+      deps: baseDeps(),
+    });
+    assert.ok(result);
+    assert.equal(result!.ctx.booking?.mode, "native");
+    assert.equal(result!.ctx.booking?.externalUrl, null);
+  });
+
+  test("coerces an unknown stored bookingMode back to native (resolveBookingMode)", async () => {
+    const deployment = {
+      ...DEPLOYMENT,
+      // Simulate a legacy / corrupt value persisted before the enum existed.
+      bookingMode: "bogus" as Deployment["bookingMode"],
+      externalBookingUrl: null,
+    } as Deployment;
+    const result = await loadDeploymentVoiceContext({
+      deployment,
+      now: FIXED_NOW,
+      deps: baseDeps(),
+    });
+    assert.ok(result);
+    assert.equal(result!.ctx.booking?.mode, "native");
+  });
+});
+
+describe("loadDeploymentVoiceContext — retargets writes to the client org", () => {
+  // Front-office bridge: when the deployment has a provisioned CLIENT workspace
+  // (clientOrgId), ALL the agent's writes must route there — bookings via
+  // ctx.orgSlug (the booking tools resolve the workspace by slug), contacts/
+  // messages via ctx.orgId, transcripts via transcriptOrgId. When clientOrgId is
+  // null (legacy deployments + pre-provisioning) the behavior must be byte-for-
+  // byte the original: all three target the BUILDER org. This is the regression
+  // guard for the most important guardrail.
+  const FIXED_NOW = new Date("2026-06-01T17:00:00Z");
+
+  test("clientOrgId + clientOrgSlug present → orgId/transcript = client org, orgSlug = client slug", async () => {
+    const deployment = {
+      ...DEPLOYMENT,
+      clientOrgId: "client-org-123",
+      clientOrgSlug: "acme-plumbing",
+    } as Deployment & { clientOrgSlug: string | null };
+    const result = await loadDeploymentVoiceContext({
+      deployment,
+      now: FIXED_NOW,
+      deps: baseDeps(),
+    });
+    assert.ok(result);
+    // Writes (contacts/messages) + the booking-by-slug + transcript all target
+    // the CLIENT org — not the builder org.
+    assert.equal(result!.ctx.orgId, "client-org-123");
+    assert.equal(result!.ctx.orgSlug, "acme-plumbing");
+    assert.equal(result!.transcriptOrgId, "client-org-123");
+    // The builder org id must NOT be the routing target anymore.
+    assert.notEqual(result!.ctx.orgId, "builder-org-1");
+    assert.notEqual(result!.transcriptOrgId, "builder-org-1");
+  });
+
+  test("clientOrgId absent → orgId/orgSlug/transcriptOrgId ALL = builderOrgId (unchanged behavior)", async () => {
+    // DEPLOYMENT has clientOrgId: null. This is the byte-for-byte-unchanged path
+    // (legacy deployments + workspace agents + before activation provisions).
+    const result = await loadDeploymentVoiceContext({
+      deployment: DEPLOYMENT,
+      now: FIXED_NOW,
+      deps: baseDeps(),
+    });
+    assert.ok(result);
+    assert.equal(result!.ctx.orgId, "builder-org-1");
+    assert.equal(result!.ctx.orgSlug, "builder-org-1");
+    assert.equal(result!.transcriptOrgId, "builder-org-1");
+  });
+
+  test("clientOrgId set but clientOrgSlug missing → orgSlug falls back to the client org id (never empty)", async () => {
+    const deployment = {
+      ...DEPLOYMENT,
+      clientOrgId: "client-org-999",
+      clientOrgSlug: null, // join miss / since-deleted org
+    } as Deployment & { clientOrgSlug: string | null };
+    const result = await loadDeploymentVoiceContext({
+      deployment,
+      now: FIXED_NOW,
+      deps: baseDeps(),
+    });
+    assert.ok(result);
+    // orgId + transcript still target the client org; orgSlug falls back to the
+    // client org id (a non-empty value), NOT the builder org.
+    assert.equal(result!.ctx.orgId, "client-org-999");
+    assert.equal(result!.ctx.orgSlug, "client-org-999");
+    assert.equal(result!.transcriptOrgId, "client-org-999");
+  });
+});

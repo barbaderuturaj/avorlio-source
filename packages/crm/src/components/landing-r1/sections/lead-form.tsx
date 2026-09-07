@@ -1,0 +1,356 @@
+// landing-r1/sections/lead-form.tsx
+//
+// Speed-to-Lead bottom section. Palette / fonts / radius are inherited from the
+// SiteShell ancestor (it applies archetypeStyle() + dark-mode overrides) — same
+// theming contract as every other landing-r1 section; no hard-coded hex.
+// Centered card: heading, subheading,
+// Name · Phone · "What do you need?" (select from needOptions, else short
+// text), bold submit, trust line, TCPA consent. Imports submitLeadFormAction
+// directly (mirrors components/bookings/public-booking-form.tsx).
+
+"use client";
+
+import { useState, useTransition } from "react";
+import Link from "next/link";
+import { ARCHETYPES, type AestheticArchetypeId } from "../archetypes";
+import { submitLeadFormAction } from "@/lib/landing/lead-form-action";
+import type { R1LeadFormSection } from "@/lib/landing/r1-payload-prompt";
+
+const DEFAULTS = {
+  heading: "Tell us what you need",
+  needLabel: "What do you need?",
+  consentText:
+    "By submitting, you agree to receive automated marketing and informational text messages (appointment scheduling, reminders, and follow-ups) from us at the number provided. Consent is not a condition of purchase. Msg & data rates may apply. Msg frequency varies. Reply STOP to opt out, HELP for help.",
+};
+
+/** First token of a full name, safe for empty input. */
+function firstNameOf(full: string): string {
+  return full.trim().split(/\s+/)[0] ?? "";
+}
+
+/**
+ * Pure confirm-copy decision. Exported for unit testing. Returns the
+ * post-submit card content; copy adapts to whether the lead SMS went out.
+ */
+export function leadFormConfirmation(input: {
+  name: string;
+  smsSent: boolean;
+  bookUrl: string;
+}): { headline: string; body: string; showBookButton: boolean; bookUrl: string } {
+  const first = firstNameOf(input.name);
+  if (input.smsSent) {
+    return {
+      headline: first ? `Thanks, ${first}. We received your request.` : "Thanks! We received your request.",
+      body: input.bookUrl
+        ? "We sent you a link to view available times."
+        : "We sent a confirmation text about your request.",
+      showBookButton: false,
+      bookUrl: input.bookUrl,
+    };
+  }
+  return {
+    headline: first ? `Thanks, ${first}. We received your request.` : "Thanks! We received your request.",
+    body: "Thanks for reaching out.",
+    showBookButton: Boolean(input.bookUrl),
+    bookUrl: input.bookUrl,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// LeadFormCard — reusable card (no section wrapper, no id, no archetype attr)
+// ---------------------------------------------------------------------------
+
+export type LeadFormCardProps = {
+  orgSlug: string;
+  businessName: string;
+  leadForm: R1LeadFormSection;
+};
+
+/**
+ * The form card itself: heading, fields, submit, trust line, consent.
+ * Root element is `.sf-leadform-card` — no `<section>`, no `id`, no
+ * `data-archetype`. Mount it anywhere (hero column, service page, etc.).
+ */
+export function LeadFormCard({ orgSlug, businessName, leadForm }: LeadFormCardProps) {
+  const [pending, startTransition] = useTransition();
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [need, setNeed] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ReturnType<typeof leadFormConfirmation> | null>(null);
+
+  const heading = leadForm.heading || DEFAULTS.heading;
+  const subheading = leadForm.subheading || `Share your contact details and choose a service. ${businessName} can follow up during business hours.`;
+  const needLabel = leadForm.needLabel || DEFAULTS.needLabel;
+  const customConsentText = leadForm.consentText || null;
+  const options = leadForm.needOptions ?? [];
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    if (!name.trim() || !phone.trim()) {
+      setError("Please enter your name and phone.");
+      return;
+    }
+    startTransition(async () => {
+      const res = await submitLeadFormAction({ orgSlug, name, phone, need });
+      if (!res.ok) {
+        setError(res.error || "Something went wrong. Please call us instead.");
+        return;
+      }
+      setConfirm(leadFormConfirmation({ name, smsSent: res.smsSent, bookUrl: res.bookUrl }));
+    });
+  }
+
+  return (
+    <>
+      <div className="sf-leadform-card">
+        {confirm ? (
+          <div className="sf-leadform-success" role="status">
+            <h2 className="sf-leadform-heading">{confirm.headline}</h2>
+            <p className="sf-leadform-sub">{confirm.body}</p>
+            {confirm.showBookButton && confirm.bookUrl ? (
+              <a className="sf-leadform-submit" href={confirm.bookUrl}>
+                View available times
+              </a>
+            ) : null}
+          </div>
+        ) : (
+          <>
+            <h2 className="sf-leadform-heading">{heading}</h2>
+            <p className="sf-leadform-sub">{subheading}</p>
+            <form className="sf-leadform-form" onSubmit={handleSubmit}>
+              <label className="sf-leadform-field">
+                <span>Your name</span>
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  autoComplete="name"
+                  required
+                />
+              </label>
+              <label className="sf-leadform-field">
+                <span>Phone</span>
+                <input
+                  type="tel"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                  autoComplete="tel"
+                  required
+                />
+              </label>
+              <label className="sf-leadform-field">
+                <span>{needLabel}</span>
+                {options.length > 0 ? (
+                  <select value={need} onChange={(e) => setNeed(e.target.value)}>
+                    <option value="">Select…</option>
+                    {options.map((opt) => (
+                      <option key={opt} value={opt}>
+                        {opt}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={need}
+                    onChange={(e) => setNeed(e.target.value)}
+                    placeholder="Briefly, what do you need?"
+                  />
+                )}
+              </label>
+
+              {error ? (
+                <p className="sf-leadform-error" role="alert">
+                  {error}
+                </p>
+              ) : null}
+
+              <button type="submit" className="sf-leadform-submit" disabled={pending}>
+                {pending ? "Sending…" : "Submit request"}
+              </button>
+              {customConsentText ? (
+                <p className="sf-leadform-consent">{customConsentText}</p>
+              ) : (
+                <p className="sf-leadform-consent">
+                  {"By submitting, you agree to receive automated marketing and informational text messages (appointment scheduling, reminders, and follow-ups) from " + businessName + " at the number provided. Consent is not a condition of purchase. Msg & data rates may apply. Msg frequency varies. Reply STOP to opt out, HELP for help. "}
+                  <Link href="/privacy" className="sf-leadform-consent-link">
+                    Privacy Policy
+                  </Link>
+                  {" & "}
+                  <Link href="/terms" className="sf-leadform-consent-link">
+                    Terms
+                  </Link>
+                  {"."}
+                </p>
+              )}
+            </form>
+          </>
+        )}
+      </div>
+
+      {/* Card-level styled-jsx. Global mode (no `scoped`) matches the pattern
+          used by hero.tsx, faq.tsx, etc. — reactCompiler:true breaks scoped jsx.
+          These rules own .sf-leadform-card and all its children. */}
+      <style jsx global>{`
+        .sf-leadform-card {
+          width: 100%;
+          max-width: 520px;
+          background: var(--bg, #fff);
+          border: 1px solid var(--border, #e5e5e5);
+          border-radius: 16px;
+          padding: clamp(24px, 5vw, 40px);
+          box-shadow: 0 12px 40px rgba(0, 0, 0, 0.08);
+        }
+        @media (min-width: 1024px) {
+          .sf-leadform-card { padding: 44px; }
+        }
+        .sf-leadform-heading {
+          font-family: var(--font-headline);
+          font-size: clamp(24px, 4vw, 34px);
+          font-weight: 700;
+          line-height: 1.1;
+          margin: 0 0 8px;
+          color: var(--text);
+        }
+        .sf-leadform-sub {
+          font-size: 15px;
+          line-height: 1.55;
+          margin: 0 0 24px;
+          color: color-mix(in oklab, var(--text) 72%, transparent);
+        }
+        .sf-leadform-form {
+          display: flex;
+          flex-direction: column;
+          gap: 14px;
+        }
+        .sf-leadform-field {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+        .sf-leadform-field span {
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--text);
+        }
+        .sf-leadform-field input,
+        .sf-leadform-field select {
+          height: 48px;
+          padding: 0 14px;
+          font-size: 16px;
+          color: var(--text);
+          background: var(--bg, #fff);
+          border: 1px solid var(--border, #d9d9d9);
+          border-radius: 10px;
+          outline: none;
+        }
+        .sf-leadform-field input:focus,
+        .sf-leadform-field select:focus {
+          border-color: var(--primary);
+          box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 24%, transparent);
+        }
+        .sf-leadform-submit {
+          height: 52px;
+          margin-top: 4px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 16px;
+          font-weight: 700;
+          text-decoration: none;
+          color: var(--primary-ink, #fff);
+          background: var(--primary);
+          border: none;
+          border-radius: 10px;
+          cursor: pointer;
+          transition: background 160ms ease, transform 120ms ease;
+        }
+        .sf-leadform-submit:hover {
+          background: color-mix(in oklab, var(--primary) 88%, #000);
+        }
+        .sf-leadform-submit:active {
+          transform: translateY(1px);
+        }
+        .sf-leadform-submit:disabled {
+          opacity: 0.6;
+          cursor: default;
+        }
+        .sf-leadform-trust {
+          margin: 12px 0 0;
+          text-align: center;
+          font-size: 13px;
+          color: color-mix(in oklab, var(--text) 60%, transparent);
+        }
+        .sf-leadform-consent {
+          margin: 8px 0 0;
+          font-size: 11px;
+          line-height: 1.45;
+          color: color-mix(in oklab, var(--text) 50%, transparent);
+        }
+        .sf-leadform-consent-link {
+          text-decoration: underline;
+          text-underline-offset: 2px;
+          color: inherit;
+        }
+        .sf-leadform-error {
+          margin: 0;
+          font-size: 14px;
+          color: #dc2626;
+        }
+        .sf-leadform-success {
+          text-align: center;
+        }
+        .sf-leadform-success .sf-leadform-submit {
+          margin-top: 16px;
+        }
+      `}</style>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// LeadFormSection — thin section wrapper; public API unchanged
+// ---------------------------------------------------------------------------
+
+export type LeadFormSectionProps = {
+  orgSlug: string;
+  businessName: string;
+  archetype: AestheticArchetypeId;
+  leadForm: R1LeadFormSection;
+};
+
+/**
+ * Full-width section shell. Passes orgSlug / businessName / leadForm down to
+ * LeadFormCard. Keeps `data-archetype` so CSS-var theming works as before.
+ * archetypeStyle() is intentionally omitted — the shell inherits from the
+ * page-level theme (per the prior task).
+ */
+export function LeadFormSection({ orgSlug, businessName, archetype, leadForm }: LeadFormSectionProps) {
+  const arch = ARCHETYPES[archetype];
+
+  return (
+    <section
+      id="lead-form"
+      data-archetype={arch.id}
+      className="sf-leadform"
+      aria-label={`Contact ${businessName}`}
+    >
+      <LeadFormCard orgSlug={orgSlug} businessName={businessName} leadForm={leadForm} />
+
+      {/* Section-level layout rules only — centering and padding. Card rules
+          live in LeadFormCard's own styled-jsx block above. */}
+      <style jsx global>{`
+        .sf-leadform {
+          background: var(--surface, #f5f5f5);
+          color: var(--text, #111);
+          font-family: var(--font-body);
+          padding: clamp(48px, 8vw, 96px) 20px;
+          display: flex;
+          justify-content: center;
+        }
+      `}</style>
+    </section>
+  );
+}

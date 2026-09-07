@@ -1,0 +1,257 @@
+import type { Archetype, ArchetypePlaceholder } from "./archetypes";
+import type { AgentConfig } from "./configure-actions";
+
+/**
+ * WS3.1.3 — synthesis: fill an archetype's `specTemplate` with the
+ * operator-supplied configuration so the spec is ready to feed
+ * `runtime.startRun()`.
+ *
+ * Two placeholder kinds (per the archetype types doc):
+ *
+ *   - `kind: "user_input"` — resolved at SYNTHESIS TIME from the
+ *     operator's saved config. e.g. `$formId` → "uuid-of-the-form".
+ *     If a required user-input placeholder has no value, synthesis
+ *     fails — the configure form's checklist already prevents that
+ *     state from reaching here, but we re-validate as defense in
+ *     depth (a deploy that bypassed the UI would still fail safely).
+ *
+ *   - `kind: "soul_copy"` — meant to be filled by Claude at synthesis
+ *     time using Soul as context. For V1, we substitute the
+ *     placeholder's `example` value if available, otherwise leave
+ *     the raw token in place. That means:
+ *       - SMS / email copy uses the archetype-author's example text
+ *         out of the box (operator-edible via "Advanced — system
+ *         prompt override" or by re-saving the archetype later).
+ *       - Tokens that don't have an example fall through to the
+ *         runtime as literal `$xxx` strings — visible in the run
+ *         logs so the operator can see what wasn't filled and edit
+ *         the config / prompt accordingly.
+ *     Full Claude-driven soul_copy synthesis is V1.1 (it requires
+ *     a synthesis LLM call at deploy time + a way to capture the
+ *     resolved copy for review before the agent goes live).
+ *
+ * Runtime `{{interpolation}}` tokens are NOT touched here — those
+ * resolve at execution time from the trigger payload + capture
+ * scope. We only fill the `$placeholder` kind.
+ */
+
+export type SynthesisFailure = {
+  ok: false;
+  reason: "missing_required_placeholder";
+  placeholderKey: string;
+};
+
+export type SynthesisSuccess = {
+  ok: true;
+  spec: Record<string, unknown>;
+  /** Audit trail — which placeholders were filled with which values. */
+  filled: Record<string, string>;
+  /** Soul-copy placeholders we substituted with the archetype's
+   *  example text. Empty when no soul_copy fields are present. */
+  soulCopyDefaults: Record<string, string>;
+  /** Soul-copy placeholders left unfilled because the author didn't
+   *  supply an example. Operators see these as `$xxx` in step output
+   *  and can fix via system-prompt override. */
+  unfilledSoulCopy: string[];
+};
+
+export type SynthesisResult = SynthesisSuccess | SynthesisFailure;
+
+export function synthesizeAgentSpec(
+  archetype: Archetype,
+  config: AgentConfig
+): SynthesisResult {
+  const filled: Record<string, string> = {};
+  const soulCopyDefaults: Record<string, string> = {};
+  const unfilledSoulCopy: string[] = [];
+
+  // Validate required user-input placeholders are present.
+  for (const [key, meta] of Object.entries(archetype.placeholders)) {
+    if (meta.kind !== "user_input") continue;
+    const value = config.placeholders?.[key];
+    const usable = typeof value === "string" && value.trim().length > 0;
+    if (!usable) {
+      // 2026-05-19 — fall back to placeholder.example when the operator
+      // hasn't supplied a value. This makes new required placeholders
+      // backwards-compatible with existing agent configs: when we
+      // introduce a new user_input placeholder (e.g. Phase 2 Task 2.4
+      // added $maxTurns to speed-to-lead), agents that were configured
+      // BEFORE the addition continue to work using the archetype's
+      // example as the implicit default. The operator can override
+      // later via /automations/[id]/configure.
+      //
+      // Trade-off: placeholders that genuinely have no sensible default
+      // (e.g. $formId — must point at a specific form) should leave
+      // `example` empty so this fallback throws as before. Treat any
+      // non-empty `example` as "the archetype author has declared this
+      // a safe default".
+      if (meta.example && meta.example.trim().length > 0) {
+        console.warn(
+          JSON.stringify({
+            event: "synthesis.user_input_defaulted_to_example",
+            archetypeId: archetype.id,
+            placeholderKey: key,
+            example: meta.example,
+          })
+        );
+        filled[key] = meta.example.trim();
+        continue;
+      }
+      return { ok: false, reason: "missing_required_placeholder", placeholderKey: key };
+    }
+    filled[key] = value.trim();
+  }
+
+  // Substitute soul_copy with example text where available.
+  for (const [key, meta] of Object.entries(archetype.placeholders)) {
+    if (meta.kind !== "soul_copy") continue;
+    if (meta.example && meta.example.trim().length > 0) {
+      soulCopyDefaults[key] = meta.example;
+    } else {
+      unfilledSoulCopy.push(key);
+    }
+  }
+
+  // Walk the specTemplate recursively, replacing any string value
+  // that contains a known $placeholder token.
+  const allReplacements = new Map<string, string>();
+  for (const [k, v] of Object.entries(filled)) allReplacements.set(k, v);
+  for (const [k, v] of Object.entries(soulCopyDefaults)) allReplacements.set(k, v);
+
+  // V1: don't write LLM config (model / temperature / system prompt)
+  // into spec.variables — those are typed as ref strings and the
+  // runtime's `seedVariableScope` calls `ref.split(".")` on every
+  // entry. Inserting a number there breaks the run with
+  // "ref.split is not a function" before any step executes.
+  // The archetype's default model + temperature + system prompt
+  // ride along inside conversation/llm_call steps; per-archetype
+  // override wiring is V1.1 (it'll inject at the step level, not
+  // the variables level).
+  const spec = substituteInValue(archetype.specTemplate, allReplacements) as Record<
+    string,
+    unknown
+  >;
+
+  // 2026-05-19 — Phase 2 Task 2.4. Sidecar `placeholders` map on the
+  // spec so the runtime can read operator-editable values that don't
+  // appear as $tokens inside the spec template (e.g. $maxTurns,
+  // $forbiddenPhrases — consumed by the conversation dispatcher to
+  // gate turn count + forbidden-phrase list per the thin-harness/
+  // fat-prose principle). Keyed by name WITHOUT the leading `$` so
+  // dispatchers don't have to special-case the prefix. The Zod
+  // schema strips this field on validation, but specSnapshot is
+  // stored as raw JSONB (no re-parse), so the sidecar survives the
+  // round trip to disk and back into dispatcher reads.
+  const placeholdersForSpec: Record<string, string> = {};
+  for (const [k, v] of allReplacements.entries()) {
+    placeholdersForSpec[k.replace(/^\$/, "")] = v;
+  }
+  if (Object.keys(placeholdersForSpec).length > 0) {
+    spec.placeholders = placeholdersForSpec;
+  }
+
+  return {
+    ok: true,
+    spec,
+    filled,
+    soulCopyDefaults,
+    unfilledSoulCopy,
+  };
+}
+
+/**
+ * Recursively walk a JSON-like value and replace any string that
+ * contains `$placeholder` tokens with the corresponding map entries.
+ *
+ * Replacement is whole-token aware — `$foo` only matches when not
+ * followed by a word character, so `$form` and `$formId` don't
+ * collide. (Postgres-like word boundary on the right side of the
+ * token; left side is anchored by `$`.)
+ */
+function substituteInValue(value: unknown, replacements: Map<string, string>): unknown {
+  if (typeof value === "string") {
+    // Detect "entire value is a single placeholder token" — used for
+    // numeric coercion below. Without this, archetype templates that
+    // write `seconds: "$waitSeconds"` (string with token) would
+    // produce `seconds: "120"` (string), and the runtime validator
+    // (which requires `seconds: number`) would reject the spec —
+    // startRun then throws and no workflow_run is created.
+    const wholeTokenMatch = /^(\$[A-Za-z][A-Za-z0-9_]*)$/.exec(value.trim());
+    const wholeToken =
+      wholeTokenMatch && replacements.has(wholeTokenMatch[1])
+        ? wholeTokenMatch[1]
+        : null;
+
+    let out = value;
+    // Sort by descending length so $appointmentTypeId is replaced
+    // before $appointment, etc.
+    const keys = Array.from(replacements.keys()).sort((a, b) => b.length - a.length);
+    for (const key of keys) {
+      // Escape regex specials in the key.
+      const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`${escapedKey}(?![A-Za-z0-9_])`, "g");
+      out = out.replace(re, replacements.get(key)!);
+    }
+
+    // Numeric coercion only when the original value WAS the entire
+    // token. A sentence like `"Wait $waitSeconds seconds"` stays a
+    // string after substitution; just `"$waitSeconds"` becomes a
+    // number.
+    if (wholeToken) {
+      const trimmed = out.trim();
+      if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+        const n = Number(trimmed);
+        if (Number.isFinite(n)) return n;
+      }
+    }
+
+    return out;
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => substituteInValue(v, replacements));
+  }
+  if (value && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      result[k] = substituteInValue(v, replacements);
+    }
+    return result;
+  }
+  return value;
+}
+
+/**
+ * Helper: find the trigger event type from a synthesized spec.
+ * Lets the dispatcher match deployed agents to incoming events
+ * without re-parsing the archetype template.
+ */
+export function getTriggerEventType(spec: Record<string, unknown>): string | null {
+  const trigger = (spec.trigger ?? {}) as Record<string, unknown>;
+  if (typeof trigger.type !== "string") return null;
+  if (trigger.type === "event" && typeof trigger.event === "string") {
+    return trigger.event;
+  }
+  return null;
+}
+
+/**
+ * Helper: extract a placeholder's filled value from a saved config
+ * BEFORE synthesis runs, used by the dispatcher to filter agents
+ * (e.g. "this form-submitted event matches an agent only if its
+ * `$formId` placeholder equals the submitted form's id").
+ */
+export function getConfigPlaceholderValue(
+  config: AgentConfig,
+  key: string
+): string | null {
+  const value = config.placeholders?.[key];
+  if (!value || typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * Re-export for callers that need to check what kind a placeholder
+ * is without re-importing from archetypes/types.
+ */
+export type { ArchetypePlaceholder };

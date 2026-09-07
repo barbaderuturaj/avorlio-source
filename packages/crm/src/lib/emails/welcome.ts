@@ -1,0 +1,535 @@
+// Onboarding-welcome email helpers — fired by the MCP `send_welcome_email`
+// tool after the user confirms an email post-`create_workspace`. Pure
+// functions for validation, template rendering, and Resend dispatch so
+// the route handler stays a thin orchestrator and tests don't need
+// network or DB.
+
+const DISCORD_INVITE = "https://discord.gg/sbVUu976NW";
+// v1.1.4 / Issue #4 — default to the verified seldonframe.com domain
+// (set up in Resend → Domains) so welcome emails actually reach the
+// operator's inbox. The legacy onboarding@resend.dev sandbox was rate-
+// limited to 3/day and could only send to the account owner's verified
+// email — every operator-facing send silently 403'd.
+//
+// v1.1.7 / Bug #2 (med-spa demo) — `RESEND_FROM_ADDRESS` env var on the
+// production deployment was still pointing to `onboarding@resend.dev`
+// from a pre-v1.1.4 run, which Resend treats as sandbox. Sandbox-mode
+// sends to non-account-owner recipients return an error that gets
+// surfaced to the operator as "the email service is in test mode".
+// Fix: when the env override points at the sandbox domain, IGNORE it
+// and use the verified production domain. Real per-environment
+// overrides (e.g. `staging@seldonframe.com`) still work because they
+// don't match the sandbox prefix.
+const DEFAULT_FROM = "SeldonFrame <welcome@seldonframe.com>";
+const SANDBOX_FROM_PATTERN = /@resend\.dev>?$/i;
+
+export type WelcomeChatbot = {
+  url: string;
+  embed_snippet: string;
+  status: "live" | "test";
+};
+
+export type WelcomeWorkspace = {
+  landing_url: string;
+  booking_url: string;
+  intake_url: string;
+  admin_url: string;
+  /** Optional — every workspace ships with an AI chatbot, but the
+   *  welcome-email caller may not always have the embed details on
+   *  hand (e.g. legacy callers, or a workspace created before the
+   *  auto-chatbot scaffold existed). Omitting it just skips the card;
+   *  it never fails validation or breaks existing 4-URL callers. */
+  chatbot?: WelcomeChatbot;
+};
+
+export type WelcomeEmailRequest = {
+  email: string;
+  name: string | null;
+  workspace: WelcomeWorkspace;
+  /** v1.8.0 — workspace tier. When undefined or "free", the welcome
+   *  email includes an upgrade pitch for custom domains. Paid tiers
+   *  see a "your custom domain is ready to add" message instead. */
+  tier?: "free" | "growth" | "scale";
+};
+
+export type ValidateResult =
+  | { ok: true; data: WelcomeEmailRequest }
+  | { ok: false; status: 400; error: string };
+
+export type SendDeps = {
+  fetcher?: typeof fetch;
+  apiKey: string;
+  fromAddress: string;
+};
+
+export type SendResult =
+  | { ok: true; messageId: string }
+  | { ok: false; status: number; error: string };
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+export function validateWelcomeRequest(body: unknown): ValidateResult {
+  if (!body || typeof body !== "object") {
+    return { ok: false, status: 400, error: "Request body must be an object." };
+  }
+  const b = body as Record<string, unknown>;
+
+  if (!isNonEmptyString(b.email)) {
+    return { ok: false, status: 400, error: "email is required (non-empty string)." };
+  }
+
+  if (!b.workspace || typeof b.workspace !== "object") {
+    return {
+      ok: false,
+      status: 400,
+      error: "workspace is required (object with landing_url, booking_url, intake_url, admin_url).",
+    };
+  }
+  const w = b.workspace as Record<string, unknown>;
+  for (const key of ["landing_url", "booking_url", "intake_url", "admin_url"] as const) {
+    if (!isNonEmptyString(w[key])) {
+      return { ok: false, status: 400, error: `workspace.${key} is required.` };
+    }
+  }
+
+  const name = isNonEmptyString(b.name) ? b.name.trim() : null;
+
+  // v1.8.0 — optional tier passthrough. Drives the upgrade-pitch
+  // block. Falls back to "free" silently when omitted so existing
+  // callers keep working.
+  const rawTier =
+    typeof b.tier === "string" ? b.tier.trim().toLowerCase() : "";
+  const tier: "free" | "growth" | "scale" | undefined =
+    rawTier === "free" || rawTier === "growth" || rawTier === "scale"
+      ? (rawTier as "free" | "growth" | "scale")
+      : undefined;
+
+  // Optional chatbot card — only validated when present so every
+  // existing 4-URL caller (no chatbot field at all) keeps working.
+  let chatbot: WelcomeChatbot | undefined;
+  if (w.chatbot !== undefined && w.chatbot !== null) {
+    if (typeof w.chatbot !== "object") {
+      return {
+        ok: false,
+        status: 400,
+        error: "workspace.chatbot must be an object with url, embed_snippet, and status.",
+      };
+    }
+    const c = w.chatbot as Record<string, unknown>;
+    if (!isNonEmptyString(c.url)) {
+      return { ok: false, status: 400, error: "workspace.chatbot.url is required." };
+    }
+    if (!isNonEmptyString(c.embed_snippet)) {
+      return { ok: false, status: 400, error: "workspace.chatbot.embed_snippet is required." };
+    }
+    if (c.status !== "live" && c.status !== "test") {
+      return { ok: false, status: 400, error: "workspace.chatbot.status must be \"live\" or \"test\"." };
+    }
+    chatbot = {
+      url: c.url.trim(),
+      embed_snippet: c.embed_snippet.trim(),
+      status: c.status,
+    };
+  }
+
+  return {
+    ok: true,
+    data: {
+      email: b.email.trim(),
+      name,
+      workspace: {
+        landing_url: (w.landing_url as string).trim(),
+        booking_url: (w.booking_url as string).trim(),
+        intake_url: (w.intake_url as string).trim(),
+        admin_url: (w.admin_url as string).trim(),
+        ...(chatbot ? { chatbot } : {}),
+      },
+      tier,
+    },
+  };
+}
+
+export function pickFromAddress(env: NodeJS.ProcessEnv | Record<string, string | undefined>): string {
+  const configured = typeof env.RESEND_FROM_ADDRESS === "string" ? env.RESEND_FROM_ADDRESS.trim() : "";
+  // v1.1.7 — if the env var points at Resend's sandbox onboarding
+  // address, ignore it. The sandbox can only deliver to the verified
+  // account owner; any operator-facing send fails. The verified
+  // welcome@seldonframe.com domain is set up in Resend (DNS verified
+  // May 01) and works for all recipients.
+  if (configured && SANDBOX_FROM_PATTERN.test(configured)) {
+    console.warn(
+      `[welcome-email] Ignoring RESEND_FROM_ADDRESS="${configured}" — sandbox addresses can only deliver to the account owner. Falling back to ${DEFAULT_FROM}.`,
+    );
+    return DEFAULT_FROM;
+  }
+  // v1.1.8 — aggressive default. When the env var is not set OR
+  // doesn't carry a seldonframe.com address, force the verified
+  // production domain. This guards against env drift where a
+  // staging/preview deployment carries an unverified `noreply@example
+  // .com`-style override that Resend would reject.
+  if (configured && !/seldonframe\.com>?$/i.test(configured)) {
+    console.warn(
+      `[welcome-email] RESEND_FROM_ADDRESS="${configured}" doesn't use a verified seldonframe.com domain — falling back to ${DEFAULT_FROM} for safety.`,
+    );
+    return DEFAULT_FROM;
+  }
+  return configured || DEFAULT_FROM;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * v1.9.0 — render the tier-conditional block between Next-Steps and
+ * the Discord CTA.
+ *
+ *   Free tier  → the $29/mo Growth pitch (own domain, unlimited
+ *                workspaces, sell on the marketplace at 95%). There is
+ *                only one paid tier now — no Scale, no $99.
+ *   Paid tier  → "your custom domain is ready to add" + MCP command.
+ *
+ * Always returns a <tr><td>...</td></tr> shape so the surrounding
+ * email-table layout stays valid even when no tier is provided
+ * (defensive: empty string for that case).
+ */
+function renderUpgradeBlock(req: WelcomeEmailRequest): string {
+  const tier = req.tier ?? "free";
+  const adminUrl = escapeHtml(req.workspace.admin_url);
+  const billingUrl = adminUrl.replace(/\/admin\b.*$/, "/settings/billing");
+
+  if (tier === "free") {
+    return `<tr><td style="padding:8px 32px 8px 32px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fffbea;border:1px solid #fde68a;border-radius:10px;">
+        <tr><td style="padding:16px 18px;">
+          <div style="font-size:13px;color:#92400e;letter-spacing:0.04em;text-transform:uppercase;font-weight:600;margin-bottom:6px;">Go pro for $29/mo</div>
+          <ul style="margin:0 0 12px 0;padding-left:18px;font-size:14px;color:#78350f;line-height:1.6;">
+            <li><strong>Your own domain</strong> — joescuts.com → your workspace, auto-SSL, no more *.seldonframe.com in front of customers.</li>
+            <li><strong>Unlimited workspaces</strong> — spin up a new one for every client or business, all on one flat price.</li>
+            <li><strong>List &amp; sell your agents on the marketplace</strong> — you keep 95%.</li>
+          </ul>
+          <a href="${billingUrl}" style="display:inline-block;background:#92400e;color:#fffbea;text-decoration:none;font-size:13px;font-weight:600;padding:9px 18px;border-radius:7px;">Upgrade to Growth — $29/mo →</a>
+        </td></tr>
+      </table>
+    </td></tr>`;
+  }
+
+  // Paid tier: usable hint about adding a custom domain. No Scale
+  // mention — Growth ($29/mo) is the only paid tier.
+  return `<tr><td style="padding:8px 32px 8px 32px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:10px;">
+      <tr><td style="padding:16px 18px;">
+        <div style="font-size:13px;color:#065f46;letter-spacing:0.04em;text-transform:uppercase;font-weight:600;margin-bottom:6px;">Custom domain ready</div>
+        <div style="font-size:14px;color:#064e3b;line-height:1.55;margin-bottom:6px;">
+          You're on a paid plan — custom domains with auto-SSL are included. From your IDE, ask Claude:
+          <code style="background:#d1fae5;padding:2px 6px;border-radius:4px;font-size:13px;">add_custom_domain hostname:&quot;yoursite.com&quot;</code>
+        </div>
+        <div style="font-size:13px;color:#047857;">You'll get a CNAME record to paste into your DNS, then run <code>verify_domain</code> once it propagates.</div>
+      </td></tr>
+    </table>
+  </td></tr>`;
+}
+
+/**
+ * v1.9.0 — "Sell what you just built" block. Plants the seller
+ * flywheel on day one: the operator didn't just get a workspace, they
+ * built an agent, and that agent is listable on the marketplace.
+ * Always rendered (not tier-gated) — every workspace ships an agent.
+ */
+function renderSellBlock(): string {
+  return `<tr><td style="padding:8px 32px 8px 32px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;">
+      <tr><td style="padding:16px 18px;">
+        <div style="font-size:13px;color:#111;letter-spacing:0.04em;text-transform:uppercase;font-weight:600;margin-bottom:6px;">Sell what you just built</div>
+        <div style="font-size:14px;color:#374151;line-height:1.55;margin-bottom:8px;">
+          You didn't just get a workspace — you built an AI agent. List it on the SeldonFrame marketplace and earn on every install or rental. You keep 95%; we take a sliver only when it sells.
+        </div>
+        <a href="https://seldonframe.com/marketplace" style="color:#1a73e8;text-decoration:none;font-size:13px;font-weight:600;">Browse the marketplace →</a>
+      </td></tr>
+    </table>
+  </td></tr>`;
+}
+
+/**
+ * AI Chatbot card — rendered only when `workspace.chatbot` is present.
+ * Mirrors the existing URL-card table style (same border/padding/label
+ * typography) with an added embed-snippet <pre> block and a
+ * status-conditional one-liner.
+ */
+function renderChatbotCard(chatbot: WelcomeChatbot): string {
+  const safeUrl = escapeHtml(chatbot.url);
+  const safeSnippet = escapeHtml(chatbot.embed_snippet);
+  const statusNote =
+    chatbot.status === "live"
+      ? `<div style="font-size:13px;color:#047857;margin-top:8px;">It's live and answering now.</div>`
+      : `<div style="font-size:13px;color:#9aa0a6;margin-top:8px;">It's in test mode — publish it live from your IDE with publish_agent, or ask Claude.</div>`;
+
+  return `<tr><td style="padding:8px 32px 0 32px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;">
+            <tr><td style="padding:14px 18px;">
+              <div style="font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">AI Chatbot</div>
+              <a href="${safeUrl}" style="color:#1a73e8;text-decoration:none;font-size:15px;word-break:break-all;">${safeUrl}</a>
+              <div style="font-size:13px;color:#4b5563;margin-top:10px;margin-bottom:6px;">Paste this before &lt;/body&gt; on your real website to put the chatbot live there.</div>
+              <pre style="background:#f5f5f7;border-radius:6px;padding:10px 12px;font-size:12px;line-height:1.5;color:#1a1a1f;overflow-x:auto;white-space:pre-wrap;word-break:break-all;margin:0;"><code>${safeSnippet}</code></pre>
+              ${statusNote}
+            </td></tr>
+          </table>
+        </td></tr>`;
+}
+
+export function renderWelcomeEmailHtml(req: WelcomeEmailRequest): string {
+  const greeting = req.name ? `Hi ${escapeHtml(req.name)},` : "Welcome aboard,";
+  const w = req.workspace;
+  const safeLanding = escapeHtml(w.landing_url);
+  const safeBooking = escapeHtml(w.booking_url);
+  const safeIntake = escapeHtml(w.intake_url);
+  const safeAdmin = escapeHtml(w.admin_url);
+  // Primary CTA — test the live receptionist if the chatbot exists,
+  // otherwise fall back to the landing page.
+  const primaryUrl = w.chatbot ? escapeHtml(w.chatbot.url) : safeLanding;
+  const primaryLabel = w.chatbot ? "Test your AI receptionist →" : "Open your workspace →";
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Your SeldonFrame workspace is live</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f7;padding:24px 12px;">
+    <tr><td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
+
+        <tr><td style="background:#0b0b10;padding:32px 32px 28px 32px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:0.08em;text-transform:uppercase;color:#9aa0a6;margin-bottom:8px;">SeldonFrame</div>
+          <div style="font-size:24px;font-weight:600;line-height:1.25;">Your workspace is live.</div>
+          <div style="font-size:14px;color:#c8ccd1;margin-top:8px;">Every URL below works right now — no signup, no setup.</div>
+        </td></tr>
+
+        <tr><td style="padding:28px 32px 8px 32px;font-size:15px;line-height:1.55;color:#1a1a1f;">
+          <p style="margin:0 0 16px 0;">${greeting}</p>
+          <p style="margin:0 0 20px 0;">
+            Thanks for spinning up a workspace on SeldonFrame. Bookmark these four URLs — they're your business OS in production.
+          </p>
+          <a href="${primaryUrl}" style="display:inline-block;background:#0b0b10;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:13px 26px;border-radius:8px;">${primaryLabel}</a>
+        </td></tr>
+
+        <tr><td style="padding:8px 32px 0 32px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;">
+            <tr><td style="padding:14px 18px;border-bottom:1px solid #f0f1f3;">
+              <div style="font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">Landing page</div>
+              <a href="${safeLanding}" style="color:#1a73e8;text-decoration:none;font-size:15px;word-break:break-all;">${safeLanding}</a>
+            </td></tr>
+            <tr><td style="padding:14px 18px;border-bottom:1px solid #f0f1f3;">
+              <div style="font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">Booking</div>
+              <a href="${safeBooking}" style="color:#1a73e8;text-decoration:none;font-size:15px;word-break:break-all;">${safeBooking}</a>
+            </td></tr>
+            <tr><td style="padding:14px 18px;border-bottom:1px solid #f0f1f3;">
+              <div style="font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">Intake form</div>
+              <a href="${safeIntake}" style="color:#1a73e8;text-decoration:none;font-size:15px;word-break:break-all;">${safeIntake}</a>
+            </td></tr>
+            <tr><td style="padding:14px 18px;">
+              <div style="font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">Admin dashboard</div>
+              <a href="${safeAdmin}" style="color:#1a73e8;text-decoration:none;font-size:15px;word-break:break-all;">${safeAdmin}</a>
+              <div style="font-size:12px;color:#9aa0a6;margin-top:6px;">Token expires in 7 days. Re-mint via <code>list_workspaces({})</code> when it does.</div>
+            </td></tr>
+          </table>
+        </td></tr>
+
+        ${w.chatbot ? renderChatbotCard(w.chatbot) : ""}
+
+        <tr><td style="padding:24px 32px 8px 32px;font-size:15px;line-height:1.55;color:#1a1a1f;">
+          <div style="font-weight:600;margin-bottom:8px;">Next steps</div>
+          <ol style="padding-left:20px;margin:0 0 16px 0;">
+            <li style="margin-bottom:6px;">Test your AI receptionist — it's live and already knows your business.</li>
+            <li style="margin-bottom:6px;">Put it on your real website — paste the one-line embed (above) before &lt;/body&gt;.</li>
+            <li style="margin-bottom:6px;">Watch your first lead land in the CRM — every intake + chat feeds the workspace's brain.</li>
+          </ol>
+        </td></tr>
+
+        ${renderSellBlock()}
+
+        ${renderUpgradeBlock(req)}
+
+        <tr><td style="padding:8px 32px 24px 32px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#5865f2;border-radius:10px;">
+            <tr><td align="center" style="padding:18px 24px;">
+              <div style="font-size:13px;color:#dbe1ff;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Need help?</div>
+              <div style="font-size:18px;font-weight:600;color:#ffffff;margin-bottom:14px;">Join the SeldonFrame builder community</div>
+              <a href="${DISCORD_INVITE}" style="display:inline-block;background:#ffffff;color:#5865f2;text-decoration:none;font-size:14px;font-weight:600;padding:11px 22px;border-radius:8px;">Join Discord →</a>
+              <div style="font-size:12px;color:#dbe1ff;margin-top:10px;">Live builder Q&amp;A · share what you&apos;re shipping · we read every message</div>
+            </td></tr>
+          </table>
+        </td></tr>
+
+        <tr><td style="padding:0 32px 24px 32px;border-top:1px solid #eef0f3;font-size:12px;color:#9aa0a6;line-height:1.5;text-align:center;padding-top:16px;">
+          Sent by SeldonFrame · <a href="${DISCORD_INVITE}" style="color:#9aa0a6;text-decoration:underline;">Discord</a>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
+function renderChatbotCardText(chatbot: WelcomeChatbot): string {
+  const statusNote =
+    chatbot.status === "live"
+      ? "It's live and answering now."
+      : "It's in test mode — publish it live from your IDE with publish_agent, or ask Claude.";
+  return `
+AI Chatbot:  ${chatbot.url}
+  Paste this before </body> on your real website to put the chatbot live there.
+
+  ${chatbot.embed_snippet}
+
+  ${statusNote}
+`;
+}
+
+function renderUpgradeBlockText(req: WelcomeEmailRequest): string {
+  const tier = req.tier ?? "free";
+  const adminUrl = req.workspace.admin_url;
+  const billingUrl = adminUrl.replace(/\/admin\b.*$/, "/settings/billing");
+
+  if (tier === "free") {
+    return `
+Go pro for $29/mo:
+  - Your own domain — joescuts.com -> your workspace, auto-SSL, no more *.seldonframe.com in front of customers.
+  - Unlimited workspaces — spin up a new one for every client or business, all on one flat price.
+  - List & sell your agents on the marketplace — you keep 95%.
+
+  Upgrade to Growth — $29/mo: ${billingUrl}
+`;
+  }
+
+  return `
+Custom domain ready: you're on a paid plan — custom domains with auto-SSL are included.
+  From your IDE, ask Claude: add_custom_domain hostname:"yoursite.com"
+  You'll get a CNAME record to paste into your DNS, then run verify_domain once it propagates.
+`;
+}
+
+export function renderWelcomeEmailText(req: WelcomeEmailRequest): string {
+  const greeting = req.name ? `Hi ${req.name},` : "Welcome aboard,";
+  const w = req.workspace;
+  const primaryUrl = w.chatbot ? w.chatbot.url : w.landing_url;
+  const primaryLabel = w.chatbot ? "Test your AI receptionist" : "Open your workspace";
+  return `${greeting}
+
+Your SeldonFrame workspace is live. Bookmark these four URLs:
+
+  Landing:  ${w.landing_url}
+  Booking:  ${w.booking_url}
+  Intake:   ${w.intake_url}
+  Admin:    ${w.admin_url}
+${w.chatbot ? renderChatbotCardText(w.chatbot) : ""}
+${primaryLabel}: ${primaryUrl}
+
+Next steps:
+  1. Test your AI receptionist — it's live and already knows your business.
+  2. Put it on your real website — paste the one-line embed (above) before </body>.
+  3. Watch your first lead land in the CRM — every intake + chat feeds the workspace's brain.
+
+Sell what you just built:
+  You didn't just get a workspace — you built an AI agent. List it on the SeldonFrame
+  marketplace and earn on every install or rental. You keep 95%; we take a sliver only
+  when it sells. https://seldonframe.com/marketplace
+${renderUpgradeBlockText(req)}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Join the SeldonFrame builder community on Discord:
+
+  ${DISCORD_INVITE}
+
+Live builder Q&A. Share what you're shipping. We read every message.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`;
+}
+
+export function welcomeEmailSubject(req: WelcomeEmailRequest): string {
+  void req;
+  return "Your SeldonFrame workspace is live";
+}
+
+export async function sendWelcomeEmail(
+  req: WelcomeEmailRequest,
+  deps: SendDeps,
+): Promise<SendResult> {
+  const fetcher = deps.fetcher ?? globalThis.fetch;
+  const subject = welcomeEmailSubject(req);
+  const html = renderWelcomeEmailHtml(req);
+  const text = renderWelcomeEmailText(req);
+
+  let response: Response;
+  try {
+    response = await fetcher("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${deps.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: deps.fromAddress,
+        to: [req.email],
+        subject,
+        html,
+        text,
+        tags: [{ name: "category", value: "welcome" }],
+      }),
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      status: 502,
+      error: `Resend request failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const data = (await response.json()) as { message?: string; error?: string };
+      detail = data.message ?? data.error ?? "";
+    } catch {
+      try {
+        detail = await response.text();
+      } catch {
+        detail = "";
+      }
+    }
+    // v1.1.7 — surface the actual Resend error in stdout so it shows
+    // up in Vercel function logs paired with the request. Without
+    // this, a sandbox-mode rejection or unverified-domain failure
+    // gets swallowed into "the email service is in test mode" with
+    // no way to debug from the deployment side.
+    console.error(
+      `[welcome-email] Resend ${response.status}: ${detail || "(no detail)"} from=${deps.fromAddress}`,
+    );
+    return {
+      ok: false,
+      status: response.status,
+      error: detail || `Resend send failed with ${response.status}`,
+    };
+  }
+
+  let payload: { id?: string };
+  try {
+    payload = (await response.json()) as { id?: string };
+  } catch {
+    return { ok: false, status: 502, error: "Resend returned non-JSON response." };
+  }
+  if (!payload.id || typeof payload.id !== "string") {
+    return { ok: false, status: 502, error: "Resend returned no message id." };
+  }
+
+  return { ok: true, messageId: payload.id };
+}

@@ -1,0 +1,495 @@
+// Unified Agent Model — P1, Task T4: PRODUCTION deps for runEventAgent.
+//
+// runEventAgent (./run-event-agent.ts) is the pure-ish DI'd orchestrator. THIS
+// file supplies the real, DB/Twilio/Resend-backed `RunEventAgentDeps` and is the
+// only place that touches Postgres + the outbound send seam. Keeping it separate
+// keeps the orchestrator unit-testable with zero infrastructure.
+//
+// It is a plain lib module (NOT "use server") imported by lib/events/listeners.ts,
+// which is itself only loaded server-side — so static imports of `db` + the send
+// APIs are fine (same convention as lib/messaging/dispatch.ts).
+//
+// What the deps do:
+//   • findEventAgents — query agent_templates for the org, resolve each
+//     blueprint.trigger via resolveAgentTrigger, keep the {kind:"event",
+//     event:<this type>} matches, and map to EventAgentMatch (businessName from
+//     the org soul; reviewUrl resolved PER-CLIENT as
+//     deployment.customization.reviewUrl ?? blueprint.reviewUrl — the Google
+//     review link belongs to the client's GBP, so the deployment's link wins over
+//     the shared template default).
+//   • loadContact — the contact's name/phone/email (same query dispatch.ts uses).
+//   • hasAlreadyRequested — the review one-per-contact throttle: probe both the
+//     smsMessages and emails tables for a prior outbound row tagged
+//     metadata.source = "agent:<skill>" for this contact.
+//   • markRequested — a NO-OP. The send itself writes the dedup tag (see below),
+//     exactly like the missed-call text-back: the tag IS the mark.
+//   • sendSms / sendEmail — the EXISTING outbound seam (sendSmsFromApi /
+//     sendEmailFromApi), tagging metadata.source = "agent:<skill>" so the
+//     throttle probe can find the row next time. userId:null = system-initiated.
+//   • memoryStore — the agent's loop-memory (State), Brain v2-backed via
+//     makeBrainMemoryStoreForOrg(orgId). runEventAgent recalls it before composing
+//     (the review throttle's primary gate is now hasDone(entries,"review_requested"))
+//     and records an entry after a successful send. Built per-event with the
+//     event's orgId; absent → the orchestrator falls back to the legacy throttle.
+//
+// 2026-06-26 — L2 Verify (T3): the production deps deliberately wire NO `checker`.
+// The deterministic verify gate (review link / contact name / length / no leftover
+// placeholder) is always on inside runEventAgent regardless; the optional LLM/evals
+// checker is T4 and stays opt-in, so prod sends are gated deterministically only.
+// The per-agent rubric is projected from `blueprint.verify` onto each match below.
+
+import { and, eq, sql } from "drizzle-orm";
+import { db } from "@/db";
+import { agentTemplates } from "@/db/schema/agent-templates";
+import { contacts } from "@/db/schema/contacts";
+import { emails } from "@/db/schema/emails";
+import { organizations } from "@/db/schema/organizations";
+import { smsMessages } from "@/db/schema/sms-messages";
+import { sendEmailFromApi } from "@/lib/emails/api";
+import { sendSmsFromApi } from "@/lib/sms/api";
+import { loadDeploymentCustomizationForOrgTemplate } from "@/lib/deployments/store";
+import { resolveReviewUrl } from "@/lib/agents/persona/deployment-customization";
+import {
+  resolveAgentTrigger,
+  resolveSendDelayMinutes,
+} from "@/lib/agents/triggers/agent-trigger";
+import { makeBrainMemoryStoreForOrg } from "@/lib/agents/memory/brain-memory-store";
+import type {
+  EventAgentMatch,
+  EventAgentSkill,
+  RunEventAgentDeps,
+} from "@/lib/agents/triggers/run-event-agent";
+import type { ScheduledEventAgentSend } from "@/lib/agents/triggers/scheduled-event-agent";
+import { enqueueScheduledEventAgentSend } from "@/lib/agents/triggers/scheduled-send-store";
+
+/** Map a fired event-type slug to the skill an agent runs for it. Anything we
+ *  don't have an outbound skill for yet → null (the agent is ignored). */
+function skillForEvent(eventType: string): EventAgentSkill | null {
+  switch (eventType) {
+    case "booking.completed":
+      return "review-requester";
+    case "lead.created":
+      return "speed-to-lead";
+    default:
+      return null;
+  }
+}
+
+/** The metadata.source tag a send writes (and the throttle probes). Per-skill so
+ *  a review ask and a speed-to-lead ack are throttled independently. */
+function sourceTag(skill: EventAgentSkill): string {
+  return `agent:${skill}`;
+}
+
+/**
+ * Build the production deps. `findEventAgents` resolves the org's businessName
+ * once (from the soul) and reuses it for every matched agent.
+ *
+ * `orgId` is optional ONLY for back-compat with callers that don't have it yet;
+ * the listener builds these deps fresh PER EVENT with the event's orgId in scope
+ * (see lib/events/listeners.ts), so the loop-memory store is constructed per-org,
+ * per-event. When `orgId` is given we wire:
+ *   • `memoryStore` = the Brain v2-backed `makeBrainMemoryStoreForOrg(orgId)` —
+ *     the agent recalls/records its loop-memory in this org's workspace Brain;
+ *   • `now` = the real clock, so recorded entries carry an ISO `at` stamp.
+ * Without `orgId`, `memoryStore`/`now` are omitted and runEventAgent behaves
+ * exactly as before (no recall, no record — the legacy metadata.source throttle
+ * is the only gate). The store's baked orgId always matches `event.orgId` because
+ * both come from the same per-event construction.
+ */
+export function buildRunEventAgentDeps(orgId?: string): RunEventAgentDeps {
+  const memoryStore = orgId ? makeBrainMemoryStoreForOrg(orgId) : undefined;
+  return {
+    memoryStore,
+    now: () => new Date(),
+
+    // 2026-06-26 — Outbound-UX Bundle F2 (send delay): the enqueue seam, now
+    // WIRED to the durable queue. When a matched event-agent's trigger carries
+    // `delayMinutes > 0`, runEventAgent calls this INSTEAD of sending now, handing
+    // us the frozen event context + the due time. We persist it as a 'pending'
+    // row in `event_agent_scheduled_sends`; the cron consumer at
+    // /api/cron/event-agent-scheduled-sends loads due rows and REPLAYS
+    // runEventAgent via runDueScheduledEventAgent(row, buildRunEventAgentDeps(row.orgId))
+    // so the gates (throttle / guardrails / verify / memory) run at the ACTUAL
+    // send time. The replay strips this enqueue seam, so a still-delayed agent can
+    // never re-defer.
+    //
+    // We keep the structured log line (greppable) for observability AND insert the
+    // row. If the insert THROWS, we let it propagate: runEventAgent's enqueue
+    // branch counts `failed` and deliberately does NOT also send now (a
+    // queue-then-also-send-immediately would defeat the delay) — the failure is
+    // surfaced on the run summary so the operator can see the dropped deferral.
+    enqueueScheduledSend: async (send: ScheduledEventAgentSend) => {
+      console.info(
+        JSON.stringify({
+          action: "event_agent.scheduled_send.enqueued",
+          orgId: send.orgId,
+          eventType: send.eventType,
+          contactId: send.contactId,
+          agentSkill: send.agentSkill,
+          channel: send.channel,
+          dueAt: send.dueAt.toISOString(),
+        }),
+      );
+      await enqueueScheduledEventAgentSend(send);
+    },
+
+    // The workspace IANA timezone (organizations.timezone) bounds the L3
+    // guardrails DAILY COUNTER's date key (the budget brake resets at the
+    // workspace's local midnight). Defaults "UTC" on a missing row / blank /
+    // query failure — runEventAgent also treats any throw as "UTC", so this is
+    // belt-and-suspenders. Only consulted when memoryStore is wired.
+    resolveTimezone: async (orgId) => {
+      try {
+        const [org] = await db
+          .select({ timezone: organizations.timezone })
+          .from(organizations)
+          .where(eq(organizations.id, orgId))
+          .limit(1);
+        const tz = org?.timezone;
+        return typeof tz === "string" && tz.trim().length > 0 ? tz.trim() : "UTC";
+      } catch {
+        return "UTC";
+      }
+    },
+
+    // 2026-06-27 — P2.1-T2 (live tool-fire): the MONEY-SAFE connection check. A
+    // bound tool is CONNECTED for the org ⟺ it can actually be invoked (composio
+    // key present / encrypted bearer secret present). Delegated to the SHARED
+    // predicate so the editor's "connect the tools" surfacing (P2.1-T3) asks the
+    // exact same question — no drift between "the editor says connected" and "the
+    // runtime will fire it". Soft-fails to NOT-connected on any error → the
+    // orchestrator records tool_not_connected and never fakes a post.
+    isToolConnected: async (orgId, binding) => {
+      const { isBindingConnectedForOrg } = await import(
+        "@/lib/agents/mcp/binding-connection"
+      );
+      return isBindingConnectedForOrg(orgId, binding);
+    },
+
+    // 2026-06-27 — P2.1-T2 (live tool-fire): drive the action-only agent ONCE with
+    // its bound tools, NON-testMode, so it actually invokes the tool (e.g. posts via
+    // Postiz). Reuses the EXISTING runtime tool-merge via runStatelessAgentTurn
+    // (testMode:false → write/connector tools really execute) — the SAME loop the
+    // live chat/voice agents use, no hand-rolled tool loop. Called ONLY after
+    // isToolConnected reported ≥1 connected (the orchestrator's gate).
+    //
+    // We resolve the org's OWN BYOK Anthropic client (getAIClient): an action-only
+    // poster runs unbounded build/post work, so it uses the operator's key, not the
+    // platform allowance. No usable client → return { ok:false } so the orchestrator
+    // records tool_not_connected (never a fake post). The blueprint (capabilities +
+    // connectors + persona/customSkillMd) drives the brain; we pass the org soul +
+    // name + tz (an action-only agent is the operator's OWN automation, so its real
+    // identity is appropriate, unlike the identity-neutral template TEST turn).
+    runActionOnlyTurn: async ({ orgId, agent }) => {
+      const blueprint = agent.blueprint;
+      if (!blueprint || typeof blueprint !== "object") {
+        return { ok: false, detail: "no blueprint to run" };
+      }
+
+      const { getAIClient } = await import("@/lib/ai/client");
+      const resolution = await getAIClient({ orgId });
+      if (!resolution.client) {
+        // No Anthropic client (no key / OpenAI-only key) → can't drive the agent.
+        // ok:false → the orchestrator records action_error (we made NO post; the
+        // connection check passed but the turn could not run). Never a fake post.
+        return { ok: false, detail: "no_llm_key" };
+      }
+
+      const [org] = await db
+        .select({
+          slug: organizations.slug,
+          name: organizations.name,
+          soul: organizations.soul,
+          timezone: organizations.timezone,
+        })
+        .from(organizations)
+        .where(eq(organizations.id, orgId))
+        .limit(1);
+      if (!org) return { ok: false, detail: "org not found" };
+
+      const { runStatelessAgentTurn } = await import(
+        "@/lib/agents/stateless-turn"
+      );
+
+      // Email-agent slice (Part A2) — for an email-channel action-only agent
+      // (e.g. a record-compiled inbox-watch agent), read the operator's
+      // sent-mail voice profile by exact path so a scheduled/event fire
+      // drafts in the operator's voice too. Read error / missing note → null
+      // (no-op) — never blocks the fire.
+      let voiceProfileNote: string | null = null;
+      if (agent.channel === "email") {
+        try {
+          const { readBrainNote } = await import("@/lib/brain/store");
+          const { VOICE_PROFILE_NOTE_PATH } = await import(
+            "@/lib/agents/voice-profile/ingest-sent-mail"
+          );
+          const note = await readBrainNote({
+            orgId,
+            scope: "workspace",
+            path: VOICE_PROFILE_NOTE_PATH,
+          });
+          voiceProfileNote = note?.body ?? null;
+        } catch (err) {
+          console.warn(
+            `[run-event-agent-deps] voice-profile note read failed for org ${orgId}:`,
+            err instanceof Error ? err.message : String(err),
+          );
+          voiceProfileNote = null;
+        }
+      }
+
+      const turn = await runStatelessAgentTurn({
+        orgId,
+        orgSlug: org.slug,
+        orgName: org.name ?? "your business",
+        soul:
+          org.soul && typeof org.soul === "object"
+            ? (org.soul as Parameters<typeof runStatelessAgentTurn>[0]["soul"])
+            : null,
+        timezone: org.timezone ?? "UTC",
+        blueprint,
+        voiceProfileNote,
+        // The synthetic trigger: a scheduled/event poster has no customer message,
+        // so we hand it a "go do your job" nudge that drives it to USE its tool.
+        messages: [
+          {
+            role: "user",
+            content:
+              "It's time to run your scheduled task now. Use your tools to do it.",
+          },
+        ],
+        // NON-testMode → connector (Postiz) + write tools actually execute. THIS is
+        // the live post. The orchestrator only reaches here when a tool is connected.
+        testMode: false,
+        client: resolution.client,
+      });
+
+      if (!turn.ok) {
+        return { ok: false, detail: turn.message };
+      }
+      return {
+        ok: true,
+        toolCalls: turn.toolCalls.map((c) => c.name),
+        detail: turn.reply ? turn.reply.slice(0, 200) : null,
+      };
+    },
+
+    findEventAgents: async (orgId, eventType) => {
+      const skill = skillForEvent(eventType);
+      // We only run agents for events we have an outbound skill for.
+      if (!skill) return [];
+
+      // Resolve the workspace business name (for the persona sign-off) once.
+      const [org] = await db
+        .select({ soul: organizations.soul, name: organizations.name })
+        .from(organizations)
+        .where(eq(organizations.id, orgId))
+        .limit(1);
+      const businessName =
+        (org?.soul && typeof org.soul === "object"
+          ? (org.soul as { businessName?: string }).businessName
+          : null) ||
+        org?.name ||
+        null;
+
+      // Load this org's agent templates and keep the ones whose resolved
+      // trigger is an event-trigger for THIS event type. `id` is selected so a
+      // review-requester match can correlate to its deployment row (for the
+      // per-client review link below).
+      const rows = await db
+        .select({
+          id: agentTemplates.id,
+          surface: agentTemplates.type,
+          blueprint: agentTemplates.blueprint,
+        })
+        .from(agentTemplates)
+        .where(eq(agentTemplates.builderOrgId, orgId));
+
+      const matches: EventAgentMatch[] = [];
+      for (const row of rows) {
+        const blueprint = (row.blueprint ?? {}) as {
+          trigger?: unknown;
+          reviewUrl?: string;
+          verify?: import("@/lib/agents/verify/agent-verify").VerifyRubric;
+          guardrails?: import("@/lib/agents/guardrails/agent-guardrails").Guardrails;
+          actionOnly?: boolean;
+          connectors?: import("@/lib/agents/mcp/connectors").ConnectorBinding[];
+        };
+        const trigger = resolveAgentTrigger(
+          blueprint.trigger as Parameters<typeof resolveAgentTrigger>[0],
+          row.surface,
+        );
+        if (trigger.kind !== "event" || trigger.event !== eventType) continue;
+
+        // PER-CLIENT review link: the review URL belongs to the CLIENT's Google
+        // Business Profile, so each deployment carries its own on
+        // `customization.reviewUrl`. Resolve deployment-wins-over-template:
+        // `deployment.customization?.reviewUrl ?? blueprint.reviewUrl` (the
+        // template link is the agency-wide fallback/default). Only worth a lookup
+        // for the review-requester skill (speed-to-lead ignores reviewUrl). The
+        // lookup is soft-fail: if it throws, fall back to the template link rather
+        // than break the run (it's inside a never-throws bus handler downstream).
+        const templateReviewUrl =
+          typeof blueprint.reviewUrl === "string" ? blueprint.reviewUrl : null;
+        let reviewUrl: string | null = templateReviewUrl;
+        if (skill === "review-requester") {
+          let customization: Awaited<
+            ReturnType<typeof loadDeploymentCustomizationForOrgTemplate>
+          > = null;
+          try {
+            customization = await loadDeploymentCustomizationForOrgTemplate(
+              orgId,
+              row.id,
+            );
+          } catch (err) {
+            console.warn(
+              `[run-event-agent-deps] loadDeploymentCustomization failed for template ${row.id}:`,
+              err instanceof Error ? err.message : String(err),
+            );
+            customization = null;
+          }
+          reviewUrl = resolveReviewUrl({ customization, templateReviewUrl });
+        }
+
+        matches.push({
+          skill,
+          channel: trigger.channel, // "sms" | "email" (validated by the resolver)
+          businessName,
+          // review-requester reads this; speed-to-lead ignores it. Resolved above
+          // as the CLIENT's deployment link, falling back to the template default.
+          reviewUrl,
+          // 2026-06-26 — L2 Verify (T3): project the agent's own VERIFY rubric onto
+          // the match so the orchestrator can gate the composed body with it
+          // (overriding the per-skill default). A loose object (jsonb) — verifyOutput
+          // tolerates loose shapes; null/absent → the orchestrator uses the default.
+          verify:
+            blueprint.verify && typeof blueprint.verify === "object"
+              ? blueprint.verify
+              : null,
+          // 2026-06-26 — L3 Guardrails (T2): project the agent's own guardrails
+          // (brakes) onto the match so the orchestrator can gate the send with
+          // them (overriding the per-skill default). A loose object (jsonb) —
+          // evaluateGuardrails tolerates loose shapes; null/absent → the
+          // orchestrator uses defaultGuardrailsForSkill.
+          guardrails:
+            blueprint.guardrails && typeof blueprint.guardrails === "object"
+              ? blueprint.guardrails
+              : null,
+          // 2026-06-26 — Outbound-UX Bundle F2 (send delay): project the agent's
+          // configured send delay off the RESOLVED trigger (already clamped to a
+          // non-negative integer). 0 → send immediately (today); > 0 → the
+          // orchestrator enqueues a deferred send via enqueueScheduledSend below.
+          delayMinutes: resolveSendDelayMinutes(trigger),
+          // 2026-06-26 — Primitive-Composition generator, P2 (Task 6): project the
+          // SAFETY-CRITICAL action-only flag (a poster/logger sends NO customer
+          // message) + the bound-tool ids (for the action-only fire's log/record).
+          // The composer (compose-authored.ts) sets `blueprint.actionOnly` true ⇔
+          // the authored channel is "none". true → the orchestrator skips the
+          // customer compose/send entirely (it never texts a customer), runs only
+          // the guardrails gate, and records the fire. The live tool execution is
+          // P2.1 — the fire is recorded but does not yet post.
+          actionOnly: blueprint.actionOnly === true,
+          connectorIds: Array.isArray(blueprint.connectors)
+            ? blueprint.connectors
+                .map((c) => (c && typeof c.id === "string" ? c.id : null))
+                .filter((id): id is string => id !== null)
+            : [],
+          // 2026-06-27 — P2.1-T2 (live tool-fire): project the FULL connector
+          // bindings (for the connection check) + the FULL blueprint (so the live
+          // agentic-turn seam can drive the agent's real brain with its bound tools
+          // NON-testMode). Only meaningful on the action-only path; ignored by the
+          // messaging path. Cast through the shared ConnectorBinding type.
+          connectors: Array.isArray(blueprint.connectors)
+            ? (blueprint.connectors as import("@/lib/agents/mcp/connectors").ConnectorBinding[])
+            : [],
+          blueprint: (row.blueprint ?? {}) as import("@/db/schema/agents").AgentBlueprint,
+        });
+      }
+      return matches;
+    },
+
+    loadContact: async (orgId, contactId) => {
+      const [row] = await db
+        .select({
+          firstName: contacts.firstName,
+          lastName: contacts.lastName,
+          email: contacts.email,
+          phone: contacts.phone,
+        })
+        .from(contacts)
+        .where(and(eq(contacts.id, contactId), eq(contacts.orgId, orgId)))
+        .limit(1);
+      if (!row) return null;
+      const name = [row.firstName, row.lastName]
+        .map((p) => (typeof p === "string" ? p.trim() : ""))
+        .filter(Boolean)
+        .join(" ");
+      return {
+        name: name || null,
+        phone: row.phone ?? null,
+        email: row.email ?? null,
+      };
+    },
+
+    hasAlreadyRequested: async (orgId, contactId, skill) => {
+      const tag = sourceTag(skill);
+      // Probe BOTH channels — a contact asked for a review by SMS shouldn't then
+      // be asked again by email. metadata.source is set by the sends below.
+      const [smsHit] = await db
+        .select({ id: smsMessages.id })
+        .from(smsMessages)
+        .where(
+          and(
+            eq(smsMessages.orgId, orgId),
+            eq(smsMessages.contactId, contactId),
+            sql`${smsMessages.metadata}->>'source' = ${tag}`,
+          ),
+        )
+        .limit(1);
+      if (smsHit) return true;
+
+      const [emailHit] = await db
+        .select({ id: emails.id })
+        .from(emails)
+        .where(
+          and(
+            eq(emails.orgId, orgId),
+            eq(emails.contactId, contactId),
+            sql`${emails.metadata}->>'source' = ${tag}`,
+          ),
+        )
+        .limit(1);
+      return Boolean(emailHit);
+    },
+
+    // The send writes the dedup tag (metadata.source), so there's nothing extra
+    // to persist here — the tag IS the mark (same as the missed-call text-back).
+    markRequested: async () => {
+      return;
+    },
+
+    sendSms: async ({ orgId, contactId, toNumber, body, skill }) => {
+      await sendSmsFromApi({
+        orgId,
+        userId: null,
+        contactId,
+        toNumber,
+        body,
+        metadata: { source: sourceTag(skill) },
+      });
+    },
+
+    sendEmail: async ({ orgId, contactId, toEmail, subject, body, skill }) => {
+      await sendEmailFromApi({
+        orgId,
+        userId: null,
+        contactId,
+        toEmail,
+        subject: subject || "A quick note",
+        body,
+        metadata: { source: sourceTag(skill) },
+      });
+    },
+  };
+}

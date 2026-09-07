@@ -1,0 +1,130 @@
+// packages/crm/tests/setup-dom.ts
+//
+// JSDOM bootstrap for `@testing-library/react` component tests. Import it
+// as the FIRST import of any spec that calls render()/fireEvent — the CI
+// runner (scripts/run-unit-tests.js) invokes `node --import tsx --test`
+// with no extra --import flag, so a spec must pull this in itself to have
+// a DOM. (Loading via `--import <this file>` also works for one-off local
+// runs.) Each spec file runs as its own child process under node:test, so
+// mutating globalThis here cannot leak into other specs. Existing TSX tests
+// that use `renderToString` from `react-dom/server` (e.g.
+// customer-action-form.spec.tsx) do not need a DOM and are unaffected by
+// loading this file — jsdom installs harmless globals.
+//
+// Why this exists: Cut A / Cut B / Cut C of the web-onboarding pivot
+// introduce interactive React components (UpgradeModal, /clients/new
+// SSE form, /clients page) whose state transitions and click handlers
+// are best tested with @testing-library/react's render + fireEvent.
+// Those APIs require a DOM. Plain Node has no `window`/`document`.
+//
+// Pattern is to construct a jsdom and copy its globals onto Node's
+// globalThis. The order matters — `window` and `document` must exist
+// before React's runtime imports (which check for `window === undefined`
+// to decide between server / client render).
+
+import { JSDOM } from "jsdom";
+
+const dom = new JSDOM("<!doctype html><html><head></head><body></body></html>", {
+  url: "http://localhost/",
+  pretendToBeVisual: true,
+});
+
+// Copy the DOM globals onto globalThis. This includes window, document,
+// HTMLElement, Element, Node, getComputedStyle, etc. Node 24 made some
+// globals (notably `navigator`) read-only getters, so we use
+// Object.defineProperty with `configurable: true` to override.
+const globals = [
+  "window",
+  "document",
+  "navigator",
+  "HTMLElement",
+  "HTMLAnchorElement",
+  "HTMLButtonElement",
+  "HTMLDivElement",
+  "HTMLFormElement",
+  "HTMLInputElement",
+  "Element",
+  "Node",
+  "NodeList",
+  "Event",
+  "MouseEvent",
+  "KeyboardEvent",
+  "CustomEvent",
+  "getComputedStyle",
+  // Animation primitives — base-ui's Dialog uses requestAnimationFrame for
+  // mount/unmount transitions; jsdom provides them on the window but not
+  // on the global scope by default.
+  "requestAnimationFrame",
+  "cancelAnimationFrame",
+  // Pointer/touch event constructors used by some base-ui interaction layers.
+  "PointerEvent",
+  "DOMRect",
+  // Mutation observer used by @testing-library/react's wait helpers.
+  "MutationObserver",
+] as const;
+
+for (const key of globals) {
+  const value = (dom.window as unknown as Record<string, unknown>)[key];
+  try {
+    Object.defineProperty(globalThis, key, {
+      value,
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    });
+  } catch {
+    // Some globals (e.g. Node 24's `navigator`) are non-configurable. Best-effort
+    // override; if it sticks the test will work, if not the @testing-library
+    // code path that needs it will throw a clearer error than the bootstrap.
+  }
+}
+
+// `self` is referenced by `next/link`'s prefetch warmup (calls
+// `requestIdleCallback` through `self`). jsdom doesn't put it on globalThis,
+// so we alias it. Also alias `requestIdleCallback` / `cancelIdleCallback`
+// since not all jsdom versions ship them — fall back to setTimeout.
+Object.defineProperty(globalThis, "self", {
+  value: globalThis,
+  writable: true,
+  configurable: true,
+  enumerable: false,
+});
+if (typeof (globalThis as Record<string, unknown>).requestIdleCallback !== "function") {
+  (globalThis as Record<string, unknown>).requestIdleCallback = (cb: () => void) => setTimeout(cb, 0);
+}
+if (typeof (globalThis as Record<string, unknown>).cancelIdleCallback !== "function") {
+  (globalThis as Record<string, unknown>).cancelIdleCallback = (id: number) => clearTimeout(id);
+}
+
+// jsdom does not implement window.matchMedia (it has no real layout
+// engine to evaluate media queries against). Components that branch on
+// `prefers-reduced-motion` etc. (e.g. the /clients/new build-animation's
+// idle-scene) call it unconditionally in an effect, so provide a minimal
+// stub that always reports "no match" and a no-op listener API.
+if (typeof (dom.window as unknown as { matchMedia?: unknown }).matchMedia !== "function") {
+  const matchMedia = (query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  });
+  Object.defineProperty(dom.window, "matchMedia", {
+    value: matchMedia,
+    writable: true,
+    configurable: true,
+  });
+  Object.defineProperty(globalThis, "matchMedia", {
+    value: matchMedia,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+}
+
+// Mark the test environment so React doesn't print "act()" warnings
+// for every microtask flush in fireEvent.click.
+(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

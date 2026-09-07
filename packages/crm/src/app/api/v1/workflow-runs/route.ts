@@ -1,0 +1,130 @@
+// GET /api/v1/workflow-runs — JSON snapshot of the workspace's
+// workflow runs + waits + step results. Consumed by the /agents/runs
+// admin page for polling refresh.
+//
+// Shipped in 2c PR 3 M3. Matches the server-page shape exactly so
+// the client can drop the response straight into state.
+
+import { NextResponse } from "next/server";
+import { desc, eq } from "drizzle-orm";
+
+import { db } from "@/db";
+import {
+  workflowRuns,
+  workflowWaits,
+  workflowStepResults,
+  workflowApprovals,
+} from "@/db/schema";
+import { getOrgId } from "@/lib/auth/helpers";
+
+export const runtime = "nodejs";
+
+export async function GET() {
+  const orgId = await getOrgId();
+  if (!orgId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const runs = await db
+    .select()
+    .from(workflowRuns)
+    .where(eq(workflowRuns.orgId, orgId))
+    .orderBy(desc(workflowRuns.createdAt))
+    .limit(50);
+
+  const runIds = runs.map((r) => r.id);
+
+  const waits = runIds.length
+    ? (
+        await Promise.all(
+          runIds.map((id) =>
+            db.select().from(workflowWaits).where(eq(workflowWaits.runId, id)),
+          ),
+        )
+      ).flat()
+    : [];
+
+  const stepResults = runIds.length
+    ? (
+        await Promise.all(
+          runIds.map((id) =>
+            db
+              .select()
+              .from(workflowStepResults)
+              .where(eq(workflowStepResults.runId, id))
+              .orderBy(desc(workflowStepResults.createdAt)),
+          ),
+        )
+      ).flat()
+    : [];
+
+  // SLICE 10 PR 2 C3 — workspace-scoped approvals for the drawer's
+  // pending-approval block + future /agents/approvals page.
+  const approvals = await db
+    .select()
+    .from(workflowApprovals)
+    .where(eq(workflowApprovals.orgId, orgId))
+    .orderBy(desc(workflowApprovals.createdAt));
+
+  return NextResponse.json({
+    runs: runs.map((row) => ({
+      id: row.id,
+      archetypeId: row.archetypeId,
+      status: row.status,
+      currentStepId: row.currentStepId,
+      triggerEventId: row.triggerEventId,
+      triggerPayload: row.triggerPayload,
+      captureScope: row.captureScope,
+      variableScope: row.variableScope,
+      specSnapshot: row.specSnapshot,
+      // SLICE 9 PR 2 C5 — cost observability surfacing (mirrors page.tsx).
+      totalTokensInput: row.totalTokensInput,
+      totalTokensOutput: row.totalTokensOutput,
+      totalCostUsdEstimate: row.totalCostUsdEstimate,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    })),
+    waits: waits.map((row) => ({
+      id: row.id,
+      runId: row.runId,
+      stepId: row.stepId,
+      eventType: row.eventType,
+      matchPredicate: row.matchPredicate,
+      timeoutAt: row.timeoutAt.toISOString(),
+      resumedAt: row.resumedAt ? row.resumedAt.toISOString() : null,
+      resumedReason: row.resumedReason,
+    })),
+    stepResults: stepResults.map((row) => ({
+      id: row.id,
+      runId: row.runId,
+      stepId: row.stepId,
+      stepType: row.stepType,
+      outcome: row.outcome,
+      captureValue: row.captureValue,
+      errorMessage: row.errorMessage,
+      durationMs: row.durationMs,
+      createdAt: row.createdAt.toISOString(),
+    })),
+    approvals: approvals.map((row) => ({
+      id: row.id,
+      runId: row.runId,
+      stepId: row.stepId,
+      orgId: row.orgId,
+      approverType: row.approverType,
+      approverUserId: row.approverUserId,
+      status: row.status,
+      contextTitle: row.contextTitle,
+      contextSummary: row.contextSummary,
+      contextPreview: row.contextPreview,
+      contextMetadata: row.contextMetadata,
+      timeoutAction: row.timeoutAction,
+      timeoutAt: row.timeoutAt ? row.timeoutAt.toISOString() : null,
+      resolvedAt: row.resolvedAt ? row.resolvedAt.toISOString() : null,
+      resolvedByUserId: row.resolvedByUserId,
+      resolutionComment: row.resolutionComment,
+      resolutionReason: row.resolutionReason,
+      overrideFlag: row.overrideFlag,
+      createdAt: row.createdAt.toISOString(),
+    })),
+  });
+}

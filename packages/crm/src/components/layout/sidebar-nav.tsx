@@ -1,0 +1,207 @@
+"use client";
+
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { BookOpen, Bot, Briefcase, Building2, Calendar, ChevronLeft, ChevronRight, DollarSign, ExternalLink, FileText, Home, Inbox, Layout, LayoutDashboard, Mail, MessageCircle, Puzzle, Settings, Shield, Sparkles, Users, Zap } from "lucide-react";
+
+export type NavItem = {
+  href: string;
+  label: string;
+  icon: string;
+  disabled?: boolean;
+  tooltip?: string;
+  upgrade?: boolean;
+  /** May 1, 2026 — when true, render as <a target="_blank"> instead
+   *  of a Next.js Link. Used for off-platform destinations like the
+   *  SeldonFrame Discord. */
+  external?: boolean;
+  /** 2026-06-20 — when true, render the row indented under the noun
+   *  above it. The six-noun nav (nav-config.ts) keeps each noun a real
+   *  clickable link and hangs its extra legacy screens beneath it as
+   *  indented sub-items (e.g. Bookings + Intake Forms under Customers)
+   *  so nothing that was reachable before becomes unreachable. */
+  indent?: boolean;
+};
+
+export type NavGroup = {
+  title?: string;
+  items: NavItem[];
+};
+
+const iconMap = {
+  dashboard: LayoutDashboard,
+  layoutdashboard: LayoutDashboard,
+  // 2026-06-20 — six-noun nav: Home/Money/Inbox glyphs for the new
+  // noun labels (Home, Money [$], Inbox). Outline style, matching the
+  // existing lucide set.
+  home: Home,
+  dollarsign: DollarSign,
+  inbox: Inbox,
+  bookopen: BookOpen,
+  contacts: Users,
+  users: Users,
+  deals: Briefcase,
+  briefcase: Briefcase,
+  building2: Building2,
+  booking: Calendar,
+  calendar: Calendar,
+  pages: Layout,
+  layout: Layout,
+  email: Mail,
+  mail: Mail,
+  forms: FileText,
+  filetext: FileText,
+  automations: Zap,
+  zap: Zap,
+  agents: Bot,
+  bot: Bot,
+  settings: Settings,
+  sparkles: Sparkles,
+  puzzle: Puzzle,
+  messagecircle: MessageCircle,
+  discord: MessageCircle,
+  shield: Shield,
+  chevronleft: ChevronLeft,
+} as const;
+
+function resolveIcon(iconName: string) {
+  const normalized = iconName.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
+  return iconMap[normalized as keyof typeof iconMap] ?? Puzzle;
+}
+
+function isActivePath(pathname: string, href: string) {
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
+
+function NavItemLink({ item, pathname, onNavigate, icon: Icon }: { item: NavItem; pathname: string; onNavigate?: () => void; icon: React.ComponentType<{ className?: string }> }) {
+  const active = !item.external && isActivePath(pathname, item.href);
+  // 2026-05-17 — Vercel-style compact rows. The base .crm-sidebar-link
+  // class drives min-height (2rem desktop / 2.125rem mobile) + 13px font;
+  // here we only tune the horizontal padding for the same effect.
+  // 2026-06-20 — six-noun nav sub-items (indent: true) get extra left
+  // padding so they read as nested under the noun above them (e.g.
+  // Bookings/Intake Forms under Customers). The icon column stays
+  // aligned; only the row's left inset shifts.
+  const indentClass = item.indent ? " pl-7" : "";
+  // 2026-06-27 — calm direction-A: the active row reads as an accent-soft
+  // pill, so its label weight bumps to semibold (the mockup's 600 vs 500
+  // for inactive rows) while inactive rows stay medium. The base
+  // .crm-sidebar-link styling (height / hover / the active pill bg) is
+  // unchanged; only the per-row weight is tuned here.
+  const weightClass = active && !item.disabled ? " font-semibold" : " font-medium";
+  const className = item.disabled
+    ? `crm-sidebar-link cursor-not-allowed border border-transparent px-2.5 opacity-55${indentClass}${weightClass}`
+    : `crm-sidebar-link border px-2.5${indentClass}${weightClass}`;
+
+  // May 1, 2026 — external links (Discord, etc.) render as plain
+  // <a target="_blank"> so they don't trip Next.js client-side
+  // routing and so the operator stays in the dashboard tab when
+  // they pop the link open.
+  const trailing = item.upgrade ? (
+    <span className="rounded-md border border-border bg-card/70 px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
+      Upgrade
+    </span>
+  ) : item.external ? (
+    <ExternalLink className="size-3 text-muted-foreground/60" />
+  ) : active && !item.disabled ? (
+    // 2026-06-27 — calm direction-A: the active row's trailing chevron
+    // picks up the accent-soft pill's --primary ink instead of muted
+    // grey, so the whole active row reads as one quiet accent unit.
+    <ChevronRight className="h-4 w-4 text-primary/70" />
+  ) : null;
+
+  if (item.external) {
+    return (
+      <a
+        href={item.href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={className}
+        title={item.tooltip}
+        onClick={() => {
+          if (!item.disabled) onNavigate?.();
+        }}
+      >
+        <Icon className="crm-sidebar-icon size-[18px] shrink-0" />
+        <span className="crm-sidebar-text flex-1 text-sm">{item.label}</span>
+        {trailing}
+      </a>
+    );
+  }
+
+  // 2026-05-17 — /switch-workspace items use a plain <a> instead of
+  // <Link>. Next.js soft navigation keeps the cached layout chrome
+  // (sidebar, topbar) so even after the cookie flips on the redirect
+  // response, the active workspace name in the sidebar header stayed
+  // stale until manual refresh. Hard navigation re-renders the
+  // layout server-side with the new cookie applied. Also implicitly
+  // disables prefetch (no Link = no prefetch).
+  const isSwitchWorkspaceLink = item.href.startsWith("/switch-workspace");
+
+  if (isSwitchWorkspaceLink) {
+    return (
+      <a
+        href={item.href}
+        data-active={item.disabled ? false : active}
+        className={className}
+        title={item.tooltip}
+        onClick={() => {
+          if (!item.disabled) {
+            onNavigate?.();
+          }
+        }}
+      >
+        <Icon className={`crm-sidebar-icon size-[18px] shrink-0 ${active && !item.disabled ? "text-primary" : ""}`} />
+        <span className="crm-sidebar-text flex-1 text-sm">{item.label}</span>
+        {trailing}
+      </a>
+    );
+  }
+
+  return (
+    <Link
+      href={item.href}
+      data-active={item.disabled ? false : active}
+      className={className}
+      title={item.tooltip}
+      onClick={() => {
+        if (!item.disabled) {
+          onNavigate?.();
+        }
+      }}
+    >
+      <Icon className={`crm-sidebar-icon size-[18px] shrink-0 ${active && !item.disabled ? "text-primary" : ""}`} />
+      <span className="crm-sidebar-text flex-1 text-[13px] sm:text-sm">{item.label}</span>
+      {trailing}
+    </Link>
+  );
+}
+
+export function SidebarNav({ nav, groups, onNavigate }: { nav?: NavItem[]; groups?: NavGroup[]; onNavigate?: () => void }) {
+  const pathname = usePathname();
+
+  const resolvedGroups: NavGroup[] = groups && groups.length > 0
+    ? groups
+    : nav
+      ? [{ items: nav }]
+      : [];
+
+  return (
+    // 2026-05-17 — tightened group spacing (was space-y-5) so the sidebar
+    // sits comfortably above the fold without scrolling on common laptop
+    // heights. The internal space-y-0.5 between items lets the per-row
+    // padding handle the air between them.
+    <nav className="space-y-3">
+      {resolvedGroups.map((group, groupIndex) => (
+        <div key={group.title ?? `group-${groupIndex}`} className="space-y-0.5">
+          {group.title ? (
+            <p className="px-2.5 pb-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/80">{group.title}</p>
+          ) : null}
+          {group.items.map((item) => (
+            <NavItemLink key={item.href} item={item} pathname={pathname} onNavigate={onNavigate} icon={resolveIcon(item.icon)} />
+          ))}
+        </div>
+      ))}
+    </nav>
+  );
+}

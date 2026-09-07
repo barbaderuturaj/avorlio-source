@@ -1,0 +1,780 @@
+import { put } from "@vercel/blob";
+import { randomUUID } from "node:crypto";
+import { and, eq, sql } from "drizzle-orm";
+import { NextResponse } from "next/server";
+import { db } from "@/db";
+import { contacts, intakeForms, intakeSubmissions, organizations, portalDocuments } from "@/db/schema";
+import type { IntakeFormField } from "@/db/schema/intake-forms";
+import { enforceContactLimit } from "@/lib/billing/limits";
+import { emitSeldonEvent } from "@/lib/events/bus";
+import { validateUploadField } from "@/lib/uploads/file-validation";
+import { validatePublicIntakeAnswers } from "@/lib/forms/validation";
+import { normalizePhone } from "@/lib/sms/suppression";
+import {
+  resolveWorkspaceSlugFromRequest,
+  resolveWorkspaceSlugFromRequestWithCustomDomains,
+} from "@/lib/workspace/host-to-slug";
+
+/**
+ * POST /api/v1/public/intake
+ *
+ * The HTTP endpoint the C5 intake renderer's vanilla-JS client posts
+ * to on Submit. Stores the answer payload in `intake_submissions` for
+ * the workspace operator to review later (Inbox, exports, automation
+ * triggers, etc.).
+ *
+ * Request body:
+ *   {
+ *     orgSlug: string,
+ *     formSlug?: string,         // default: "intake"
+ *     answers: Record<string, unknown>,
+ *     workspace?: string         // C5 client includes the workspace
+ *                                // name for diagnostic logs
+ *   }
+ *
+ * Auth: anonymous. We resolve the org by slug and look up the form by
+ * (orgId, formSlug); if either is missing we return 404 without
+ * leaking which.
+ *
+ * P0-1 (operator-journey audit): when the answers carry an email, we
+ * look up an existing contact for that workspace and either link the
+ * submission to it OR auto-create a fresh contact (status=lead,
+ * source=intake) and link to that. Mirrors the booking auto-create
+ * pattern (`submitPublicBookingAction`) so operators see new intake
+ * submissions surface in /contacts immediately.
+ */
+
+type SubmitBody = {
+  orgSlug?: unknown;
+  formSlug?: unknown;
+  answers?: unknown;
+  workspace?: unknown;
+  // 2026-05-18 (later) — client-supplied dedup key. The form client
+  // generates a fresh idempotencyKey on its FIRST submit() call and
+  // resends it with the same value if a network retry happens.
+  // Server uses it to short-circuit duplicate submissions inside a
+  // 60s window so the agent dispatcher doesn't start two parallel
+  // speed-to-lead runs for the same form submission. Header
+  // `Idempotency-Key` is also accepted (and preferred — survives JSON
+  // body parse failures).
+  idempotencyKey?: unknown;
+};
+
+// 2026-05-18 (later) — in-memory dedup cache. Lives for the lifetime
+// of the lambda instance (~minutes). Maps idempotencyKey → expiresAt.
+// Cheap enough at the volume we operate at; a DB-backed cache is the
+// follow-up if we ever see cross-instance double-submits.
+const IDEMPOTENCY_CACHE = new Map<string, number>();
+const IDEMPOTENCY_TTL_MS = 60_000;
+
+function dedupSeen(key: string): boolean {
+  const now = Date.now();
+  // Sweep expired entries opportunistically.
+  for (const [k, expires] of IDEMPOTENCY_CACHE) {
+    if (expires < now) IDEMPOTENCY_CACHE.delete(k);
+  }
+  const existing = IDEMPOTENCY_CACHE.get(key);
+  if (existing && existing > now) return true;
+  IDEMPOTENCY_CACHE.set(key, now + IDEMPOTENCY_TTL_MS);
+  return false;
+}
+
+export async function POST(request: Request) {
+  // ------------------------------------------------------------------
+  // Parse the request body — supports both application/json (original)
+  // and multipart/form-data (when the form has file questions).
+  // Both paths produce the same common shape before any submission logic.
+  // ------------------------------------------------------------------
+  const contentType = request.headers.get("content-type") ?? "";
+  const isMultipart = contentType.includes("multipart/form-data");
+
+  let body: SubmitBody;
+  // pendingFileUploads is populated during multipart parsing and
+  // resolved (blob put) after the form row is loaded.
+  let pendingFileUploads: Array<{
+    questionId: string;
+    files: File[];
+    multi: boolean;
+  }> | null = null;
+
+  if (isMultipart) {
+    let fd: FormData;
+    try {
+      fd = await request.formData();
+    } catch {
+      return NextResponse.json({ error: "Invalid multipart body." }, { status: 400 });
+    }
+    const rawAnswers = fd.get("answers");
+    let parsedAnswers: Record<string, unknown> | null = null;
+    if (typeof rawAnswers === "string") {
+      try {
+        const parsed = JSON.parse(rawAnswers);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          parsedAnswers = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // fall through — parsedAnswers stays null
+      }
+    }
+    body = {
+      orgSlug: fd.get("orgSlug") ?? undefined,
+      formSlug: fd.get("formSlug") ?? undefined,
+      answers: parsedAnswers ?? undefined,
+      workspace: fd.get("workspace") ?? undefined,
+      idempotencyKey: fd.get("idempotencyKey") ?? undefined,
+    };
+    // Collect file parts — we can't resolve which are "file" questions
+    // until we load the form below, so we store all "file:*" parts now.
+    const fileMap = new Map<string, File[]>();
+    for (const [key, value] of fd.entries()) {
+      if (key.startsWith("file:") && value instanceof File) {
+        const qid = key.slice(5); // strip "file:" prefix
+        if (!fileMap.has(qid)) fileMap.set(qid, []);
+        fileMap.get(qid)!.push(value);
+      }
+    }
+    if (fileMap.size > 0) {
+      pendingFileUploads = Array.from(fileMap.entries()).map(([questionId, files]) => ({
+        questionId,
+        files,
+        multi: files.length > 1,
+      }));
+    }
+  } else {
+    try {
+      body = (await request.json()) as SubmitBody;
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+    }
+  }
+
+  // 2026-05-18 (later) — idempotency check. Header takes precedence
+  // over body field (header survives partial JSON parse failures).
+  // When the same key arrives twice within IDEMPOTENCY_TTL_MS, return
+  // a 200 OK with `deduplicated: true` so the form client still shows
+  // the completion UI but the backend doesn't double-emit form.submitted.
+  //
+  // Why both header AND body field: edge proxies sometimes strip
+  // custom headers; the body field is the bulletproof fallback. The
+  // form client sends both — we accept either.
+  const idempotencyKey =
+    request.headers.get("idempotency-key") ||
+    (typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "");
+  if (idempotencyKey && dedupSeen(idempotencyKey)) {
+    console.log(
+      JSON.stringify({
+        event: "public_intake_deduplicated",
+        idempotency_key: idempotencyKey,
+      }),
+    );
+    return NextResponse.json({ ok: true, deduplicated: true });
+  }
+
+  // v1.3.5 — orgSlug resolution: body-FIRST, host-FALLBACK on the
+  // <slug>.app.seldonframe.com case.
+  // v1.16.2 — custom-domain override. On a custom domain the C5
+  // client falls back to hostname.split('.')[0] which yields the
+  // wrong segment (e.g. "hvac" instead of "cypress-pine-hvac"). When
+  // the host is a verified custom domain in workspace_domains, we
+  // resolve the canonical slug and PREFER it over body's value.
+  const bodyOrgSlug = typeof body.orgSlug === "string" ? body.orgSlug.trim() : "";
+  const customDomainSlug = await resolveWorkspaceSlugFromRequestWithCustomDomains(request);
+  const subdomainSlug = customDomainSlug ? null : resolveWorkspaceSlugFromRequest(request);
+  const orgSlug = customDomainSlug || bodyOrgSlug || subdomainSlug || "";
+  const formSlug =
+    typeof body.formSlug === "string" && body.formSlug.trim().length > 0
+      ? body.formSlug.trim()
+      : "intake";
+  const answers =
+    body.answers && typeof body.answers === "object" && !Array.isArray(body.answers)
+      ? (body.answers as Record<string, unknown>)
+      : null;
+
+  if (!orgSlug || !answers) {
+    // Structured logging mirrors the booking route so we can tell
+    // body-vs-host derivation failure apart from genuine bad requests.
+    console.error(
+      JSON.stringify({
+        event: "public_intake_rejected",
+        reason: "missing_required_field",
+        orgSlug_present: Boolean(orgSlug),
+        answers_present: Boolean(answers),
+        host_header: request.headers.get("host"),
+        x_forwarded_host: request.headers.get("x-forwarded-host"),
+        form_slug: formSlug,
+      }),
+    );
+    return NextResponse.json(
+      { error: "orgSlug and answers are required." },
+      { status: 400 }
+    );
+  }
+
+  const [org] = await db
+    .select({ id: organizations.id })
+    .from(organizations)
+    .where(eq(organizations.slug, orgSlug))
+    .limit(1);
+
+  if (!org) {
+    return NextResponse.json({ error: "Form not found." }, { status: 404 });
+  }
+
+  const [form] = await db
+    .select({
+      id: intakeForms.id,
+      isActive: intakeForms.isActive,
+      fields: intakeForms.fields,
+    })
+    .from(intakeForms)
+    .where(and(eq(intakeForms.orgId, org.id), eq(intakeForms.slug, formSlug)))
+    .limit(1);
+
+  if (!form || !form.isActive) {
+    return NextResponse.json({ error: "Form not found." }, { status: 404 });
+  }
+
+  const validationError = validatePublicIntakeAnswers(
+    (Array.isArray(form.fields) ? form.fields : []) as IntakeFormField[],
+    answers,
+  );
+  if (validationError) {
+    return NextResponse.json({ error: validationError }, { status: 400 });
+  }
+
+  // ------------------------------------------------------------------
+  // Multipart file uploads: validate + push to Vercel Blob.
+  // We enrich `answers` in-place so the rest of the submission path
+  // (dedup, contact creation, event emits) sees the blob URLs as if
+  // they were regular string answers.
+  //
+  // v1.57 — intake → Documents bridge: we also collect blob metadata so
+  // we can insert a portal_documents row per file after contactId is
+  // resolved below. This makes intake uploads appear in the operator's
+  // contact Documents tab. The insert is wrapped in try/catch so a DB
+  // failure never blocks the intake submission response.
+  // ------------------------------------------------------------------
+
+  // Accumulated metadata for the portal_documents bridge inserts.
+  type BlobMeta = {
+    fileName: string;
+    fileSize: number;
+    mimeType: string;
+    blobUrl: string;
+    blobPath: string;
+  };
+  const intakeBlobMetas: BlobMeta[] = [];
+
+  if (pendingFileUploads && pendingFileUploads.length > 0) {
+    const formFields = (Array.isArray(form.fields) ? form.fields : []) as IntakeFormField[];
+    // Build a map of questionId → field config for O(1) lookup.
+    const fieldMap = new Map<string, IntakeFormField>(formFields.map((f) => [f.key, f]));
+
+    for (const { questionId, files, multi } of pendingFileUploads) {
+      const field = fieldMap.get(questionId);
+      // Config defaults: if field is not found or has no file config,
+      // reject everything (safe default — unknown extensions blocked).
+      const cfg = {
+        accept: field?.accept ?? [],
+        maxSizeMb: field?.maxSizeMb ?? 0,
+      };
+
+      const urls: string[] = [];
+      for (const file of files) {
+        // Validate extension + size.
+        const validation = validateUploadField(
+          { name: file.name, sizeBytes: file.size },
+          cfg,
+        );
+        if (!validation.ok) {
+          return NextResponse.json(
+            {
+              error:
+                validation.reason === "type"
+                  ? `File type not allowed for question "${questionId}".`
+                  : `File exceeds the ${cfg.maxSizeMb}MB size limit for question "${questionId}".`,
+              questionId,
+              reason: validation.reason,
+            },
+            { status: 400 },
+          );
+        }
+
+        // Upload to Vercel Blob. Key shape mirrors user-image route:
+        // `intake/{orgSlug}/{questionId}/{uuid}-{filename}`.
+        const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, "-").slice(0, 128);
+        const blobKey = `intake/${orgSlug}/${questionId}/${randomUUID()}-${safeName}`;
+        try {
+          const blob = await put(blobKey, file, {
+            access: "public",
+            contentType: file.type || "application/octet-stream",
+            addRandomSuffix: false,
+            token: process.env.BLOB_READ_WRITE_TOKEN,
+          });
+          urls.push(blob.url);
+          // Accumulate metadata for the portal_documents bridge insert.
+          intakeBlobMetas.push({
+            fileName: file.name,
+            fileSize: file.size,
+            mimeType: file.type || "application/octet-stream",
+            blobUrl: blob.url,
+            blobPath: blobKey,
+          });
+        } catch (err) {
+          console.error(
+            JSON.stringify({
+              event: "public_intake_blob_upload_failed",
+              org_slug: orgSlug,
+              question_id: questionId,
+              error: err instanceof Error ? err.message : String(err),
+            }),
+          );
+          return NextResponse.json(
+            { error: "File upload failed. Please try again." },
+            { status: 500 },
+          );
+        }
+      }
+
+      // Store single URL string or array, consistent with how text
+      // answers look downstream.
+      answers[questionId] = multi || urls.length > 1 ? urls : (urls[0] ?? null);
+    }
+  }
+
+  // 2026-05-19 — server-side dedup against intake_submissions. The
+  // in-memory idempotency cache (above) only catches re-tries that
+  // happen to hit the same lambda instance; two parallel POSTs to
+  // different cold-start instances both pass it. This second guard
+  // queries the durable intake_submissions table for an identical
+  // payload from the last 30s. If found, return deduplicated without
+  // re-emitting form.submitted (which would spawn a second agent run).
+  //
+  // Why intake_submissions instead of a dedicated dedup table: we
+  // already write to it on every submit, so the cost is one extra
+  // SELECT — no schema migration needed. Content match uses
+  // jsonb_strip_nulls equality which ignores key ordering.
+  try {
+    const dupeRows = await db.execute(sql`
+      SELECT id FROM intake_submissions
+      WHERE org_id = ${org.id}
+        AND form_id = ${form.id}
+        AND jsonb_strip_nulls(data) = jsonb_strip_nulls(${JSON.stringify(answers)}::jsonb)
+        AND created_at > NOW() - INTERVAL '30 seconds'
+      LIMIT 1
+    `);
+    const rows = (dupeRows as unknown as { rows?: Array<{ id: string }> }).rows ?? (dupeRows as unknown as Array<{ id: string }>);
+    if (Array.isArray(rows) && rows.length > 0) {
+      console.log(
+        JSON.stringify({
+          event: "public_intake_deduplicated_by_content",
+          org_id: org.id,
+          form_id: form.id,
+          existing_submission_id: rows[0].id,
+        }),
+      );
+      return NextResponse.json({ ok: true, deduplicated: true });
+    }
+  } catch (err) {
+    // Defensive: if the content-dedup SQL fails for any reason,
+    // fall through to the normal insert path. Worst case is the
+    // legacy double-submit behavior — better than blocking ALL
+    // submissions on a broken dedup query.
+    console.warn(
+      JSON.stringify({
+        event: "public_intake_dedup_query_failed",
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+  }
+
+  // Pull contact-shaped fields out of the answers blob using the form's
+  // field schema. Type-based first (the cleanest signal — `email` /
+  // `phone` types map straight through), id-based fallback for the
+  // common conventional ids (fullName/name/firstName).
+  const formFields = (Array.isArray(form.fields) ? form.fields : []) as IntakeFormField[];
+  const extracted = extractContactFromAnswers(answers, formFields);
+
+  let contactId: string | null = null;
+  let contactCreated = false;
+  let contactLimitBlocked = false;
+
+  // HVAC intake requires phone while email is optional. Resolve identity
+  // email-first, then fall back to normalized phone so a valid phone-only
+  // homeowner submission still becomes a CRM lead.
+  const normalizedPhone =
+    extracted.phone && extracted.phone.trim()
+      ? normalizePhone(extracted.phone.trim()) || extracted.phone.trim()
+      : null;
+  const normalizedEmail = extracted.email?.trim() || null;
+
+  let existingContact: {
+    id: string;
+    email: string | null;
+    phone: string | null;
+  } | null = null;
+
+  // Email remains the preferred identity when supplied. Use the same
+  // case-insensitive semantics as the contacts lower(email) unique index.
+  if (normalizedEmail) {
+    const [emailMatch] = await db
+      .select({
+        id: contacts.id,
+        email: contacts.email,
+        phone: contacts.phone,
+      })
+      .from(contacts)
+      .where(
+        and(
+          eq(contacts.orgId, org.id),
+          sql`lower(${contacts.email}) = lower(${normalizedEmail})`,
+        ),
+      )
+      .limit(1);
+    existingContact = emailMatch ?? null;
+  }
+
+  // If email is absent or did not match, fall back to phone. Contacts
+  // historically store phone in mixed formatting, so compare normalized
+  // values just like lib/sms/api.ts findContactByPhone().
+  if (!existingContact && normalizedPhone) {
+    const phoneCandidates = await db
+      .select({
+        id: contacts.id,
+        email: contacts.email,
+        phone: contacts.phone,
+      })
+      .from(contacts)
+      .where(eq(contacts.orgId, org.id));
+
+    existingContact =
+      phoneCandidates.find(
+        (row) =>
+          row.phone && normalizePhone(row.phone) === normalizedPhone,
+      ) ?? null;
+  }
+
+  if (existingContact) {
+    contactId = existingContact.id;
+
+    // Refresh only values actually supplied by this submission. When a
+    // phone match finds an older contact with no email, safely backfill it.
+    const refresh: Partial<typeof contacts.$inferInsert> = {};
+    if (extracted.firstName && extracted.firstName.trim()) {
+      refresh.firstName = extracted.firstName.trim();
+    }
+    if (extracted.lastName && extracted.lastName.trim()) {
+      refresh.lastName = extracted.lastName.trim();
+    }
+    if (normalizedPhone) {
+      refresh.phone = normalizedPhone;
+    }
+    if (normalizedEmail && !(existingContact.email ?? "").trim()) {
+      refresh.email = normalizedEmail;
+    }
+
+    if (Object.keys(refresh).length > 0) {
+      refresh.updatedAt = new Date();
+      try {
+        await db.update(contacts).set(refresh).where(eq(contacts.id, contactId));
+      } catch (err) {
+        // Non-fatal: submission still links to the resolved CRM contact.
+        console.warn(
+          JSON.stringify({
+            event: "public_intake_contact_refresh_failed",
+            org_id: org.id,
+            contact_id: contactId,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+      }
+    }
+  } else if (normalizedEmail || normalizedPhone) {
+    // Free-tier contact cap blocks only NEW contacts. The intake
+    // submission itself is still persisted below if the cap is reached.
+    const limit = await enforceContactLimit(org.id);
+    if (!limit.allowed) {
+      contactLimitBlocked = true;
+      console.info("[intake-route] contact limit reached", {
+        orgId: org.id,
+        tier: limit.tier,
+        used: limit.used,
+        limit: limit.limit,
+      });
+    } else {
+      const [createdContact] = await db
+        .insert(contacts)
+        .values({
+          orgId: org.id,
+          firstName: extracted.firstName?.trim() || normalizedEmail || normalizedPhone || "Lead",
+          lastName: extracted.lastName?.trim() || null,
+          email: normalizedEmail,
+          phone: normalizedPhone,
+          status: "lead",
+          source: "intake",
+        })
+        .returning({ id: contacts.id });
+
+      contactId = createdContact?.id ?? null;
+      contactCreated = Boolean(contactId);
+    }
+  }
+
+  await db.insert(intakeSubmissions).values({
+    orgId: org.id,
+    formId: form.id,
+    contactId: contactId ?? null,
+    data: answers,
+  });
+
+  // v1.57 — intake → Documents bridge. When the submission included file
+  // uploads, insert a portal_documents row per file so the operator sees
+  // them in the contact's Documents tab. Skipped when:
+  //   - no files were uploaded (intakeBlobMetas is empty)
+  //   - no contactId was resolved (contact limit hit, or no contact identity)
+  // Wrapped in try/catch so a DB failure NEVER blocks the intake response.
+  if (intakeBlobMetas.length > 0 && contactId) {
+    try {
+      await db.insert(portalDocuments).values(
+        intakeBlobMetas.map((meta) => ({
+          orgId: org.id,
+          contactId: contactId!,
+          fileName: meta.fileName,
+          fileSize: meta.fileSize,
+          mimeType: meta.mimeType,
+          blobUrl: meta.blobUrl,
+          blobPath: meta.blobPath,
+          // uploadedByUserId is null — intake is anonymous (no operator session).
+        }))
+      );
+      console.log(
+        JSON.stringify({
+          event: "public_intake_portal_docs_bridged",
+          org_id: org.id,
+          contact_id: contactId,
+          file_count: intakeBlobMetas.length,
+        })
+      );
+    } catch (bridgeErr) {
+      // Non-fatal: the intake submission and blob uploads already succeeded.
+      // Log for ops follow-up but don't surface to the submitter.
+      console.warn(
+        JSON.stringify({
+          event: "public_intake_portal_docs_bridge_failed",
+          org_id: org.id,
+          contact_id: contactId,
+          error: bridgeErr instanceof Error ? bridgeErr.message : String(bridgeErr),
+        })
+      );
+    }
+  }
+
+  // Customer-facing HVAC automation must finish before this serverless
+  // request returns. Each emission remains fail-soft so an automation
+  // failure never loses an already-saved intake submission.
+  const eventEmissions: Array<{
+    name: string;
+    promise: Promise<void>;
+  }> = [];
+
+  if (contactCreated && contactId) {
+    eventEmissions.push({
+      name: "contact.created",
+      promise: emitSeldonEvent(
+        "contact.created",
+        { contactId },
+        { orgId: org.id },
+      ),
+    });
+  }
+
+  eventEmissions.push(
+    {
+      name: "intake.submitted",
+      promise: emitSeldonEvent(
+        "intake.submitted",
+        { formId: form.id, contactId: contactId ?? null },
+        { orgId: org.id },
+      ),
+    },
+    {
+      name: "form.submitted",
+      promise: emitSeldonEvent(
+        "form.submitted",
+        {
+          formId: form.id,
+          contactId: contactId ?? "",
+          data: answers,
+        },
+        { orgId: org.id },
+      ),
+    },
+  );
+
+  const eventResults = await Promise.allSettled(
+    eventEmissions.map((entry) => entry.promise),
+  );
+
+  for (let i = 0; i < eventResults.length; i++) {
+    const result = eventResults[i];
+    if (result.status !== "rejected") continue;
+
+    console.warn(
+      JSON.stringify({
+        event: "public_intake_event_emit_failed",
+        emitted_event: eventEmissions[i]?.name ?? "unknown",
+        org_id: org.id,
+        form_id: form.id,
+        contact_id: contactId,
+        error:
+          result.reason instanceof Error
+            ? result.reason.message.slice(0, 200)
+            : "unknown_error",
+      }),
+    );
+  }
+
+  // v1.6.0 — brain trigger: append a dated observation to the
+  // workspace's intake/recent-leads.md note. Captures the SHAPE of
+  // what's being asked (which questions are answered, which are
+  // skipped, which categories visitors pick) without storing PII. Over
+  // time this becomes a "what kinds of leads come through this form"
+  // record the IDE agent reads when generating future intake / hero /
+  // FAQ blocks. Best-effort — never blocks the submission response.
+  void (async () => {
+    try {
+      const { appendToBrainNote } = await import("@/lib/brain/store");
+      // Summarize the answer keys (not values — protects PII). A note
+      // like "5 fields filled, 1 skipped — service: AC repair" tells the
+      // agent which question categories drive completion vs. drop-off.
+      const answerKeys = Object.keys(answers).filter((k) => {
+        const v = answers[k];
+        return v != null && v !== "" && !(Array.isArray(v) && v.length === 0);
+      });
+      const skippedKeys = formFields
+        .map((f) => f.key)
+        .filter((k) => !answerKeys.includes(k));
+      // Pull a few low-risk values that suggest "what kind of lead":
+      // service / interest / how-did-you-hear style fields. Skip anything
+      // that looks like email/phone/address/name.
+      const PII_KEY_RE = /email|phone|address|name|street|zip|postal/i;
+      const safeValues = answerKeys
+        .filter((k) => !PII_KEY_RE.test(k))
+        .slice(0, 4)
+        .map((k) => {
+          const v = answers[k];
+          const str = typeof v === "string" ? v : Array.isArray(v) ? v.join(", ") : String(v);
+          return `${k}: ${str.slice(0, 60)}`;
+        })
+        .join(" | ");
+      await appendToBrainNote({
+        orgId: org.id,
+        scope: "workspace",
+        path: "intake/recent-leads.md",
+        paragraph: `Submission via /${formSlug}: ${answerKeys.length} answered, ${skippedKeys.length} skipped. ${safeValues || "(no non-PII fields to summarize)"}`,
+        metadata: {
+          type: "fact",
+          tags: ["intake", "lead-shape"],
+          source: `trigger:form.submitted:${form.id}`,
+          related_block_types: ["intake", "hero", "faq"],
+        },
+      });
+    } catch (err) {
+      console.warn(
+        JSON.stringify({
+          event: "brain_trigger_intake_failed",
+          form_slug: formSlug,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    }
+  })();
+
+  // v1.3.5 — funnel observability. Pairs with public_intake_rejected so
+  // every public submission has a single-line outcome record.
+  console.log(
+    JSON.stringify({
+      event: "public_intake_succeeded",
+      org_slug: orgSlug,
+      form_slug: formSlug,
+      contact_created: contactCreated,
+      contact_limit_blocked: contactLimitBlocked,
+      slug_source: bodyOrgSlug ? "body" : "host",
+    }),
+  );
+
+  // The form-submitter sees a flat success — they shouldn't know about
+  // the operator's contact cap. The operator surface gets the signal
+  // via the intake_submissions row + a banner on /contacts.
+  return NextResponse.json({ ok: true, contactLimitBlocked });
+}
+
+interface ExtractedContact {
+  firstName: string | null;
+  lastName: string | null;
+  email: string | null;
+  phone: string | null;
+}
+
+/**
+ * Best-effort field extraction from an intake answers blob. Keep this
+ * defensive — operators ship arbitrary form schemas, and we'd rather
+ * silently miss a field than throw on submit and lose the data.
+ */
+function extractContactFromAnswers(
+  answers: Record<string, unknown>,
+  fields: IntakeFormField[]
+): ExtractedContact {
+  const result: ExtractedContact = { firstName: null, lastName: null, email: null, phone: null };
+
+  // Type-based detection (most reliable).
+  for (const field of fields) {
+    const raw = answers[field.key];
+    if (raw == null) continue;
+    const value = typeof raw === "string" ? raw.trim() : String(raw);
+    if (!value) continue;
+    if (field.type === "email" && !result.email) result.email = value.toLowerCase();
+    else if (field.type === "phone" && !result.phone) result.phone = value;
+  }
+
+  // Conventional-id fallback. Walk well-known field-key conventions
+  // (fullName, firstName, lastName, email, phone, etc.) — this is what
+  // every template in `skills/templates/*.json` uses.
+  const KEY_HINTS = {
+    email: ["email", "emailAddress", "email_address", "contactEmail"],
+    phone: ["phone", "phoneNumber", "phone_number", "tel", "mobile"],
+    fullName: ["fullName", "full_name", "name"],
+    firstName: ["firstName", "first_name"],
+    lastName: ["lastName", "last_name"],
+  };
+
+  const pickFirst = (keys: string[]) => {
+    for (const key of keys) {
+      const raw = answers[key];
+      if (typeof raw === "string" && raw.trim().length > 0) return raw.trim();
+    }
+    return null;
+  };
+
+  if (!result.email) {
+    const v = pickFirst(KEY_HINTS.email);
+    if (v) result.email = v.toLowerCase();
+  }
+  if (!result.phone) {
+    result.phone = pickFirst(KEY_HINTS.phone);
+  }
+  const fullName = pickFirst(KEY_HINTS.fullName);
+  if (fullName) {
+    // Naive "first last" split — fine for North America. A multi-token
+    // name's tail words go to lastName so "Anne-Marie de la Cruz"
+    // round-trips at the contact level.
+    const parts = fullName.split(/\s+/);
+    result.firstName = parts[0] ?? null;
+    result.lastName = parts.length > 1 ? parts.slice(1).join(" ") : null;
+  } else {
+    result.firstName = pickFirst(KEY_HINTS.firstName);
+    result.lastName = pickFirst(KEY_HINTS.lastName);
+  }
+
+  return result;
+}

@@ -1,0 +1,621 @@
+// The world-class GEO agent-page template — a citable, stat-backed ANSWER page
+// that ends in the dual CTA. Server component (RSC): the ONLY client island is
+// the dual CTA's Rent-via-MCP copy panel (AgentPageCta). Everything a crawler or
+// an LLM needs — headings, the cited statistic with its source, the FAQ, the
+// schema.org JSON-LD — is server-rendered HTML.
+//
+// GEO, not keyword SEO (per Princeton's GEO paper): the page leads with a
+// semantic <h1>, renders the CITED pain stat prominently WITH a linked source,
+// keeps prose answer-shaped, and emits BOTH schema.org SoftwareApplication and
+// FAQPage JSON-LD (the FAQPage built straight from the registry FAQ). No keyword
+// stuffing.
+//
+// Sections (in order): editorial hero (h1 + one-liner + cited stat) → what it
+// does → how it works (3 steps) → surfaces pills → FAQ accordion (real
+// <details>) → "more agents for [vertical]" flywheel cross-links → dual CTA.
+//
+// Design tokens are the live marketing palette (MKT) ported from the
+// marketplace, so this matches the storefront pixel-for-pixel.
+
+import type { ReactElement } from "react";
+import Link from "next/link";
+import {
+  MarketplaceNav,
+  MarketplaceFooter,
+  SeldonFrameMark,
+} from "@/components/marketplace/marketplace-chrome";
+import { MarketplaceStyles } from "@/components/marketplace/marketplace-styles";
+import { MarketplaceIcon } from "@/components/marketplace/marketplace-icons";
+import { MKT, SURFACE_META, mcpEndpointFor, mcpSnippetFor } from "@/components/marketplace/marketplace-data";
+import { AgentPageCta } from "@/components/seo/agent-page-cta";
+import { ToolLogoRow } from "@/components/seo/tool-marks";
+import { AGENCY_PLAN_FACTS } from "@/lib/marketing/public-claims";
+import {
+  composePageCopy,
+  deployHrefFor,
+  relatedJobsForVertical,
+  keptVerticalsForJob,
+  isKeptPair,
+  VERTICALS,
+  type AgentJob,
+  type Vertical,
+} from "@/lib/seo/agent-pages";
+
+export type AgentPageProps = {
+  job: AgentJob;
+  /** Present on Tier-2 (job × vertical) pages; absent on Tier-1. */
+  vertical?: Vertical;
+};
+
+export function AgentPage({ job, vertical }: AgentPageProps): ReactElement {
+  const copy = composePageCopy(job, vertical);
+  const deployHref = deployHrefFor(job, vertical);
+  const mcpEndpoint = mcpEndpointFor(job.marketplaceSlug ?? job.slug);
+  const mcpSnippet = mcpSnippetFor(job.marketplaceSlug ?? job.slug);
+  // The 3-step "How it works" + the integrations it touches come straight from
+  // the registry (lib/seo/agent-pages.ts) — written per agent, so the visual is
+  // specific, not generic. (Task B)
+  const steps = job.howItWorks;
+  const related = relatedJobsForVertical(job.slug, 5);
+  const deployLabel = vertical
+    ? `Build this for ${aOrAnLower(vertical.name)} ${vertical.name} client`
+    : "Build this for a client";
+  // Review-agent cluster (PR 2, Part 1c): on a kept google-review-agent Tier-2
+  // page, cross-link the tool that builds the review link this agent sends,
+  // plus the other kept verticals for the SAME job (siblings) — every folded
+  // pair already redirects before this component renders, so `vertical` here
+  // is always a kept one when it's present.
+  const reviewAgentSiblings =
+    vertical && job.slug === "google-review-agent"
+      ? keptVerticalsForJob(job.slug).filter((v) => v.slug !== vertical.slug)
+      : [];
+  // Job-hub "by industry" section (PR 2, Part 1c — the consolidation payoff):
+  // Tier-1 only. Kept verticals link to their standalone page; folded verticals
+  // render their composed copy inline so the content lives on the hub instead
+  // of vanishing with the page.
+  const byIndustry = !vertical ? VERTICALS : [];
+  // ── schema.org: SoftwareApplication (the agent) + FAQPage (the registry FAQ).
+  // Two graphs, emitted as JSON-LD so search engines + LLMs can cite the page.
+  const softwareLd = {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    name: vertical ? `${job.name} for ${vertical.plural}` : job.name,
+    applicationCategory: "BusinessApplication",
+    operatingSystem: "SeldonFrame",
+    description: copy.metaDescription,
+    offers: AGENCY_PLAN_FACTS.map((plan) => ({
+      "@type": "Offer",
+      name: plan.name,
+      price: String(plan.priceMonthly),
+      priceCurrency: "USD",
+      description: plan.audience,
+    })),
+    provider: { "@id": "https://www.seldonframe.com/#org" },
+  };
+  const faqLd = {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    mainEntity: copy.faq.map((item) => ({
+      "@type": "Question",
+      name: item.q,
+      acceptedAnswer: { "@type": "Answer", text: item.a },
+    })),
+  };
+
+  return (
+    <div
+      className="sf-mkt sf-agentpage"
+      style={{ minHeight: "100vh", background: MKT.paper, color: MKT.ink, fontFamily: MKT.fontSans, overflowX: "hidden" }}
+    >
+      <MarketplaceStyles />
+      <AgentPageStyles />
+      {/* GEO: structured data — SoftwareApplication + FAQPage. */}
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(softwareLd) }} />
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(faqLd) }} />
+      <MarketplaceNav active="browse" />
+
+      <main className="sf-ap-main" style={{ maxWidth: 920, margin: "0 auto", padding: "26px 32px 70px", width: "100%" }}>
+        {/* breadcrumb — Tier-2 links back to the Tier-1 job page (a real hub edge) */}
+        <nav
+          aria-label="Breadcrumb"
+          style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13.5, fontWeight: 600, color: "rgba(34,29,23,0.5)", marginBottom: 22 }}
+        >
+          <Link href="/ai-agents" className="sf-link" style={{ color: "rgba(34,29,23,0.55)", textDecoration: "none" }}>
+            Agents
+          </Link>
+          <span style={{ color: "rgba(34,29,23,0.3)" }}>/</span>
+          {vertical ? (
+            <>
+              <Link href={`/ai-agents/${job.slug}`} className="sf-link" style={{ color: "rgba(34,29,23,0.55)", textDecoration: "none" }}>
+                {job.name}
+              </Link>
+              <span style={{ color: "rgba(34,29,23,0.3)" }}>/</span>
+              <span style={{ color: "rgba(34,29,23,0.7)" }}>{vertical.plural}</span>
+            </>
+          ) : (
+            <span style={{ color: "rgba(34,29,23,0.7)" }}>{job.name}</span>
+          )}
+        </nav>
+
+        {/* ── HERO: semantic h1 + one-liner + the cited stat, rendered prominently ── */}
+        <header style={{ paddingBottom: 30, borderBottom: "1px solid rgba(34,29,23,0.10)" }}>
+          <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", color: MKT.green, marginBottom: 12 }}>
+            {vertical ? `Agency playbook · ${vertical.plural}` : "Agency-ready agent · deploy in 60 seconds"}
+          </div>
+          <h1 className="sf-ap-h1" style={{ margin: 0, fontSize: 44, fontWeight: 800, letterSpacing: "-0.03em", lineHeight: 1.05, maxWidth: 760 }}>
+            {copy.h1}
+          </h1>
+          <p style={{ margin: "16px 0 0", fontSize: 19, lineHeight: 1.5, color: "rgba(34,29,23,0.7)", maxWidth: 640 }}>
+            {job.oneLiner}
+          </p>
+
+          {/* THE CITED STAT — the GEO centerpiece. Rendered as a pull-quote with
+              its source linked, so humans see the proof and LLMs can cite it. */}
+          <figure
+            style={{
+              margin: "26px 0 0",
+              background: "#fff",
+              border: "1px solid rgba(34,29,23,0.10)",
+              borderLeft: `4px solid ${MKT.green}`,
+              borderRadius: 16,
+              padding: "20px 22px",
+              maxWidth: 640,
+              boxShadow: "0 1px 2px rgba(34,29,23,0.04)",
+            }}
+          >
+            <blockquote className="sf-ap-stat" style={{ margin: 0, fontFamily: MKT.fontSerif, fontSize: 21, lineHeight: 1.4, fontWeight: 500, color: MKT.ink }}>
+              “{job.painStat.text}”
+            </blockquote>
+            <figcaption style={{ marginTop: 12, fontSize: 13, color: "rgba(34,29,23,0.6)" }}>
+              Source:{" "}
+              <a
+                href={job.painStat.url}
+                target="_blank"
+                rel="noopener noreferrer nofollow"
+                style={{ color: MKT.green, fontWeight: 600, textDecoration: "none" }}
+              >
+                {job.painStat.source}
+              </a>
+            </figcaption>
+          </figure>
+
+          {/* primary CTA echoed at the top so the hero is actionable */}
+          <div style={{ marginTop: 26 }}>
+            <Link
+              href={deployHref}
+              className="sf-btn"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 9,
+                border: "none",
+                background: MKT.green,
+                color: "#fff",
+                fontWeight: 700,
+                fontSize: 16,
+                padding: "14px 24px",
+                borderRadius: 13,
+                textDecoration: "none",
+                boxShadow: "0 8px 20px rgba(31, 43, 36,0.28)",
+              }}
+            >
+              <MarketplaceIcon name="package" size={19} />
+              {deployLabel}
+              <MarketplaceIcon name="arrowRight" size={17} />
+            </Link>
+          </div>
+        </header>
+
+        {/* ── INTRO (answer-shaped prose — weaves the stat + vertical) ── */}
+        <section style={SECTION}>
+          <p style={{ margin: 0, fontSize: 17, lineHeight: 1.65, color: "rgba(34,29,23,0.82)", maxWidth: 680 }}>
+            {copy.intro}
+          </p>
+        </section>
+
+        {/* ── WHAT IT DOES ── */}
+        <section style={SECTION}>
+          <h2 style={H2}>What {aOrAnLower(job.name)} {job.name} does</h2>
+          <ul style={{ margin: "0", padding: 0, listStyle: "none", display: "grid", gap: 12, maxWidth: 680 }}>
+            {job.whatItDoes.map((line) => (
+              <li key={line} style={{ display: "flex", alignItems: "flex-start", gap: 11, fontSize: 16, lineHeight: 1.5, color: "rgba(34,29,23,0.8)" }}>
+                <span style={{ color: MKT.green, display: "flex", marginTop: 2, flex: "none" }}>
+                  <MarketplaceIcon name="check" size={18} stroke={2.4} />
+                </span>
+                {line}
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        {/* ── HOW IT WORKS (3-step visual — registry-driven, on-brand) ── */}
+        <section style={SECTION}>
+          <h2 style={H2}>How it works</h2>
+          <p style={{ margin: "-6px 0 20px", fontSize: 15, color: "rgba(34,29,23,0.6)", maxWidth: 600 }}>
+            From trigger to done — in three steps, working 24/7 in the background.
+          </p>
+          <ol className="sf-ap-howit" style={{ margin: 0, padding: 0, listStyle: "none" }}>
+            {steps.map((step, i) => (
+              <li
+                key={step.label}
+                className="sf-ap-stepcard sf-rise"
+                style={{
+                  position: "relative",
+                  background: "#fff",
+                  border: "1px solid rgba(34,29,23,0.10)",
+                  borderRadius: 16,
+                  padding: "20px 18px 18px",
+                  boxShadow: "0 1px 2px rgba(34,29,23,0.04)",
+                  minWidth: 0,
+                  // staggered entrance — subtle, CSS-only (no client JS)
+                  animationDelay: `${i * 90}ms`,
+                }}
+              >
+                {/* numbered token */}
+                <span
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: 34,
+                    height: 34,
+                    borderRadius: 10,
+                    background: MKT.green,
+                    color: "#fff",
+                    fontWeight: 700,
+                    fontFamily: MKT.fontMono,
+                    fontSize: 15,
+                    boxShadow: "0 6px 16px rgba(31, 43, 36,0.28)",
+                  }}
+                >
+                  {i + 1}
+                </span>
+                {/* connector arrow into the next step (desktop only — the scoped
+                    CSS reveals it ≥640px and hides it when the grid stacks) */}
+                {i < steps.length - 1 ? (
+                  <span className="sf-ap-step-arrow" aria-hidden style={{ color: "rgba(31, 43, 36,0.5)" }}>
+                    <MarketplaceIcon name="arrowRight" size={18} stroke={2.4} />
+                  </span>
+                ) : null}
+                <div style={{ marginTop: 13, fontSize: 16, fontWeight: 700, letterSpacing: "-0.01em", lineHeight: 1.25 }}>
+                  {step.label}
+                </div>
+                <p style={{ margin: "6px 0 0", fontSize: 14.5, lineHeight: 1.5, color: "rgba(34,29,23,0.7)" }}>
+                  {step.detail}
+                </p>
+              </li>
+            ))}
+          </ol>
+        </section>
+
+        {/* ── WORKS WITH (real tool/brand logos) ── */}
+        <section style={SECTION}>
+          <h2 style={{ ...H2, marginBottom: 6 }}>Works with</h2>
+          <p style={{ margin: "0 0 16px", fontSize: 15, color: "rgba(34,29,23,0.6)", maxWidth: 600 }}>
+            It plugs into the tools you already use — no new accounts to learn.
+          </p>
+          <ToolLogoRow tools={job.tools} />
+        </section>
+
+        {/* ── SURFACES (pills) ── */}
+        <section style={SECTION}>
+          <h2 style={{ ...H2, marginBottom: 14 }}>Where it works</h2>
+          <div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
+            {job.surfaces.map((key) => (
+              <span
+                key={key}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 7,
+                  fontSize: 14.5,
+                  fontWeight: 600,
+                  color: MKT.ink,
+                  background: "#fff",
+                  border: "1px solid rgba(34,29,23,0.12)",
+                  padding: "9px 16px",
+                  borderRadius: 999,
+                  boxShadow: "0 1px 2px rgba(34,29,23,0.04)",
+                }}
+              >
+                <span style={{ color: MKT.green, display: "flex" }}>
+                  <MarketplaceIcon name={SURFACE_META[key].icon} size={16} />
+                </span>
+                {SURFACE_META[key].label}
+              </span>
+            ))}
+          </div>
+        </section>
+
+        {/* ── FAQ (real <details> accordion — also in FAQPage JSON-LD) ── */}
+        <section style={SECTION}>
+          <h2 style={H2}>Frequently asked questions</h2>
+          <div style={{ display: "grid", gap: 10, maxWidth: 720 }}>
+            {copy.faq.map((item) => (
+              <details
+                key={item.q}
+                style={{
+                  background: "#fff",
+                  border: "1px solid rgba(34,29,23,0.10)",
+                  borderRadius: 13,
+                  padding: "14px 18px",
+                  boxShadow: "0 1px 2px rgba(34,29,23,0.04)",
+                }}
+              >
+                <summary
+                  style={{
+                    cursor: "pointer",
+                    fontSize: 16,
+                    fontWeight: 650,
+                    color: MKT.ink,
+                    listStyle: "none",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 12,
+                  }}
+                >
+                  {item.q}
+                  <span style={{ color: MKT.green, flex: "none", display: "flex" }}>
+                    <MarketplaceIcon name="arrowRight" size={16} />
+                  </span>
+                </summary>
+                <p style={{ margin: "10px 0 0", fontSize: 15, lineHeight: 1.6, color: "rgba(34,29,23,0.76)" }}>{item.a}</p>
+              </details>
+            ))}
+          </div>
+        </section>
+
+        {/* ── REVIEW-AGENT CLUSTER: tool + sibling-vertical cross-links (Tier-2, google-review-agent only) ── */}
+        {reviewAgentSiblings.length > 0 ? (
+          <section style={SECTION}>
+            <h2 style={{ ...H2, marginBottom: 4 }}>Built the link? Put the ask on autopilot</h2>
+            <p style={{ margin: "0 0 18px", fontSize: 14.5, color: "rgba(34,29,23,0.55)" }}>
+              This agent sends the ask automatically — no manual texting required.
+            </p>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              <Link
+                href="/tools/google-review-link-generator"
+                className="sf-link"
+                style={{ fontSize: 13.5, fontWeight: 600, color: MKT.green, border: "1px solid rgba(31, 43, 36,0.35)", borderRadius: 999, padding: "7px 14px", textDecoration: "none", background: "rgba(31, 43, 36,0.06)" }}
+              >
+                Build the review link (free tool) →
+              </Link>
+              {reviewAgentSiblings.map((v) => (
+                <Link
+                  key={v.slug}
+                  href={`/ai-agents/google-review-agent/for/${v.slug}`}
+                  className="sf-link"
+                  style={{ fontSize: 13.5, fontWeight: 600, color: "rgba(34,29,23,0.7)", border: "1px solid rgba(34,29,23,0.10)", borderRadius: 999, padding: "7px 14px", textDecoration: "none", background: "rgba(255,255,255,0.5)" }}
+                >
+                  {`For ${v.plural}`}
+                </Link>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {/* ── BY INDUSTRY (Tier-1 hub only — the consolidation payoff): kept
+             verticals link out, folded verticals render their composed copy
+             inline so the content lives on the hub instead of vanishing. ── */}
+        {byIndustry.length > 0 ? (
+          <section style={SECTION}>
+            <h2 style={H2}>{`${job.name} by industry`}</h2>
+            <p style={{ margin: "-6px 0 20px", fontSize: 15, color: "rgba(34,29,23,0.6)", maxWidth: 640 }}>
+              How this agent shows up for the trades that ask about it most.
+            </p>
+            <div className="sf-ap-industry">
+              {byIndustry.map((v) => {
+                const kept = isKeptPair(job.slug, v.slug);
+                if (kept) {
+                  return (
+                    <Link
+                      key={v.slug}
+                      href={`/ai-agents/${job.slug}/for/${v.slug}`}
+                      className="sf-cardhover"
+                      style={{
+                        textDecoration: "none",
+                        color: MKT.ink,
+                        background: "#fff",
+                        border: "1px solid rgba(34,29,23,0.10)",
+                        borderRadius: 14,
+                        padding: 16,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        boxShadow: "0 1px 2px rgba(34,29,23,0.04)",
+                      }}
+                    >
+                      <div style={{ fontWeight: 700, fontSize: 15.5 }}>{v.plural}</div>
+                      <span style={{ color: MKT.green, flex: "none", display: "flex" }}>
+                        <MarketplaceIcon name="arrowRight" size={16} />
+                      </span>
+                    </Link>
+                  );
+                }
+                const vCopy = composePageCopy(job, v);
+                return (
+                  <div
+                    key={v.slug}
+                    style={{
+                      background: "#fff",
+                      border: "1px solid rgba(34,29,23,0.10)",
+                      borderRadius: 14,
+                      padding: 16,
+                      boxShadow: "0 1px 2px rgba(34,29,23,0.04)",
+                    }}
+                  >
+                    <div style={{ fontWeight: 700, fontSize: 15.5, marginBottom: 6 }}>{v.plural}</div>
+                    <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.55, color: "rgba(34,29,23,0.68)" }}>
+                      {firstSentences(vCopy.intro, 2)}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        ) : null}
+
+        {/* ── FLYWHEEL: "more agents for [vertical]" cross-links ── */}
+        {related.length > 0 ? (
+          <section style={SECTION}>
+            <h2 style={{ ...H2, marginBottom: 4 }}>
+              More agents for {vertical ? `${vertical.plural} clients` : "client businesses"}
+            </h2>
+            <p style={{ margin: "0 0 18px", fontSize: 14.5, color: "rgba(34,29,23,0.55)" }}>
+              Every one deploys into a branded client workspace in about a minute.
+            </p>
+            <div className="sf-ap-related">
+              {related.map((r) => (
+                <Link
+                  key={r.slug}
+                  href={vertical ? `/ai-agents/${r.slug}/for/${vertical.slug}` : `/ai-agents/${r.slug}`}
+                  className="sf-cardhover"
+                  style={{
+                    textDecoration: "none",
+                    color: MKT.ink,
+                    background: "#fff",
+                    border: "1px solid rgba(34,29,23,0.10)",
+                    borderRadius: 14,
+                    padding: 16,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 12,
+                    minWidth: 0,
+                    boxShadow: "0 1px 2px rgba(34,29,23,0.04)",
+                  }}
+                >
+                  <span style={{ width: 42, height: 42, borderRadius: 12, background: "rgba(31, 43, 36,0.10)", color: MKT.green, display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
+                    <MarketplaceIcon name={surfaceIconFor(r)} size={20} />
+                  </span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 15.5 }}>
+                      {vertical ? `${r.name} for ${vertical.plural}` : r.name}
+                    </div>
+                    <div style={{ fontSize: 13, color: "rgba(34,29,23,0.6)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {r.oneLiner}
+                    </div>
+                  </div>
+                  <span style={{ color: MKT.green, flex: "none", display: "flex" }}>
+                    <MarketplaceIcon name="arrowRight" size={16} />
+                  </span>
+                </Link>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {/* ── DUAL CTA (the close) ── */}
+        <section style={{ padding: "34px 0 0" }}>
+          <AgentPageCta
+            agentName={job.name}
+            deployHref={deployHref}
+            deployLabel={deployLabel}
+            mcpEndpoint={mcpEndpoint}
+            mcpSnippet={mcpSnippet}
+            marketplaceSlug={job.marketplaceSlug}
+          />
+        </section>
+
+        {/* ── tiny GEO footer note: links the page to its marketplace listing ── */}
+        {job.marketplaceSlug ? (
+          <p style={{ margin: "26px 0 0", fontSize: 13.5, color: "rgba(34,29,23,0.5)", display: "flex", alignItems: "center", gap: 8 }}>
+            <SeldonFrameMark size={15} />
+            See this agent on the{" "}
+            <Link href={`/marketplace/${job.marketplaceSlug}`} style={{ color: MKT.green, fontWeight: 600, textDecoration: "none" }}>
+              SeldonFrame Marketplace
+            </Link>
+            .
+          </p>
+        ) : null}
+      </main>
+
+      <MarketplaceFooter />
+    </div>
+  );
+}
+
+// ─── responsive containment (the overflow fix) ───────────────────────────────
+//
+// The page is inline-styled RSC (no Tailwind on these nodes), so the responsive
+// behavior lives in one injected <style> block keyed off stable class names. It
+// does three jobs, all server-rendered (zero client JS):
+//   1. CONTAIN: the page root is `overflow-x:hidden` and `.sf-ap-main` is
+//      `max-width:100%` so nothing can paint past the viewport's right edge.
+//   2. The "More agents" grid (`.sf-ap-related`) uses `minmax(0,1fr)` tracks —
+//      the actual root cause of the old overflow: plain `1fr 1fr` tracks have a
+//      min-size of `auto`, so the cards' `white-space:nowrap` taglines forced
+//      each column wider than half the container and pushed the grid off-screen.
+//      `minmax(0,…)` lets the track shrink below content size; the tagline then
+//      truncates with its existing ellipsis instead of overflowing. It collapses
+//      to ONE column under 640px.
+//   3. A ≤640px mobile query tightens page padding and scales the big hero
+//      numbers down so the 44px h1 and the cited-stat pull-quote stay readable
+//      and on-canvas down to 320px.
+const AGENT_PAGE_CSS = `
+  .sf-agentpage,.sf-agentpage *{min-width:0}
+  .sf-ap-main{max-width:920px}
+  .sf-ap-related{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+  .sf-ap-industry{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+  .sf-ap-howit{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+  .sf-ap-works{display:flex;flex-wrap:wrap;gap:10px}
+  .sf-ap-stepcard{transition:transform .2s cubic-bezier(0.22,1,0.36,1),box-shadow .2s,border-color .2s}
+  .sf-ap-stepcard:hover{transform:translateY(-3px);box-shadow:0 2px 4px rgba(34,29,23,0.05),0 18px 36px rgba(34,29,23,0.10);border-color:rgba(31, 43, 36,0.3)}
+  /* connector arrow: hidden by default (stacked/mobile), shown + floated into the
+     gutter between cards on desktop where the 3-col grid actually has a gutter. */
+  .sf-ap-step-arrow{display:none}
+  @media (min-width:641px){
+    .sf-ap-step-arrow{display:flex;position:absolute;top:30px;right:-19px;z-index:1;align-items:center;justify-content:center;width:30px;height:18px;animation:sfFloat 2.6s ease-in-out infinite}
+  }
+  @media (max-width:640px){
+    .sf-ap-main{padding:20px 18px 56px !important}
+    .sf-ap-h1{font-size:32px !important;line-height:1.08 !important}
+    .sf-ap-stat{font-size:18px !important}
+    .sf-ap-related{grid-template-columns:1fr}
+    .sf-ap-industry{grid-template-columns:1fr}
+    .sf-ap-howit{grid-template-columns:1fr}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .sf-ap-step-arrow{animation:none}
+    .sf-agentpage .sf-rise{animation:none}
+  }
+`;
+
+function AgentPageStyles(): ReactElement {
+  return <style dangerouslySetInnerHTML={{ __html: AGENT_PAGE_CSS }} />;
+}
+
+// ─── shared style atoms (match the listing page's section rhythm) ─────────────
+
+const SECTION = {
+  padding: "30px 0",
+  borderBottom: "1px solid rgba(34,29,23,0.10)",
+} as const;
+
+const H2 = {
+  margin: "0 0 16px",
+  fontSize: 23,
+  fontWeight: 700,
+  letterSpacing: "-0.02em",
+} as const;
+
+/** "a"/"an" lowercase for mid-sentence headline use ("What an AI Receptionist
+ *  does" / "What a Win-Back Agent does"). */
+function aOrAnLower(name: string): string {
+  return /^[aeiou]/i.test(name.trim()) ? "an" : "a";
+}
+
+/** Pick a representative surface icon for a related-agent card. */
+function surfaceIconFor(job: AgentJob) {
+  return SURFACE_META[job.surfaces[0]].icon;
+}
+
+/** The first `n` sentences of already-composed copy (splitting on ". ") — no
+ *  new writing, just trims composePageCopy's intro down to a hub-card-sized
+ *  blurb for the "by industry" section (PR 2, Part 1c). */
+function firstSentences(text: string, n: number): string {
+  const parts = text.split(". ");
+  if (parts.length <= n) return text;
+  return `${parts.slice(0, n).join(". ")}.`;
+}

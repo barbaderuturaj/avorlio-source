@@ -1,0 +1,432 @@
+import { NextRequest, NextResponse } from "next/server";
+import { eq } from "drizzle-orm";
+import { getStripeClient } from "@seldonframe/payments";
+import { auth } from "@/auth";
+import { db } from "@/db";
+import { users } from "@/db/schema";
+import { getOrgId } from "@/lib/auth/helpers";
+import {
+  WORKSPACE_ADDON_MONTHLY_PRICE_ID,
+  BUILDER_PRICE_ID,
+  MANAGED_PRICE_ID,
+  AGENCY_STARTER_PRICE_ID,
+  AGENCY_GROWTH_PRICE_ID,
+  AGENCY_SCALE_PRICE_ID,
+  WORKSPACE_PRICE_ID,
+  AGENCY_BASE_PRICE_ID,
+  GROWTH_BASE_PRICE_ID,
+  SCALE_BASE_PRICE_ID,
+  isAllowedCheckoutPriceId,
+  isSelfServiceCheckoutPriceId,
+  isPlaceholderPriceId,
+} from "@/lib/billing/price-ids";
+import {
+  buildCheckoutSessionParams,
+  tierFromBasePriceId,
+  resolveCheckoutTierGate,
+} from "@/lib/billing/checkout-items";
+import type { TierId } from "@/lib/billing/plans";
+import { captureServerEvent } from "@/lib/analytics/capture";
+import { sendGa4Event } from "@/lib/analytics/ga4";
+import { parseInternalIds } from "@/lib/super-admin/internal-exclusion";
+import { buildCheckoutStartedEvent, captureFunnelEvent } from "@/lib/analytics/funnel";
+
+const CHECKOUT_SOURCES = new Set(["pricing", "signup_resume", "upgrade_modal"]);
+
+function normalizeReturnPath(value: unknown, fallback: string) {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("/") || trimmed.startsWith("//")) {
+    return fallback;
+  }
+
+  return trimmed;
+}
+
+function resolveUserIdFromSeldonApiKey(headers: Headers): string | null {
+  const providedKey = headers.get("x-seldon-api-key")?.trim();
+  if (!providedKey) {
+    return null;
+  }
+
+  const configuredPairs = (process.env.SELDON_BUILDER_API_KEYS ?? "")
+    .split(",")
+    .map((pair) => pair.trim())
+    .filter(Boolean)
+    .map((pair) => {
+      const separator = pair.indexOf(":");
+      if (separator < 1) {
+        return null;
+      }
+
+      const key = pair.slice(0, separator).trim();
+      const userId = pair.slice(separator + 1).trim();
+      if (!key || !userId) {
+        return null;
+      }
+
+      return { key, userId };
+    })
+    .filter((entry): entry is { key: string; userId: string } => Boolean(entry));
+
+  const match = configuredPairs.find((entry) => entry.key === providedKey);
+  return match?.userId ?? null;
+}
+
+function getRequestOrigin(req: NextRequest) {
+  try {
+    return new URL(req.url).origin;
+  } catch {
+    return process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+  }
+}
+
+export async function POST(req: NextRequest) {
+  const apiKeyUserId = resolveUserIdFromSeldonApiKey(req.headers);
+  const hasApiKeyHeader = Boolean(req.headers.get("x-seldon-api-key")?.trim());
+
+  const session = apiKeyUserId ? null : await auth();
+  const userId = apiKeyUserId ?? session?.user?.id ?? null;
+
+  if (hasApiKeyHeader && !apiKeyUserId) {
+    return NextResponse.json({ error: "Invalid x-seldon-api-key." }, { status: 401 });
+  }
+
+  if (!userId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const stripe = getStripeClient();
+  if (!stripe) {
+    return NextResponse.json(
+      {
+        error:
+          "Stripe is not configured. Set STRIPE_SECRET_KEY (or STRIPE_LIVE_SECRET_KEY / STRIPE_TEST_SECRET_KEY).",
+      },
+      { status: 500 }
+    );
+  }
+
+  const body = (await req.json().catch(() => ({}))) as {
+    quantity?: unknown;
+    successPath?: unknown;
+    cancelPath?: unknown;
+    priceId?: unknown;
+    /** New (April 30, 2026): direct tier selection. Preferred over
+     *  priceId so the multi-price (base + metered) item array is
+     *  assembled server-side from a single source of truth. */
+    tier?: unknown;
+    workspaceId?: unknown;
+    /** Lookup keys are how the marketing /pricing page identifies a
+     *  tier (e.g. "growth_monthly", "scale_monthly"). Server-side we
+     *  resolve them to the corresponding tier id. */
+    billingPeriod?: unknown;
+    checkout_source?: unknown;
+  };
+  const quantity = typeof body.quantity === "number" ? body.quantity : 1;
+  const successPath = normalizeReturnPath(body.successPath, "/dashboard?success=true&session_id={CHECKOUT_SESSION_ID}");
+  const cancelPath = normalizeReturnPath(body.cancelPath, "/pricing");
+  const requestedPriceId = typeof body.priceId === "string" ? body.priceId.trim() : "";
+  const rawTier = typeof body.tier === "string" ? body.tier.trim().toLowerCase() : "";
+  const lookupKey = typeof body.billingPeriod === "string" ? body.billingPeriod.trim().toLowerCase() : "";
+  const requestedCheckoutSource = typeof body.checkout_source === "string"
+    ? body.checkout_source.trim().slice(0, 40)
+    : "";
+  const checkoutSource = CHECKOUT_SOURCES.has(requestedCheckoutSource)
+    ? requestedCheckoutSource
+    : "pricing";
+
+  if (!Number.isInteger(quantity) || quantity < 1) {
+    return NextResponse.json({ error: "quantity must be a positive integer" }, { status: 400 });
+  }
+
+  if (requestedPriceId && !isAllowedCheckoutPriceId(requestedPriceId)) {
+    return NextResponse.json({ error: "Unsupported priceId." }, { status: 400 });
+  }
+
+  // Resolve the target tier. Paths in order of precedence:
+  //   1. Explicit `tier` body field (the pricing buttons send this).
+  //      Legacy "growth"/"scale" are accepted and remapped to their
+  //      grandfathered tier (existing links only — new checkout never
+  //      offers them; see the sellable gate below).
+  //   2. Marketing lookup_key (e.g. "managed_monthly", legacy
+  //      "growth_monthly").
+  //   3. priceId — new base ids directly, or legacy Growth/Scale/Cloud
+  //      base ids grandfathered to workspace/agency.
+  let targetTier: TierId | null = null;
+  if (
+    rawTier === "builder" ||
+    rawTier === "managed" ||
+    rawTier === "agency_starter" ||
+    rawTier === "agency_growth" ||
+    rawTier === "agency_scale" ||
+    rawTier === "workspace" ||
+    rawTier === "agency"
+  ) {
+    targetTier = rawTier;
+  } else if (rawTier === "growth") {
+    targetTier = "workspace";
+  } else if (rawTier === "scale") {
+    targetTier = "agency";
+  } else if (lookupKey === "builder_monthly" || lookupKey === "builder_yearly") {
+    targetTier = "builder";
+  } else if (lookupKey === "managed_monthly" || lookupKey === "managed_yearly") {
+    targetTier = "managed";
+  } else if (lookupKey === "agency_starter_monthly" || lookupKey === "agency_starter_yearly") {
+    targetTier = "agency_starter";
+  } else if (lookupKey === "agency_growth_monthly" || lookupKey === "agency_growth_yearly") {
+    targetTier = "agency_growth";
+  } else if (lookupKey === "agency_scale_monthly" || lookupKey === "agency_scale_yearly") {
+    targetTier = "agency_scale";
+  } else if (
+    lookupKey === "workspace_monthly" ||
+    lookupKey === "workspace_yearly" ||
+    lookupKey === "growth_monthly" ||
+    lookupKey === "growth_yearly"
+  ) {
+    targetTier = "workspace";
+  } else if (
+    lookupKey === "agency_monthly" ||
+    lookupKey === "agency_yearly" ||
+    lookupKey === "scale_monthly" ||
+    lookupKey === "scale_yearly"
+  ) {
+    targetTier = "agency";
+  } else if (requestedPriceId === BUILDER_PRICE_ID) {
+    targetTier = "builder";
+  } else if (requestedPriceId === MANAGED_PRICE_ID) {
+    targetTier = "managed";
+  } else if (requestedPriceId === AGENCY_STARTER_PRICE_ID) {
+    targetTier = "agency_starter";
+  } else if (requestedPriceId === AGENCY_GROWTH_PRICE_ID) {
+    targetTier = "agency_growth";
+  } else if (requestedPriceId === AGENCY_SCALE_PRICE_ID) {
+    targetTier = "agency_scale";
+  } else if (requestedPriceId === WORKSPACE_PRICE_ID || requestedPriceId === GROWTH_BASE_PRICE_ID) {
+    targetTier = "workspace";
+  } else if (requestedPriceId === AGENCY_BASE_PRICE_ID || requestedPriceId === SCALE_BASE_PRICE_ID) {
+    targetTier = "agency";
+  } else if (requestedPriceId) {
+    // Legacy Cloud Starter / Pro / Agency ids → closest new tier.
+    targetTier = tierFromBasePriceId(requestedPriceId);
+  }
+
+  // 2026-07-08 pricing ladder — money-safe sellable gate. A NEW checkout
+  // (this is the only path — the legacy fallback below never resolves a
+  // targetTier) may only target a tier the catalog marks `sellable`.
+  // Grandfathered tiers ("workspace", "agency") remain resolvable for
+  // legacy replay/back-compat elsewhere (webhook, getPlanByStripePriceId)
+  // but are rejected here so nobody can newly subscribe to a frozen tier.
+  //
+  // 2026-07-08 SECOND post-review fix wave — extracted to
+  // resolveCheckoutTierGate (checkout-items.ts) so the exact gate the
+  // route enforces is directly unit-testable (see
+  // tests/unit/billing/checkout-tier-gate.spec.ts) without a live
+  // server/DB. This is the "end-state" test class the review flagged:
+  // asserting a mocked fetch call was SENT is not the same as asserting
+  // the route would ACCEPT it.
+  const gate = resolveCheckoutTierGate(targetTier);
+  if (!gate.ok) {
+    return NextResponse.json(
+      { error: `Tier '${targetTier}' is not available for new checkout.`, reason: gate.reason },
+      { status: 409 }
+    );
+  }
+
+  const [dbUser] = await db
+    .select({
+      id: users.id,
+      email: users.email,
+      orgId: users.orgId,
+    })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+
+  if (!dbUser) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const orgId = apiKeyUserId ? dbUser.orgId : (await getOrgId()) ?? dbUser.orgId;
+  const requestedWorkspaceId = typeof body.workspaceId === "string" ? body.workspaceId.trim() : "";
+  const targetWorkspaceId = requestedWorkspaceId || orgId || "";
+
+  const origin = getRequestOrigin(req);
+
+  // ── Tier path (Builder / Workspace / Agency) ────────────────────────
+  // The self-service tiers go through the pure session-params builder so
+  // the payment-critical metadata (orgId + tier on BOTH the session and
+  // subscription_data — the Phase 2 webhook contract) is assembled from
+  // a single, unit-tested source of truth.
+  if (targetTier) {
+    // Self-service tiers are bound to a specific workspace.
+    if (!targetWorkspaceId) {
+      return NextResponse.json(
+        { error: "workspaceId is required for self-service tiers." },
+        { status: 400 }
+      );
+    }
+
+    const params = buildCheckoutSessionParams({
+      tier: targetTier,
+      userId,
+      orgId: orgId ?? "",
+      workspaceId: targetWorkspaceId,
+      customerEmail: dbUser.email,
+      origin,
+      successPath,
+      cancelPath,
+    });
+
+    if (!params) {
+      return NextResponse.json(
+        { error: `No checkout items configured for tier '${targetTier}'.` },
+        { status: 500 }
+      );
+    }
+
+    // Hotfix H4b — fail soft when the resolved base price is still the
+    // unconfigured placeholder (Stripe would otherwise reject it with a raw
+    // "No such price" 500). Never call Stripe with a placeholder id.
+    // 2026-07-08: same money-safe contract as the sellable gate above —
+    // reason: "tier_unavailable" so callers (pricing page CTA) can render
+    // "Talk to us" instead of a checkout error.
+    const unconfiguredPrice = params.line_items.find((item) => isPlaceholderPriceId(item.price));
+    if (unconfiguredPrice) {
+      console.error(
+        `[stripe/checkout] price id for tier '${targetTier}' is not set — checkout blocked on placeholder price id.`
+      );
+      return NextResponse.json(
+        { error: "Checkout isn't configured yet. Please try again soon.", reason: "tier_unavailable" },
+        { status: 409 }
+      );
+    }
+
+    // 2026-07-05 — trial removed (founder decision): the free ungated
+    // build→claim→use experience already IS the trial, so the $29
+    // domain-moment charges immediately. "Cancel anytime" stays true via
+    // the standard Stripe billing portal (createBillingPortalSessionAction).
+    const checkoutSession = await stripe.checkout.sessions.create({
+      ...params,
+      payment_method_types: ["card"],
+    });
+
+    // 2026-08-06 funnel observability — checkout_started, tier path. Fired
+    // after sessions.create succeeds; never touches the Stripe call itself
+    // and never fails the route on a capture problem (captureFunnelEvent
+    // is fire-and-forget/catch-swallowing). No org row is loaded on this
+    // path, so is_internal is omitted rather than adding a DB query.
+    const isInternal = parseInternalIds({
+      SF_INTERNAL_USER_IDS: process.env.SF_INTERNAL_USER_IDS,
+      SF_INTERNAL_AGENCY_ID: process.env.SF_INTERNAL_AGENCY_ID,
+    }).userIds.includes(userId);
+    captureFunnelEvent(buildCheckoutStartedEvent({ userId, orgId, workspaceId: targetWorkspaceId, tier: targetTier }));
+    captureServerEvent({
+      event: "checkout_started",
+      distinctId: userId,
+      groups: { workspace: targetWorkspaceId },
+      properties: {
+        plan_id: targetTier,
+        billing_period: lookupKey.endsWith("yearly") ? "yearly" : "monthly",
+        checkout_source: checkoutSource,
+        is_internal: isInternal,
+      },
+    });
+    void sendGa4Event({
+      eventName: "begin_checkout",
+      userId,
+      params: { plan_id: targetTier, checkout_source: checkoutSource },
+    });
+
+    return NextResponse.json({ url: checkoutSession.url, tier: targetTier });
+  }
+
+  // ── Legacy fallback: single-price subscription (workspace add-on) ────
+  // Used only by old links that explicitly request the add-on price id.
+  // The new pricing model never lands here.
+  const resolvedPriceId = requestedPriceId || WORKSPACE_ADDON_MONTHLY_PRICE_ID;
+  const checkoutType: "self_service_workspace" | "workspace_addon" =
+    isSelfServiceCheckoutPriceId(resolvedPriceId)
+      ? "self_service_workspace"
+      : "workspace_addon";
+
+  if (checkoutType === "self_service_workspace" && !targetWorkspaceId) {
+    return NextResponse.json({ error: "workspaceId is required for self-service tiers." }, { status: 400 });
+  }
+
+  // The per-seat add-on has no surface in the new pricing model; the
+  // legacy `quantity` body field (still range-validated above) is
+  // collapsed to 1 here. Operators on a legacy add-on can adjust quantity
+  // via the Stripe Billing portal.
+  // Hotfix H4b — same placeholder guard as the tier path above; the legacy
+  // fallback can also resolve to an unconfigured "price_PLACEHOLDER_*" id
+  // when no explicit priceId was requested.
+  if (isPlaceholderPriceId(resolvedPriceId)) {
+    console.error(
+      "[stripe/checkout] STRIPE_WORKSPACE_PRICE_ID is not set — checkout blocked on placeholder price id."
+    );
+    return NextResponse.json(
+      { error: "Checkout isn't configured yet. Please try again soon." },
+      { status: 503 }
+    );
+  }
+
+  const lineItems = [{ price: resolvedPriceId, quantity: 1 as const }];
+
+  const checkoutSession = await stripe.checkout.sessions.create({
+    customer_email: dbUser.email ?? undefined,
+    mode: "subscription",
+    payment_method_types: ["card"],
+    client_reference_id: userId,
+    line_items: lineItems,
+    success_url: `${origin}${successPath}`,
+    cancel_url: `${origin}${cancelPath}`,
+    metadata: {
+      seldonframe_user_id: userId,
+      userId,
+      orgId: orgId ?? "",
+      workspaceId: targetWorkspaceId,
+      tier: "",
+      priceId: resolvedPriceId,
+      type: checkoutType,
+    },
+    subscription_data: {
+      metadata: {
+        seldonframe_user_id: userId,
+        userId,
+        orgId: orgId ?? "",
+        workspaceId: targetWorkspaceId,
+        tier: "",
+        priceId: resolvedPriceId,
+        type: checkoutType,
+      },
+    },
+  });
+
+  // 2026-08-06 funnel observability — checkout_started, legacy priceId
+  // path. Same posture as the tier path above: fired after sessions.create
+  // succeeds, never fails the route on a capture problem, no DB query
+  // added for is_internal.
+  captureFunnelEvent(buildCheckoutStartedEvent({ userId, orgId, workspaceId: targetWorkspaceId, priceId: resolvedPriceId }));
+  captureServerEvent({
+    event: "checkout_started",
+    distinctId: userId,
+    groups: { workspace: targetWorkspaceId },
+    properties: {
+      plan_id: targetTier ?? "legacy",
+      billing_period: "monthly",
+      checkout_source: checkoutSource,
+      is_internal: false,
+    },
+  });
+  void sendGa4Event({
+    eventName: "begin_checkout",
+    userId,
+    params: { plan_id: targetTier ?? "legacy", checkout_source: checkoutSource },
+  });
+
+  return NextResponse.json({ url: checkoutSession.url, tier: targetTier });
+}

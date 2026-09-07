@@ -1,0 +1,87 @@
+import crypto from "node:crypto";
+import { db } from "@/db";
+import { verificationTokens } from "@/db/schema";
+
+// Mints a single-use magic link that signs the user in via NextAuth's standard
+// email-callback handler. Works with the existing Resend provider — we don't
+// need a custom provider or sendVerificationRequest override; we just insert
+// a valid row into `verification_tokens`.
+//
+// Flow:
+//   1. Caller invokes mintClaimMagicLink(userEmail, "/some/path")
+//   2. We insert (identifier, token, expires) into verification_tokens
+//   3. Return URL: {NEXTAUTH_URL}/api/auth/callback/{PROVIDER_ID}?token=...&email=...&callbackUrl=...
+//   4. User clicks → NextAuth validates token → signs them in → redirects to callbackUrl
+//
+// PROVIDER_ID must match the id NextAuth assigns to the email provider in
+// `packages/crm/src/lib/auth/config.ts`. The Resend provider registers as
+// `resend` (not `email` — that's the legacy default for the generic Email
+// provider, which this project does not use).
+//
+// The token is single-use: NextAuth deletes the row on successful validation.
+// Expiry is 15 minutes — long enough to click, short enough to contain leak
+// damage if the URL ends up in a chat transcript.
+//
+// Token storage: Auth.js v5 hashes verification tokens before persisting them
+// (sha256(rawToken + AUTH_SECRET)) and compares the hash on the callback. We
+// must mirror that here — store the hash, put the raw value in the URL —
+// otherwise the callback's `useVerificationToken` lookup misses and NextAuth
+// returns a `Verification` error.
+
+const TTL_MINUTES = 15;
+const EMAIL_PROVIDER_ID = "resend";
+
+function hashToken(rawToken: string, secret: string): string {
+  return crypto.createHash("sha256").update(`${rawToken}${secret}`).digest("hex");
+}
+
+export type MintedMagicLink = {
+  url: string;
+  expires_at: string;
+};
+
+export async function mintClaimMagicLink(
+  userEmail: string,
+  callbackPath: string
+): Promise<MintedMagicLink> {
+  const baseUrl = (
+    process.env.NEXTAUTH_URL?.trim() || "https://app.seldonframe.com"
+  ).replace(/\/+$/, "");
+
+  const secret = (
+    process.env.AUTH_SECRET?.trim() || process.env.NEXTAUTH_SECRET?.trim() || ""
+  );
+  if (!secret) {
+    // contract:throw-ok: deployment-config error (env var missing).
+    // Caller (server action) catches and returns a structured error
+    // to the operator. The throw signal is what surfaces this misconfig
+    // in observability before it silently breaks magic-link auth.
+    throw new Error(
+      "Cannot mint magic link: AUTH_SECRET (or NEXTAUTH_SECRET) is not set."
+    );
+  }
+
+  const token = crypto.randomBytes(32).toString("hex");
+  const expires = new Date(Date.now() + TTL_MINUTES * 60 * 1000);
+
+  await db.insert(verificationTokens).values({
+    identifier: userEmail,
+    token: hashToken(token, secret),
+    expires,
+  });
+
+  // callbackPath is expected to be an internal path like "/dashboard". Resolve
+  // it against NEXTAUTH_URL so NextAuth's callback accepts it (it enforces
+  // same-origin callback URLs by default).
+  const safePath = callbackPath.startsWith("/") ? callbackPath : `/${callbackPath}`;
+  const callbackUrl = `${baseUrl}${safePath}`;
+
+  const params = new URLSearchParams({
+    token,
+    email: userEmail,
+    callbackUrl,
+  });
+  const url = `${baseUrl}/api/auth/callback/${EMAIL_PROVIDER_ID}?${params.toString()}`;
+
+  return { url, expires_at: expires.toISOString() };
+}

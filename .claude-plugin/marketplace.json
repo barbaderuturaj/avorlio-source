@@ -1,0 +1,21 @@
+{
+  "name": "seldonframe",
+  "owner": { "name": "SeldonFrame", "email": "maximehoule100@gmail.com" },
+  "description": "SeldonFrame plugins — build, deploy, and sell AI agents from your IDE",
+  "plugins": [
+    {
+      "name": "seldonframe",
+      "source": "./integrations/claude-plugin",
+      "description": "The SeldonFrame MCP, one install: build a real hosted workspace (website, booking, CRM, AI agent) from a sentence. First workspace free, no API key.",
+      "category": "productivity",
+      "tags": ["agents", "crm", "business", "mcp", "voice"]
+    },
+    {
+      "name": "reflect",
+      "source": { "source": "github", "repo": "seldonframe/reflect" },
+      "description": "Your AI argues before it answers — five-step decision loop built from Bezos's letters, Musk's algorithm, and Farnam Street's mental models.",
+      "category": "productivity",
+      "tags": ["decision-making", "mental-models", "anti-sycophancy"]
+    }
+  ]
+}

@@ -1,0 +1,731 @@
+import { headers } from "next/headers";
+import { and, eq } from "drizzle-orm";
+import { NextResponse } from "next/server";
+import Stripe from "stripe";
+import { db } from "@/db";
+import {
+  invoices,
+  onboardingLinks,
+  organizations,
+  paymentEvents,
+  paymentRecords,
+  proposals,
+  proposalEvents,
+  stripeConnections,
+  subscriptions,
+} from "@/db/schema";
+import { emitSeldonEvent } from "@/lib/events/bus";
+import { logEvent } from "@/lib/observability/log";
+import { seedOnboardingForm } from "@/lib/onboarding/onboarding-form-definition";
+import { createOnboardingLink } from "@/lib/onboarding/links";
+import { notifyAgencyOfAcceptance } from "@/lib/proposals/notify-agency";
+import { notifyProspectOfActivation } from "@/lib/proposals/notify-prospect";
+import { sendEmailFromApi } from "@/lib/emails/api";
+import { createDealOnAcceptance } from "@/lib/proposals/create-deal-on-acceptance";
+import { recordRetainerInvoiceCycle } from "@/lib/payments/retainer";
+
+export const runtime = "nodejs";
+
+// Connect webhook endpoint — distinct from /api/stripe/webhook which
+// handles platform events (SeldonFrame's own $9/mo billing). This
+// endpoint is registered in the Stripe dashboard as a Connect webhook
+// and signed with STRIPE_CONNECT_WEBHOOK_SECRET. Every event carries
+// an `account` field identifying which SMB's connected Stripe account
+// fired the event; we route state-machine updates to the corresponding
+// workspace.
+
+function getStripeClient() {
+  const secretKey = process.env.STRIPE_SECRET_KEY?.trim();
+  if (!secretKey) return null;
+  return new Stripe(secretKey, { apiVersion: "2025-08-27.basil" });
+}
+
+async function resolveOrgByAccount(stripeAccountId: string) {
+  const [row] = await db
+    .select({ orgId: stripeConnections.orgId })
+    .from(stripeConnections)
+    .where(
+      and(
+        eq(stripeConnections.stripeAccountId, stripeAccountId),
+        eq(stripeConnections.isActive, true)
+      )
+    )
+    .limit(1);
+  return row?.orgId ?? null;
+}
+
+async function recordPaymentEvent(params: {
+  orgId: string;
+  stripeAccountId: string;
+  eventId: string;
+  eventType: string;
+  targetType: "payment" | "invoice" | "subscription" | "other";
+  targetId: string | null;
+  payload: Stripe.Event;
+}) {
+  await db
+    .insert(paymentEvents)
+    .values({
+      orgId: params.orgId,
+      provider: "stripe",
+      providerAccountId: params.stripeAccountId,
+      providerEventId: params.eventId,
+      eventType: params.eventType,
+      targetType: params.targetType,
+      targetId: params.targetId,
+      payload: params.payload as unknown as Record<string, unknown>,
+    })
+    .onConflictDoNothing({ target: [paymentEvents.provider, paymentEvents.providerEventId] });
+}
+
+async function findPaymentRecordByIntent(orgId: string, paymentIntentId: string) {
+  const [row] = await db
+    .select()
+    .from(paymentRecords)
+    .where(and(eq(paymentRecords.orgId, orgId), eq(paymentRecords.stripePaymentIntentId, paymentIntentId)))
+    .limit(1);
+  return row ?? null;
+}
+
+async function findInvoiceByStripeId(stripeInvoiceId: string) {
+  const [row] = await db
+    .select()
+    .from(invoices)
+    .where(eq(invoices.stripeInvoiceId, stripeInvoiceId))
+    .limit(1);
+  return row ?? null;
+}
+
+async function findSubscriptionByStripeId(stripeSubscriptionId: string) {
+  const [row] = await db
+    .select()
+    .from(subscriptions)
+    .where(eq(subscriptions.stripeSubscriptionId, stripeSubscriptionId))
+    .limit(1);
+  return row ?? null;
+}
+
+function stripeUnixToDate(value: number | null | undefined): Date | null {
+  if (!value) return null;
+  return new Date(value * 1000);
+}
+
+async function upsertInvoiceFromEvent(orgId: string, stripeAccount: string, invoice: Stripe.Invoice) {
+  const stripeInvoiceId = invoice.id;
+  if (!stripeInvoiceId) return null;
+
+  const existing = await findInvoiceByStripeId(stripeInvoiceId);
+  const paidAt = stripeUnixToDate(
+    (invoice as Stripe.Invoice & { status_transitions?: { paid_at?: number | null } }).status_transitions?.paid_at
+  );
+  const voidedAt = stripeUnixToDate(
+    (invoice as Stripe.Invoice & { status_transitions?: { voided_at?: number | null } }).status_transitions?.voided_at
+  );
+
+  // `tax` moved across Stripe API versions — read defensively.
+  const taxCents = (invoice as Stripe.Invoice & { tax?: number | null }).tax ?? 0;
+
+  const values = {
+    status: invoice.status ?? "open",
+    number: invoice.number ?? null,
+    subtotal: ((invoice.subtotal ?? 0) / 100).toFixed(2),
+    tax: (taxCents / 100).toFixed(2),
+    total: ((invoice.total ?? 0) / 100).toFixed(2),
+    amountPaid: ((invoice.amount_paid ?? 0) / 100).toFixed(2),
+    amountDue: ((invoice.amount_due ?? 0) / 100).toFixed(2),
+    hostedInvoiceUrl: invoice.hosted_invoice_url ?? null,
+    paidAt,
+    voidedAt,
+    updatedAt: new Date(),
+  };
+
+  if (existing) {
+    await db.update(invoices).set(values).where(eq(invoices.id, existing.id));
+    return existing.id;
+  }
+
+  const customerId = typeof invoice.customer === "string" ? invoice.customer : invoice.customer?.id ?? null;
+  const [created] = await db
+    .insert(invoices)
+    .values({
+      orgId,
+      provider: "stripe",
+      stripeInvoiceId,
+      stripeAccountId: stripeAccount,
+      stripeCustomerId: customerId,
+      currency: (invoice.currency ?? "usd").toUpperCase(),
+      dueAt: stripeUnixToDate(invoice.due_date),
+      contactId: null,
+      ...values,
+    })
+    .returning({ id: invoices.id });
+  return created?.id ?? null;
+}
+
+async function upsertSubscriptionFromEvent(orgId: string, stripeAccount: string, subscription: Stripe.Subscription) {
+  const stripeSubscriptionId = subscription.id;
+  const existing = await findSubscriptionByStripeId(stripeSubscriptionId);
+  const item = subscription.items.data[0];
+  const price = item?.price as unknown as Stripe.Price | undefined;
+  const product = price?.product;
+  const productName =
+    typeof product === "string" ? null : (product as Stripe.Product | null)?.name ?? null;
+
+  const subscriptionWithPeriods = subscription as Stripe.Subscription & {
+    current_period_start?: number | null;
+    current_period_end?: number | null;
+  };
+
+  const values = {
+    status: subscription.status,
+    productName,
+    amount: ((price?.unit_amount ?? 0) / 100).toFixed(2),
+    currency: (price?.currency ?? "usd").toUpperCase(),
+    interval: price?.recurring?.interval ?? "month",
+    intervalCount: String(price?.recurring?.interval_count ?? 1),
+    stripePriceId: price?.id ?? null,
+    currentPeriodStart: stripeUnixToDate(subscriptionWithPeriods.current_period_start ?? null),
+    currentPeriodEnd: stripeUnixToDate(subscriptionWithPeriods.current_period_end ?? null),
+    cancelAt: stripeUnixToDate(subscription.cancel_at),
+    canceledAt: stripeUnixToDate(subscription.canceled_at),
+    trialEnd: stripeUnixToDate(subscription.trial_end),
+    updatedAt: new Date(),
+  };
+
+  if (existing) {
+    await db.update(subscriptions).set(values).where(eq(subscriptions.id, existing.id));
+    return existing.id;
+  }
+
+  const customerId = typeof subscription.customer === "string" ? subscription.customer : subscription.customer.id;
+  const [created] = await db
+    .insert(subscriptions)
+    .values({
+      orgId,
+      provider: "stripe",
+      stripeSubscriptionId,
+      stripeAccountId: stripeAccount,
+      stripeCustomerId: customerId,
+      contactId: null,
+      ...values,
+    })
+    .returning({ id: subscriptions.id });
+  return created?.id ?? null;
+}
+
+export async function POST(request: Request) {
+  const secret = process.env.STRIPE_CONNECT_WEBHOOK_SECRET;
+  const stripe = getStripeClient();
+
+  if (!secret || !stripe) {
+    return NextResponse.json({ error: "Connect webhook not configured" }, { status: 400 });
+  }
+
+  const rawBody = await request.text();
+  const signature = (await headers()).get("stripe-signature");
+  if (!signature) {
+    return NextResponse.json({ error: "Missing signature" }, { status: 400 });
+  }
+
+  let event: Stripe.Event;
+  try {
+    event = stripe.webhooks.constructEvent(rawBody, signature, secret);
+  } catch (error) {
+    logEvent("stripe_connect_webhook_signature_failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
+  }
+
+  const stripeAccount = event.account ?? null;
+  if (!stripeAccount) {
+    // Platform-scoped event arriving on the Connect endpoint. Acknowledge
+    // but don't process — the platform endpoint owns these.
+    logEvent("stripe_connect_webhook_platform_event", { event_id: event.id, event_type: event.type });
+    return NextResponse.json({ ok: true, skipped: "platform_event" });
+  }
+
+  const orgId = await resolveOrgByAccount(stripeAccount);
+  if (!orgId) {
+    logEvent("stripe_connect_webhook_no_org_match", { account: stripeAccount, event_type: event.type });
+    return NextResponse.json({ ok: true, matched: false });
+  }
+
+  // Dispatch state-machine updates. The `payment_events` insert below
+  // is idempotent via unique(provider, provider_event_id) — a replayed
+  // webhook writes nothing twice, the downstream updates are safe to
+  // re-run.
+
+  switch (event.type) {
+    case "payment_intent.succeeded":
+    case "payment_intent.payment_failed": {
+      const pi = event.data.object as Stripe.PaymentIntent;
+      const existing = await findPaymentRecordByIntent(orgId, pi.id);
+      await recordPaymentEvent({
+        orgId,
+        stripeAccountId: stripeAccount,
+        eventId: event.id,
+        eventType: event.type,
+        targetType: "payment",
+        targetId: existing?.id ?? null,
+        payload: event,
+      });
+      if (existing && event.type === "payment_intent.payment_failed") {
+        await db
+          .update(paymentRecords)
+          .set({ status: "failed", updatedAt: new Date() })
+          .where(eq(paymentRecords.id, existing.id));
+        if (existing.contactId) {
+          await emitSeldonEvent("payment.failed", {
+            contactId: existing.contactId,
+            amount: Number(existing.amount),
+            reason: pi.last_payment_error?.message ?? "payment_intent.payment_failed",
+          }, { orgId: orgId });
+        }
+      }
+      break;
+    }
+
+    case "charge.refunded": {
+      const charge = event.data.object as Stripe.Charge;
+      const paymentIntentId = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id ?? null;
+      if (!paymentIntentId) break;
+      const existing = await findPaymentRecordByIntent(orgId, paymentIntentId);
+      await recordPaymentEvent({
+        orgId,
+        stripeAccountId: stripeAccount,
+        eventId: event.id,
+        eventType: event.type,
+        targetType: "payment",
+        targetId: existing?.id ?? null,
+        payload: event,
+      });
+      if (existing) {
+        const refundedAmount = ((charge.amount_refunded ?? 0) / 100).toFixed(2);
+        const fullyRefunded = charge.refunded === true;
+        await db
+          .update(paymentRecords)
+          .set({
+            status: fullyRefunded ? "refunded" : "partially_refunded",
+            refundedAmount,
+            refundedAt: new Date(),
+            stripeChargeId: charge.id,
+            updatedAt: new Date(),
+          })
+          .where(eq(paymentRecords.id, existing.id));
+        await emitSeldonEvent("payment.refunded", {
+          contactId: existing.contactId,
+          paymentId: existing.id,
+          amount: Number(refundedAmount),
+          currency: existing.currency,
+        }, { orgId: orgId });
+      }
+      break;
+    }
+
+    case "charge.dispute.created":
+    case "charge.dispute.closed": {
+      const dispute = event.data.object as Stripe.Dispute;
+      const chargeId = typeof dispute.charge === "string" ? dispute.charge : dispute.charge.id;
+
+      // Disputes are attached to charges — look up via charge metadata
+      // or by stripeChargeId (populated on charge.succeeded earlier).
+      const [existing] = await db
+        .select()
+        .from(paymentRecords)
+        .where(and(eq(paymentRecords.orgId, orgId), eq(paymentRecords.stripeChargeId, chargeId)))
+        .limit(1);
+
+      await recordPaymentEvent({
+        orgId,
+        stripeAccountId: stripeAccount,
+        eventId: event.id,
+        eventType: event.type,
+        targetType: "payment",
+        targetId: existing?.id ?? null,
+        payload: event,
+      });
+
+      if (existing && event.type === "charge.dispute.created") {
+        await db
+          .update(paymentRecords)
+          .set({
+            status: "disputed",
+            disputedAt: new Date(),
+            stripeDisputeId: dispute.id,
+            updatedAt: new Date(),
+          })
+          .where(eq(paymentRecords.id, existing.id));
+        await emitSeldonEvent("payment.disputed", {
+          contactId: existing.contactId,
+          paymentId: existing.id,
+          amount: Number(existing.amount),
+          reason: dispute.reason ?? "dispute",
+        }, { orgId: orgId });
+      }
+      break;
+    }
+
+    case "invoice.created":
+    case "invoice.finalized":
+    case "invoice.sent":
+    case "invoice.paid":
+    case "invoice.payment_failed":
+    case "invoice.voided":
+    case "invoice.marked_uncollectible": {
+      const invoice = event.data.object as Stripe.Invoice;
+      const localId = await upsertInvoiceFromEvent(orgId, stripeAccount, invoice);
+      await recordPaymentEvent({
+        orgId,
+        stripeAccountId: stripeAccount,
+        eventId: event.id,
+        eventType: event.type,
+        targetType: "invoice",
+        targetId: localId,
+        payload: event,
+      });
+
+      if (event.type === "invoice.sent") {
+        await db.update(invoices).set({ sentAt: new Date() }).where(eq(invoices.stripeInvoiceId, invoice.id!));
+        await emitSeldonEvent("invoice.sent", { contactId: null, invoiceId: localId ?? invoice.id! }, { orgId: orgId });
+      } else if (event.type === "invoice.paid") {
+        await emitSeldonEvent("invoice.paid", {
+          contactId: null,
+          invoiceId: localId ?? invoice.id!,
+          amount: (invoice.amount_paid ?? 0) / 100,
+          currency: (invoice.currency ?? "usd").toUpperCase(),
+        }, { orgId: orgId });
+      } else if (event.type === "invoice.payment_failed") {
+        await emitSeldonEvent("invoice.past_due", {
+          contactId: null,
+          invoiceId: localId ?? invoice.id!,
+          amountDue: (invoice.amount_due ?? 0) / 100,
+        }, { orgId: orgId });
+      }
+
+      // Autopay console Task 1 — record every retainer billing CYCLE
+      // (lib/payments/retainer.ts). Fail-soft: any error here must never
+      // break the shared Connect webhook route for other event types.
+      if (event.type === "invoice.paid" || event.type === "invoice.payment_failed") {
+        try {
+          await recordRetainerInvoiceCycle(event);
+        } catch (err: unknown) {
+          logEvent("retainer_cycle_record_failed", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
+      if (event.type === "invoice.voided") {
+        await emitSeldonEvent("invoice.voided", {
+          contactId: null,
+          invoiceId: localId ?? invoice.id!,
+        }, { orgId: orgId });
+      }
+      break;
+    }
+
+    case "customer.subscription.created":
+    case "customer.subscription.updated":
+    case "customer.subscription.deleted":
+    case "customer.subscription.trial_will_end": {
+      const subscription = event.data.object as Stripe.Subscription;
+      const localId = await upsertSubscriptionFromEvent(orgId, stripeAccount, subscription);
+      await recordPaymentEvent({
+        orgId,
+        stripeAccountId: stripeAccount,
+        eventId: event.id,
+        eventType: event.type,
+        targetType: "subscription",
+        targetId: localId,
+        payload: event,
+      });
+
+      if (event.type === "customer.subscription.updated") {
+        await emitSeldonEvent("subscription.updated", {
+          contactId: null,
+          subscriptionId: localId ?? subscription.id,
+          status: subscription.status,
+        }, { orgId: orgId });
+      } else if (event.type === "customer.subscription.trial_will_end") {
+        await emitSeldonEvent("subscription.trial_will_end", {
+          contactId: null,
+          subscriptionId: localId ?? subscription.id,
+          trialEnd: stripeUnixToDate(subscription.trial_end)?.toISOString() ?? "",
+        }, { orgId: orgId });
+      }
+      break;
+    }
+
+    case "checkout.session.completed": {
+      const session = event.data.object as Stripe.Checkout.Session;
+      // 2026-05-21 — Resolve the proposal via three fallbacks, in order:
+      //  1) session.metadata.proposal_id  (set on the Session itself at
+      //     creation; Stripe echoes this back on the event payload reliably)
+      //  2) session.subscription_data.metadata.proposal_id  (defensive read
+      //     of the input field; some Stripe API versions echo it back)
+      //  3) session.subscription.metadata.proposal_id  (only available if
+      //     the subscription is hydrated to an object; usually it's a string)
+      //  4) stripe_checkout_session_id == session.id  (DB lookup — we
+      //     persist the session id on the proposal at accept time, so we
+      //     can always fall back even if metadata is missing entirely)
+      const sessionAny = session as unknown as {
+        subscription_data?: { metadata?: { proposal_id?: string } };
+      };
+      const proposalIdFromMetadata =
+        session.metadata?.proposal_id
+        ?? sessionAny.subscription_data?.metadata?.proposal_id
+        ?? (typeof session.subscription === "object" && session.subscription !== null
+          ? (session.subscription as Stripe.Subscription).metadata?.proposal_id
+          : undefined);
+
+      let proposal: typeof proposals.$inferSelect | undefined;
+      if (proposalIdFromMetadata) {
+        [proposal] = await db
+          .select()
+          .from(proposals)
+          .where(eq(proposals.id, proposalIdFromMetadata))
+          .limit(1);
+      }
+      if (!proposal && session.id) {
+        // Fallback: we stored the session id on the proposal at accept time.
+        [proposal] = await db
+          .select()
+          .from(proposals)
+          .where(eq(proposals.stripeCheckoutSessionId, session.id))
+          .limit(1);
+      }
+      if (!proposal) {
+        // Genuinely not a proposal acceptance — fall through to default
+        // (record the event, acknowledge to Stripe with 200).
+        break;
+      }
+
+      // Idempotency: if we already processed this session, skip.
+      if (proposal.stripeCheckoutSessionId === session.id && proposal.status === "accepted") {
+        break;
+      }
+
+      const subscriptionId =
+        typeof session.subscription === "string"
+          ? session.subscription
+          : (session.subscription as Stripe.Subscription | null)?.id ?? "";
+      const customerId =
+        typeof session.customer === "string"
+          ? session.customer
+          : (session.customer as Stripe.Customer | null)?.id ?? "";
+
+      // Update proposal status + persist Stripe IDs
+      await db.update(proposals).set({
+        status: "accepted",
+        acceptedAt: new Date(),
+        stripeSubscriptionId: subscriptionId,
+        stripeCustomerId: customerId,
+        stripeCheckoutSessionId: session.id,
+        updatedAt: new Date(),
+      }).where(eq(proposals.id, proposal.id));
+
+      await db.insert(proposalEvents).values({
+        proposalId: proposal.id,
+        eventType: "checkout_success",
+        metadata: { sessionId: session.id },
+      });
+
+      // Only flip preview_mode on workspaces that have it set (legacy proposals).
+      // New-style Phase E proposals point at real workspaces that are already active.
+      if (proposal.previewWorkspaceId) {
+        const [workspace] = await db
+          .select({ previewMode: organizations.previewMode })
+          .from(organizations)
+          .where(eq(organizations.id, proposal.previewWorkspaceId))
+          .limit(1);
+
+        if (workspace?.previewMode === true) {
+          await db
+            .update(organizations)
+            .set({ previewMode: false, updatedAt: new Date() })
+            .where(eq(organizations.id, proposal.previewWorkspaceId));
+
+          await db.insert(proposalEvents).values({
+            proposalId: proposal.id,
+            eventType: "workspace_activated",
+            metadata: { workspaceId: proposal.previewWorkspaceId },
+          });
+        }
+      }
+
+      // Fire-and-forget notifications — failures must not crash the webhook.
+      notifyAgencyOfAcceptance({
+        ...proposal,
+        stripeSubscriptionId: subscriptionId,
+        stripeCustomerId: customerId,
+      }).catch((err: unknown) =>
+        logEvent("proposal_notify_agency_failed", {
+          proposalId: proposal.id,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      );
+      notifyProspectOfActivation(proposal).catch((err: unknown) =>
+        logEvent("proposal_notify_prospect_failed", {
+          proposalId: proposal.id,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      );
+
+      // L1 — Auto-create contact + Won-stage deal in the agency's CRM.
+      // Wrapped in try/catch so a CRM failure never fails the webhook
+      // response (Stripe would retry; the proposal is already accepted).
+      try {
+        // ── Slice 2: resolve billing info (address + card) ────────────────
+        // The session carries billing_details.address; the card lives on the
+        // subscription's default payment method (or the session's own PM),
+        // fetched on the CONNECTED account so Stripe authorises the read.
+        //
+        // ALL of this is best-effort — any failure sets billing null and we
+        // continue; we NEVER throw out of the webhook for bookkeeping errors.
+        let billingInfo: import("@/lib/proposals/create-deal-on-acceptance").BillingInfo = {
+          card: null,
+          address: null,
+        };
+
+        try {
+          // Address from the session's customer_details (populated when
+          // billing_address_collection = "required" on the Checkout Session).
+          const addr = session.customer_details?.address ?? null;
+          if (addr) {
+            billingInfo.address = {
+              line1: addr.line1 ?? null,
+              line2: addr.line2 ?? null,
+              city: addr.city ?? null,
+              state: addr.state ?? null,
+              postalCode: addr.postal_code ?? null,
+              country: addr.country ?? null,
+            };
+          }
+
+          // Card: retrieve the subscription's default_payment_method on the
+          // connected account so we can read card.brand / last4 / exp.
+          const pmId: string | null =
+            // Prefer subscription's default payment method
+            subscriptionId
+              ? await stripe
+                  .subscriptions
+                  .retrieve(subscriptionId, { expand: ["default_payment_method"] }, { stripeAccount })
+                  .then((sub) => {
+                    const dpm = sub.default_payment_method;
+                    return typeof dpm === "string" ? dpm : (dpm as Stripe.PaymentMethod | null)?.id ?? null;
+                  })
+                  .catch(() => null)
+              : null;
+
+          if (pmId) {
+            const pm = await stripe.paymentMethods.retrieve(pmId, { stripeAccount });
+            const card = pm.card ?? null;
+            if (card) {
+              billingInfo.card = {
+                brand: card.brand,
+                last4: card.last4,
+                expMonth: card.exp_month,
+                expYear: card.exp_year,
+              };
+            }
+          }
+        } catch (billingErr: unknown) {
+          // Non-fatal — log but don't let this stop CRM write
+          logEvent("proposal_acceptance_billing_lookup_failed", {
+            proposalId: proposal.id,
+            error: billingErr instanceof Error ? billingErr.message : String(billingErr),
+          });
+          // billingInfo remains { card: null, address: null }
+        }
+
+        await createDealOnAcceptance(
+          {
+            ...proposal,
+            stripeSubscriptionId: subscriptionId || proposal.stripeSubscriptionId,
+            stripeCustomerId: customerId || proposal.stripeCustomerId,
+          },
+          billingInfo,
+        );
+      } catch (err: unknown) {
+        logEvent("proposal_acceptance_crm_failed", {
+          proposalId: proposal.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      // L2 — Seed onboarding intake + email the tokenized link to the client.
+      // Must NEVER throw out of the webhook — activation already succeeded.
+      // Idempotency: skip entirely if an onboarding_links row already exists
+      // for this org (handles webhook retries / duplicate events).
+      try {
+        const activationOrgId = proposal.previewWorkspaceId ?? orgId;
+
+        const [existingLink] = await db
+          .select({ id: onboardingLinks.id })
+          .from(onboardingLinks)
+          .where(eq(onboardingLinks.orgId, activationOrgId))
+          .limit(1);
+
+        if (!existingLink) {
+          await seedOnboardingForm(activationOrgId);
+          const { token } = await createOnboardingLink(activationOrgId);
+
+          const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://app.seldonframe.com";
+          const onboardUrl = `${appUrl}/onboard/${token}`;
+
+          const greetingName = proposal.prospectFirstName?.trim() || proposal.prospectName;
+          const subject = `Your new workspace is ready — tell us about your business`;
+          const body = `Hi ${greetingName},
+
+Your workspace is live. Before we customize it to fit your business, we need a few details from you — it takes about 10 minutes.
+
+Set up your workspace here: ${onboardUrl}
+
+We'll use your answers to configure your booking page, website, and front office. The link is personal to you, no account needed.
+
+Talk soon,
+The team`;
+
+          await sendEmailFromApi({
+            orgId: activationOrgId,
+            userId: null,
+            contactId: null,
+            toEmail: proposal.prospectEmail,
+            subject,
+            body,
+            ctaLabel: "Set up my workspace →",
+            ctaHref: onboardUrl,
+          });
+
+          logEvent("onboarding_link_sent", {
+            proposalId: proposal.id,
+            orgId: activationOrgId,
+          });
+        }
+      } catch (err: unknown) {
+        logEvent("onboarding_seed_email_failed", {
+          proposalId: proposal.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      break;
+    }
+
+    default:
+      // Acknowledge unhandled events so Stripe doesn't keep retrying.
+      await recordPaymentEvent({
+        orgId,
+        stripeAccountId: stripeAccount,
+        eventId: event.id,
+        eventType: event.type,
+        targetType: "other",
+        targetId: null,
+        payload: event,
+      });
+      break;
+  }
+
+  return NextResponse.json({ ok: true, matched: true });
+}

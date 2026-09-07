@@ -1,0 +1,205 @@
+import { assertPublicHttpUrl, fetchPublicUrlSafe, SsrfBlockedError } from "@/lib/security/ssrf-guard";
+
+type IngestInput = {
+  type: "url" | "youtube" | "text" | "testimonial";
+  url?: string;
+  text?: string;
+  title?: string;
+};
+
+export async function ingestSource(
+  _orgId: string,
+  input: IngestInput
+): Promise<{ rawContent: string; title: string; metadata: Record<string, unknown> }> {
+  switch (input.type) {
+    case "url": {
+      const url = String(input.url ?? "").trim();
+      if (!url) {
+        throw new Error("URL is required");
+      }
+
+      // SSRF egress guard (security audit 2026-06-28, FIX 2; redirect-follow
+      // gap closed in the follow-up audit). The ingested URL is
+      // tenant-controlled and its body is returned in `rawContent`, so an
+      // attacker could read internal endpoints — including via a public
+      // page that redirects to one. `fetchPublicUrlSafe` re-vets every
+      // redirect hop, not just the initial URL, before opening any socket;
+      // throw a generic message (the route maps a throw to a 400 "URL not
+      // allowed").
+      const response = await fetchSafeIngestUrl(url);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch URL (${response.status})`);
+      }
+
+      const html = await response.text();
+      const markdown = htmlToMarkdown(html);
+      const title = extractTitle(html) || input.title || url;
+
+      return {
+        rawContent: markdown,
+        title,
+        metadata: {
+          url,
+          extractedAt: new Date().toISOString(),
+          wordCount: markdown.split(/\s+/).filter(Boolean).length,
+        },
+      };
+    }
+
+    case "youtube": {
+      const url = String(input.url ?? "").trim();
+      if (!url) {
+        throw new Error("YouTube URL is required");
+      }
+
+      // SSRF guard on the tenant-supplied URL (FIX 2). The transcript
+      // fetch itself hits a fixed third-party host, but we still vet the
+      // input URL so this branch can't be used to smuggle an internal
+      // address (and to keep both branches uniformly guarded).
+      await assertSafeIngestUrl(url);
+
+      const videoId = extractYouTubeId(url);
+      const transcript = await fetchYouTubeTranscript(videoId);
+      const title = input.title || `YouTube: ${videoId}`;
+
+      return {
+        rawContent: transcript,
+        title,
+        metadata: {
+          url,
+          videoId,
+          extractedAt: new Date().toISOString(),
+          wordCount: transcript.split(/\s+/).filter(Boolean).length,
+        },
+      };
+    }
+
+    case "text": {
+      const content = String(input.text ?? "").trim();
+      if (!content) {
+        throw new Error("Text is required");
+      }
+
+      return {
+        rawContent: content,
+        title: input.title || "Pasted Content",
+        metadata: {
+          wordCount: content.split(/\s+/).filter(Boolean).length,
+        },
+      };
+    }
+
+    case "testimonial": {
+      const content = String(input.text ?? "").trim();
+      if (!content) {
+        throw new Error("Testimonial text is required");
+      }
+
+      return {
+        rawContent: content,
+        title: input.title || "Client Testimonial",
+        metadata: {
+          type: "testimonial",
+          wordCount: content.split(/\s+/).filter(Boolean).length,
+        },
+      };
+    }
+
+    default:
+      throw new Error(`Unknown source type: ${String((input as { type?: unknown }).type ?? "")}`);
+  }
+}
+
+/**
+ * Vet a tenant-supplied ingest URL through the shared SSRF guard. Returns
+ * the normalized safe URL string on success. On any rejection, throws an
+ * Error with a generic "URL not allowed" message — the ingest route maps a
+ * throw to a 400 without leaking which check failed.
+ */
+async function assertSafeIngestUrl(url: string): Promise<string> {
+  try {
+    const vetted = await assertPublicHttpUrl(url);
+    return vetted.url.toString();
+  } catch (err) {
+    if (err instanceof SsrfBlockedError) {
+      throw new Error("URL not allowed");
+    }
+    throw err;
+  }
+}
+
+/**
+ * Fetch a tenant-supplied ingest URL through the redirect-safe SSRF guard
+ * (every hop re-vetted, not just the initial URL). Maps a blocked URL to the
+ * same generic "URL not allowed" Error the route expects.
+ */
+async function fetchSafeIngestUrl(url: string): Promise<Response> {
+  try {
+    return await fetchPublicUrlSafe(url);
+  } catch (err) {
+    if (err instanceof SsrfBlockedError) {
+      throw new Error("URL not allowed");
+    }
+    throw err;
+  }
+}
+
+export function htmlToMarkdown(html: string): string {
+  let clean = html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, "")
+    .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, "")
+    .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, "");
+
+  clean = clean
+    .replace(/<h1[^>]*>(.*?)<\/h1>/gi, "# $1\n")
+    .replace(/<h2[^>]*>(.*?)<\/h2>/gi, "## $1\n")
+    .replace(/<h3[^>]*>(.*?)<\/h3>/gi, "### $1\n")
+    .replace(/<h4[^>]*>(.*?)<\/h4>/gi, "#### $1\n")
+    .replace(/<p[^>]*>(.*?)<\/p>/gi, "$1\n\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<li[^>]*>(.*?)<\/li>/gi, "- $1\n")
+    .replace(/<strong[^>]*>(.*?)<\/strong>/gi, "**$1**")
+    .replace(/<b[^>]*>(.*?)<\/b>/gi, "**$1**")
+    .replace(/<em[^>]*>(.*?)<\/em>/gi, "*$1*")
+    .replace(/<i[^>]*>(.*?)<\/i>/gi, "*$1*")
+    .replace(/<a[^>]*href=["']([^"']*)["'][^>]*>(.*?)<\/a>/gi, "[$2]($1)")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return clean;
+}
+
+function extractTitle(html: string): string | null {
+  const match = html.match(/<title[^>]*>(.*?)<\/title>/i);
+  return match ? match[1].trim() : null;
+}
+
+function extractYouTubeId(url: string): string {
+  const match = url.match(/(?:v=|\/)([\w-]{11})/);
+  return match ? match[1] : url;
+}
+
+async function fetchYouTubeTranscript(videoId: string): Promise<string> {
+  try {
+    const response = await fetch(`https://youtubetranscript.com/?server_vid2=${videoId}`);
+    if (!response.ok) {
+      throw new Error(`Transcript fetch failed (${response.status})`);
+    }
+
+    const xml = await response.text();
+    const texts = xml.match(/<text[^>]*>(.*?)<\/text>/g)?.map((node) => node.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&#39;/g, "'")) ?? [];
+
+    return texts.join(" ").trim();
+  } catch {
+    return `[YouTube transcript for ${videoId} could not be extracted. Visit: https://youtube.com/watch?v=${videoId}]`;
+  }
+}

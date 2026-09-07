@@ -1,0 +1,75 @@
+{
+  "framework": "nextjs",
+  "installCommand": "pnpm install --frozen-lockfile",
+  "buildCommand": "pnpm db:migrate && pnpm build",
+  "crons": [
+    {
+      "path": "/api/cron/automations",
+      "schedule": "0 */6 * * *"
+    },
+    {
+      "path": "/api/cron/brain-compile",
+      "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/cron/orphan-workspace-ttl",
+      "schedule": "0 4 * * *"
+    },
+    {
+      "path": "/api/cron/gc-seldonchat-blobs",
+      "schedule": "30 4 * * *"
+    },
+    {
+      "path": "/api/cron/workflow-tick",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/report-contact-usage",
+      "schedule": "0 2 * * *"
+    },
+    {
+      "path": "/api/cron/brain-promote",
+      "schedule": "0 5 * * 0"
+    },
+    {
+      "path": "/api/cron/outbound-scheduled-sends",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/event-agent-scheduled-sends",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/schedule-agents",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/expire-proposals",
+      "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/cron/reconcile-workspace-billing",
+      "schedule": "30 2 * * *"
+    },
+    {
+      "path": "/api/cron/voice-rent",
+      "schedule": "0 6 1 * *"
+    },
+    {
+      "path": "/api/cron/usage-caps",
+      "schedule": "0 7 * * *"
+    },
+    {
+      "path": "/api/cron/replay-heartbeat",
+      "schedule": "30 7 * * *"
+    },
+    {
+      "path": "/api/cron/payment-dunning",
+      "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/api/cron/indexnow",
+      "schedule": "0 8 * * 1"
+    }
+  ]
+}

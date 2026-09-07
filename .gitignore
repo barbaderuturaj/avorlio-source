@@ -1,0 +1,43 @@
+# Secrets / production configuration
+.env
+.env.*
+!.env.example
+!**/.env.example
+!.env.*.example
+!**/.env.*.example
+qa-*-env.txt
+
+# Private data / backups
+backups/
+*.dump
+*.backup
+*.sqlite
+*.sqlite3
+*.db
+
+# Credentials / keys
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
+# Build / dependencies
+node_modules/
+.next/
+.turbo/
+dist/
+
+# Generated / temporary artifacts
+*.log
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+*.patch
+*.bak
+
+# Local backup copies
+*.bak
+*.bak-*

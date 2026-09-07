@@ -1,0 +1,742 @@
+"use server";
+
+import { eq } from "drizzle-orm";
+import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
+import { db } from "@/db";
+import { organizations, type OrganizationIntegrations } from "@/db/schema";
+import { getCurrentUser, getOrgId } from "@/lib/auth/helpers";
+import { assertWritable } from "@/lib/demo/server";
+import { decryptValue, encryptValue, redactApiKey } from "@/lib/encryption";
+
+type NewsletterProvider = "kit" | "mailchimp" | "beehiiv";
+type IntegrationService = "twilio" | "resend" | "kit" | "mailchimp" | "beehiiv" | "google";
+
+export type IntegrationViewModel = {
+  orgId: string;
+  orgName: string;
+  twilio: { connected: boolean; accountSid: string; fromNumber: string; authTokenHint: string; voiceTrunkSid: string };
+  resend: { connected: boolean; apiKeyHint: string; fromEmail: string; fromName: string };
+  newsletter: {
+    provider: NewsletterProvider | null;
+    connected: boolean;
+    subscriberCount: number | null;
+    listId: string;
+    publicationId: string;
+    kit: { connected: boolean; apiKeyHint: string; disabled: boolean };
+    mailchimp: { connected: boolean; apiKeyHint: string; disabled: boolean };
+    beehiiv: { connected: boolean; apiKeyHint: string; disabled: boolean };
+  };
+  google: { calendarConnected: boolean };
+};
+
+function readIntegrations(raw: unknown): OrganizationIntegrations {
+  if (!raw || typeof raw !== "object") {
+    return {};
+  }
+
+  return raw as OrganizationIntegrations;
+}
+
+function maskLastEight(value: string | undefined) {
+  const key = String(value ?? "").trim();
+  if (!key) {
+    return "";
+  }
+
+  return `••••${key.slice(-8)}`;
+}
+
+function tryDecrypt(value: string | undefined) {
+  if (!value) {
+    return "";
+  }
+
+  if (!value.startsWith("v1.")) {
+    return value;
+  }
+
+  return decryptValue(value);
+}
+
+function serializeResult(params: Record<string, string | undefined>) {
+  const query = new URLSearchParams();
+
+  for (const [key, value] of Object.entries(params)) {
+    if (value) {
+      query.set(key, value);
+    }
+  }
+
+  return query.toString();
+}
+
+export async function getIntegrationSettings(): Promise<IntegrationViewModel | null> {
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    return null;
+  }
+
+  const [org] = await db
+    .select({ id: organizations.id, name: organizations.name, integrations: organizations.integrations })
+    .from(organizations)
+    .where(eq(organizations.id, orgId))
+    .limit(1);
+
+  if (!org) {
+    return null;
+  }
+
+  const integrations = readIntegrations(org.integrations);
+  const twilioToken = tryDecrypt(integrations.twilio?.authToken);
+  const resendKey = tryDecrypt(integrations.resend?.apiKey);
+  const newsletterProvider = integrations.newsletter?.provider ?? (integrations.kit?.connected ? "kit" : null);
+  const newsletterKey = tryDecrypt(
+    integrations.newsletter?.apiKey || (newsletterProvider === "kit" ? integrations.kit?.apiKey : "")
+  );
+
+  const activeProvider = newsletterProvider as NewsletterProvider | null;
+  const providerIsActive = (provider: NewsletterProvider) => activeProvider === provider;
+  const providerIsDisabled = (provider: NewsletterProvider) => Boolean(activeProvider && activeProvider !== provider);
+
+  return {
+    orgId: org.id,
+    orgName: org.name,
+    twilio: {
+      connected: Boolean(integrations.twilio?.connected),
+      accountSid: integrations.twilio?.accountSid ?? "",
+      fromNumber: integrations.twilio?.fromNumber ?? "",
+      authTokenHint: twilioToken ? "••••••••" : "",
+      voiceTrunkSid: integrations.twilio?.voiceTrunkSid ?? "",
+    },
+    resend: {
+      connected: Boolean(integrations.resend?.connected),
+      apiKeyHint: resendKey ? "••••••••" : "",
+      fromEmail: integrations.resend?.fromEmail ?? "",
+      fromName: integrations.resend?.fromName ?? "SeldonFrame",
+    },
+    newsletter: {
+      provider: activeProvider,
+      connected: Boolean(integrations.newsletter?.connected || integrations.kit?.connected),
+      subscriberCount:
+        typeof integrations.newsletter?.subscriberCount === "number" ? integrations.newsletter.subscriberCount : null,
+      listId: integrations.newsletter?.listId ?? "",
+      publicationId: integrations.newsletter?.publicationId ?? "",
+      kit: {
+        connected: providerIsActive("kit") && Boolean(integrations.newsletter?.connected || integrations.kit?.connected),
+        apiKeyHint: providerIsActive("kit") ? redactApiKey(newsletterKey) : "",
+        disabled: providerIsDisabled("kit"),
+      },
+      mailchimp: {
+        connected: providerIsActive("mailchimp") && Boolean(integrations.newsletter?.connected),
+        apiKeyHint: providerIsActive("mailchimp") ? redactApiKey(newsletterKey) : "",
+        disabled: providerIsDisabled("mailchimp"),
+      },
+      beehiiv: {
+        connected: providerIsActive("beehiiv") && Boolean(integrations.newsletter?.connected),
+        apiKeyHint: providerIsActive("beehiiv") ? redactApiKey(newsletterKey) : "",
+        disabled: providerIsDisabled("beehiiv"),
+      },
+    },
+    google: {
+      calendarConnected: Boolean(integrations.google?.calendarConnected),
+    },
+  };
+}
+
+export async function updateIntegration(orgId: string, service: string, credentials: Record<string, string>) {
+  const integrationService = service as IntegrationService;
+
+  if (!["twilio", "resend", "kit", "mailchimp", "beehiiv", "google"].includes(integrationService)) {
+    throw new Error("Invalid integration service");
+  }
+
+  const [org] = await db
+    .select({ id: organizations.id, integrations: organizations.integrations })
+    .from(organizations)
+    .where(eq(organizations.id, orgId))
+    .limit(1);
+
+  if (!org) {
+    throw new Error("Organization not found");
+  }
+
+  const integrations = readIntegrations(org.integrations);
+
+  if (integrationService === "twilio") {
+    const existingToken = tryDecrypt(integrations.twilio?.authToken);
+    const authToken = credentials.authToken?.trim() || existingToken;
+
+    integrations.twilio = {
+      // Preserve any existing per-provider fields (test creds, outbound flag)
+      // so saving SMS/voice settings doesn't silently drop them.
+      ...integrations.twilio,
+      accountSid: credentials.accountSid?.trim() || integrations.twilio?.accountSid || "",
+      authToken: authToken ? encryptValue(authToken) : "",
+      fromNumber: credentials.fromNumber?.trim() || integrations.twilio?.fromNumber || "",
+      connected: Boolean((credentials.accountSid?.trim() || integrations.twilio?.accountSid) && authToken),
+      // Voice SIP Trunk SID (TK…) for deployment voice-number provisioning.
+      // Only overwrite when the form submitted a value; blank keeps existing.
+      voiceTrunkSid: credentials.voiceTrunkSid?.trim() || integrations.twilio?.voiceTrunkSid || "",
+    };
+  }
+
+  if (integrationService === "resend") {
+    const existingKey = tryDecrypt(integrations.resend?.apiKey);
+    const apiKey = credentials.apiKey?.trim() || existingKey;
+
+    integrations.resend = {
+      apiKey: apiKey ? encryptValue(apiKey) : "",
+      fromEmail: credentials.fromEmail?.trim() || integrations.resend?.fromEmail || "",
+      fromName: credentials.fromName?.trim() || integrations.resend?.fromName || "",
+      connected: Boolean(apiKey),
+    };
+  }
+
+  if (["kit", "mailchimp", "beehiiv"].includes(integrationService)) {
+    const provider = integrationService as NewsletterProvider;
+    const existingProvider = integrations.newsletter?.provider;
+    const existingKey = tryDecrypt(integrations.newsletter?.apiKey || (provider === "kit" ? integrations.kit?.apiKey : ""));
+    const apiKey = credentials.apiKey?.trim() || existingKey;
+
+    integrations.newsletter = {
+      provider,
+      apiKey: apiKey ? encryptValue(apiKey) : "",
+      connected: Boolean(apiKey),
+      subscriberCount:
+        credentials.subscriberCount && Number.isFinite(Number(credentials.subscriberCount))
+          ? Number(credentials.subscriberCount)
+          : integrations.newsletter?.subscriberCount,
+      listId: provider === "mailchimp" ? credentials.listId?.trim() || integrations.newsletter?.listId || "" : undefined,
+      publicationId: provider === "beehiiv" ? credentials.publicationId?.trim() || integrations.newsletter?.publicationId || "" : undefined,
+    };
+
+    if (provider === "kit") {
+      integrations.kit = {
+        apiKey: apiKey ? encryptValue(apiKey) : integrations.kit?.apiKey || "",
+        connected: Boolean(apiKey),
+      };
+    }
+
+    if (existingProvider && existingProvider !== provider) {
+      integrations.kit = provider === "kit" ? integrations.kit : undefined;
+    }
+  }
+
+  if (integrationService === "google") {
+    integrations.google = {
+      calendarConnected: credentials.calendarConnected === "true" || integrations.google?.calendarConnected || false,
+    };
+  }
+
+  await db
+    .update(organizations)
+    .set({ integrations, updatedAt: new Date() })
+    .where(eq(organizations.id, orgId));
+
+  revalidatePath("/settings/integrations");
+  revalidatePath("/clients/new");
+  revalidatePath("/automations");
+  revalidatePath("/emails");
+}
+
+export async function disconnectIntegration(orgId: string, service: string) {
+  const integrationService = service as IntegrationService;
+
+  if (![
+    "twilio",
+    "resend",
+    "kit",
+    "mailchimp",
+    "beehiiv",
+    "google",
+  ].includes(integrationService)) {
+    throw new Error("Invalid integration service");
+  }
+
+  const [org] = await db
+    .select({ id: organizations.id, integrations: organizations.integrations })
+    .from(organizations)
+    .where(eq(organizations.id, orgId))
+    .limit(1);
+
+  if (!org) {
+    throw new Error("Organization not found");
+  }
+
+  const integrations = readIntegrations(org.integrations);
+
+  if (integrationService === "twilio") {
+    integrations.twilio = {
+      accountSid: "",
+      authToken: "",
+      fromNumber: "",
+      connected: false,
+    };
+  }
+
+  if (integrationService === "resend") {
+    integrations.resend = {
+      apiKey: "",
+      fromEmail: "",
+      fromName: integrations.resend?.fromName || "SeldonFrame",
+      connected: false,
+    };
+  }
+
+  if (["kit", "mailchimp", "beehiiv"].includes(integrationService)) {
+    integrations.newsletter = undefined;
+    integrations.kit = undefined;
+  }
+
+  if (integrationService === "google") {
+    integrations.google = {
+      calendarConnected: false,
+    };
+  }
+
+  await db
+    .update(organizations)
+    .set({ integrations, updatedAt: new Date() })
+    .where(eq(organizations.id, orgId));
+
+  revalidatePath("/settings/integrations");
+  revalidatePath("/clients/new");
+  revalidatePath("/automations");
+  revalidatePath("/emails");
+}
+
+export async function disconnectIntegrationAction(formData: FormData) {
+  assertWritable();
+
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const service = String(formData.get("service") ?? "").trim();
+
+  if (!service) {
+    throw new Error("Missing integration service");
+  }
+
+  await disconnectIntegration(orgId, service);
+}
+
+export type EmailIntegrationsViewModel = {
+  // 2026-05-18 (later) — fromEmail + fromName surfaced. Operators
+  // connected Resend with an API key but no from-address; sends fell
+  // back to hello@seldonframe.local (resolveDefaultFromEmail) which
+  // Resend rejects because the .local TLD isn't verifiable. Booking
+  // confirmations silently failed at the Resend API even though the
+  // dispatcher reached send. Now the UI captures fromEmail at
+  // connect time and surfaces it after.
+  resend: {
+    connected: boolean;
+    maskedKey: string;
+    fromEmail: string;
+    fromName: string;
+  };
+  // 2026-05-18 — Twilio surfaced on /emails because the "Email + SMS
+  // Drip" CTA on /clients/:slug/ready routes operators here expecting
+  // to wire BOTH transactional channels. Before this prop, operators
+  // could connect Resend but had no path to add a Twilio key without
+  // wandering into /settings/integrations.
+  twilio: {
+    connected: boolean;
+    accountSid: string;
+    fromNumber: string;
+    authTokenHint: string;
+  };
+  newsletter: {
+    kit: { connected: boolean; maskedKey: string };
+    mailchimp: { connected: boolean; maskedKey: string };
+    beehiiv: { connected: boolean; maskedKey: string };
+  };
+};
+
+export async function getEmailIntegrationsSettings(): Promise<EmailIntegrationsViewModel | null> {
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    return null;
+  }
+
+  const [org] = await db
+    .select({ integrations: organizations.integrations })
+    .from(organizations)
+    .where(eq(organizations.id, orgId))
+    .limit(1);
+
+  if (!org) {
+    return null;
+  }
+
+  const integrations = readIntegrations(org.integrations);
+  const resendKey = tryDecrypt(integrations.resend?.apiKey);
+  const newsletterKey = tryDecrypt(integrations.newsletter?.apiKey);
+  const activeProvider = integrations.newsletter?.provider ?? null;
+  // 2026-05-18 — Twilio auth token isn't surfaced to the UI; we only
+  // expose a "•••" hint so the operator can see something IS stored
+  // without leaking the secret. accountSid + fromNumber are not
+  // secrets and ARE surfaced (operator chose them at connect time).
+  const twilioAuthToken = tryDecrypt(integrations.twilio?.authToken);
+
+  return {
+    resend: {
+      connected: Boolean(integrations.resend?.connected && resendKey),
+      maskedKey: maskLastEight(resendKey),
+      fromEmail: integrations.resend?.fromEmail ?? "",
+      fromName: integrations.resend?.fromName ?? "",
+    },
+    twilio: {
+      connected: Boolean(integrations.twilio?.connected && twilioAuthToken),
+      accountSid: integrations.twilio?.accountSid ?? "",
+      fromNumber: integrations.twilio?.fromNumber ?? "",
+      authTokenHint: twilioAuthToken ? "••••••••" : "",
+    },
+    newsletter: {
+      kit: {
+        connected: activeProvider === "kit" && Boolean(integrations.newsletter?.connected),
+        maskedKey: activeProvider === "kit" ? maskLastEight(newsletterKey || tryDecrypt(integrations.kit?.apiKey)) : "",
+      },
+      mailchimp: {
+        connected: activeProvider === "mailchimp" && Boolean(integrations.newsletter?.connected),
+        maskedKey: activeProvider === "mailchimp" ? maskLastEight(newsletterKey) : "",
+      },
+      beehiiv: {
+        connected: activeProvider === "beehiiv" && Boolean(integrations.newsletter?.connected),
+        maskedKey: activeProvider === "beehiiv" ? maskLastEight(newsletterKey) : "",
+      },
+    },
+  };
+}
+
+export async function updateIntegrationAction(formData: FormData) {
+  assertWritable();
+
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const service = String(formData.get("service") ?? "").trim();
+
+  if (!service) {
+    throw new Error("Missing integration service");
+  }
+
+  await updateIntegration(orgId, service, {
+    accountSid: String(formData.get("accountSid") ?? ""),
+    authToken: String(formData.get("authToken") ?? ""),
+    fromNumber: String(formData.get("fromNumber") ?? ""),
+    voiceTrunkSid: String(formData.get("voiceTrunkSid") ?? ""),
+    apiKey: String(formData.get("apiKey") ?? ""),
+    fromEmail: String(formData.get("fromEmail") ?? ""),
+    fromName: String(formData.get("fromName") ?? ""),
+    listId: String(formData.get("listId") ?? ""),
+    publicationId: String(formData.get("publicationId") ?? ""),
+    subscriberCount: String(formData.get("subscriberCount") ?? ""),
+    calendarConnected: String(formData.get("calendarConnected") ?? "false"),
+  });
+
+  const query = serializeResult({ saved: "1", service });
+  redirect(`/settings/integrations?${query}`);
+}
+
+export async function saveEmailIntegrationAction(formData: FormData) {
+  assertWritable();
+
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const service = String(formData.get("service") ?? "").trim();
+
+  if (!service) {
+    throw new Error("Missing integration service");
+  }
+
+  await updateIntegration(orgId, service, {
+    apiKey: String(formData.get("apiKey") ?? ""),
+    fromEmail: String(formData.get("fromEmail") ?? ""),
+    fromName: String(formData.get("fromName") ?? ""),
+    listId: String(formData.get("listId") ?? ""),
+    publicationId: String(formData.get("publicationId") ?? ""),
+    // 2026-05-18 — Twilio fields now accepted by the same action so
+    // /emails can connect Twilio without redirecting to
+    // /settings/integrations. The user's marketing copy on
+    // /clients/:slug/ready promised "Email + SMS Drip" but the
+    // landing surface had no Twilio block until this change.
+    accountSid: String(formData.get("accountSid") ?? ""),
+    authToken: String(formData.get("authToken") ?? ""),
+    fromNumber: String(formData.get("fromNumber") ?? ""),
+  });
+
+  // 2026-05-18 (later) — redirect after save with a ?saved=<service>
+  // param so the UI can show explicit confirmation. Without this the
+  // form re-rendered with the operator's typed values still in the
+  // inputs (revalidatePath refreshes server state but doesn't clear
+  // client form fields), which felt like "save didn't work" — user
+  // had to refresh the page to see whether anything actually persisted.
+  redirect(`/emails?saved=${encodeURIComponent(service)}`);
+}
+
+export async function saveIntegrationFromWizard(service: string, credentials: Record<string, string>) {
+  assertWritable();
+
+  const orgId = await getOrgId();
+
+  console.info("[integrations][wizard] save start", {
+    service,
+    hasOrgId: Boolean(orgId),
+    credentialKeys: Object.keys(credentials),
+  });
+
+  if (!orgId) {
+    console.error("[integrations][wizard] save failed: missing org id", { service });
+    throw new Error("Unauthorized");
+  }
+
+  await updateIntegration(orgId, service, credentials);
+  console.info("[integrations][wizard] save success", { service, orgId });
+  return { success: true };
+}
+
+export async function testTwilioConnectionAction(formData: FormData) {
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const [org] = await db
+    .select({ integrations: organizations.integrations })
+    .from(organizations)
+    .where(eq(organizations.id, orgId))
+    .limit(1);
+
+  const integrations = readIntegrations(org?.integrations);
+  const accountSid = String(formData.get("accountSid") ?? integrations.twilio?.accountSid ?? "").trim();
+  const rawAuthToken = String(formData.get("authToken") ?? "").trim();
+  const authToken = rawAuthToken || tryDecrypt(integrations.twilio?.authToken);
+
+  if (!accountSid || !authToken) {
+    redirect("/settings/integrations?twilioTest=0");
+  }
+
+  const auth = Buffer.from(`${accountSid}:${authToken}`).toString("base64");
+  const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(accountSid)}.json`, {
+    method: "GET",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      Accept: "application/json",
+    },
+    cache: "no-store",
+  });
+
+  redirect(`/settings/integrations?twilioTest=${response.ok ? "1" : "0"}`);
+}
+
+export async function testResendConnectionAction(formData: FormData) {
+  const orgId = await getOrgId();
+  const user = await getCurrentUser();
+
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const [org] = await db
+    .select({ integrations: organizations.integrations })
+    .from(organizations)
+    .where(eq(organizations.id, orgId))
+    .limit(1);
+
+  const integrations = readIntegrations(org?.integrations);
+  const rawApiKey = String(formData.get("apiKey") ?? "").trim();
+  const apiKey = rawApiKey || tryDecrypt(integrations.resend?.apiKey);
+  const fromEmail = String(formData.get("fromEmail") ?? integrations.resend?.fromEmail ?? "").trim();
+  const fromName = String(formData.get("fromName") ?? integrations.resend?.fromName ?? "SeldonFrame").trim();
+
+  if (!apiKey) {
+    redirect("/settings/integrations?resendTest=0");
+  }
+
+  const domainsResponse = await fetch("https://api.resend.com/domains", {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: "application/json",
+    },
+    cache: "no-store",
+  });
+
+  if (!domainsResponse.ok) {
+    redirect("/settings/integrations?resendTest=0");
+  }
+
+  await updateIntegration(orgId, "resend", {
+    apiKey: rawApiKey,
+    fromEmail,
+    fromName,
+  });
+
+  if (fromEmail && user?.email) {
+    const emailResponse = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: `${fromName} <${fromEmail}>`,
+        to: [user.email],
+        subject: "Resend integration test",
+        html: "<p>Your Resend integration is connected.</p>",
+      }),
+      cache: "no-store",
+    });
+
+    redirect(`/settings/integrations?resendTest=${emailResponse.ok ? "1" : "0"}`);
+  }
+
+  redirect("/settings/integrations?resendTest=1");
+}
+
+export async function testKitConnectionAction(formData: FormData) {
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const [org] = await db
+    .select({ integrations: organizations.integrations })
+    .from(organizations)
+    .where(eq(organizations.id, orgId))
+    .limit(1);
+
+  const integrations = readIntegrations(org?.integrations);
+  const rawApiKey = String(formData.get("apiKey") ?? "").trim();
+  const apiKey = rawApiKey || tryDecrypt(integrations.newsletter?.apiKey || integrations.kit?.apiKey);
+
+  if (!apiKey) {
+    redirect("/settings/integrations?kitTest=0");
+  }
+
+  const response = await fetch("https://api.kit.com/v4/account", {
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: "application/json",
+    },
+    cache: "no-store",
+  });
+
+  if (response.ok) {
+    await updateIntegration(orgId, "kit", { apiKey: rawApiKey || apiKey });
+  }
+
+  redirect(`/settings/integrations?kitTest=${response.ok ? "1" : "0"}`);
+}
+
+function resolveMailchimpApiRoot(apiKey: string) {
+  const parts = apiKey.split("-");
+  const dc = parts[parts.length - 1];
+  if (!dc) {
+    return null;
+  }
+  return `https://${dc}.api.mailchimp.com/3.0`;
+}
+
+export async function testMailchimpConnectionAction(formData: FormData) {
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const [org] = await db
+    .select({ integrations: organizations.integrations })
+    .from(organizations)
+    .where(eq(organizations.id, orgId))
+    .limit(1);
+
+  const integrations = readIntegrations(org?.integrations);
+  const rawApiKey = String(formData.get("apiKey") ?? "").trim();
+  const apiKey = rawApiKey || tryDecrypt(integrations.newsletter?.apiKey);
+  const listId = String(formData.get("listId") ?? integrations.newsletter?.listId ?? "").trim();
+  const apiRoot = apiKey ? resolveMailchimpApiRoot(apiKey) : null;
+
+  if (!apiKey || !apiRoot) {
+    redirect("/settings/integrations?mailchimpTest=0");
+  }
+
+  const auth = Buffer.from(`anystring:${apiKey}`).toString("base64");
+  const response = await fetch(`${apiRoot}/ping`, {
+    method: "GET",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      Accept: "application/json",
+    },
+    cache: "no-store",
+  });
+
+  if (response.ok) {
+    await updateIntegration(orgId, "mailchimp", { apiKey: rawApiKey || apiKey, listId });
+  }
+
+  redirect(`/settings/integrations?mailchimpTest=${response.ok ? "1" : "0"}`);
+}
+
+export async function testBeehiivConnectionAction(formData: FormData) {
+  const orgId = await getOrgId();
+
+  if (!orgId) {
+    throw new Error("Unauthorized");
+  }
+
+  const [org] = await db
+    .select({ integrations: organizations.integrations })
+    .from(organizations)
+    .where(eq(organizations.id, orgId))
+    .limit(1);
+
+  const integrations = readIntegrations(org?.integrations);
+  const rawApiKey = String(formData.get("apiKey") ?? "").trim();
+  const apiKey = rawApiKey || tryDecrypt(integrations.newsletter?.apiKey);
+  const publicationId = String(formData.get("publicationId") ?? integrations.newsletter?.publicationId ?? "").trim();
+
+  if (!apiKey) {
+    redirect("/settings/integrations?beehiivTest=0");
+  }
+
+  const response = await fetch("https://api.beehiiv.com/v2/publications", {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: "application/json",
+    },
+    cache: "no-store",
+  });
+
+  let subscriberCount = "";
+  if (response.ok) {
+    const json = (await response.json()) as { data?: Array<{ id?: string; stats?: { active_subscriptions?: number } }> };
+    const matched = publicationId
+      ? json.data?.find((item) => item.id === publicationId)
+      : json.data?.[0];
+    subscriberCount = matched?.stats?.active_subscriptions ? String(matched.stats.active_subscriptions) : "";
+    await updateIntegration(orgId, "beehiiv", {
+      apiKey: rawApiKey || apiKey,
+      publicationId: publicationId || matched?.id || "",
+      subscriberCount,
+    });
+  }
+
+  redirect(`/settings/integrations?beehiivTest=${response.ok ? "1" : "0"}`);
+}

@@ -1,0 +1,26 @@
+import { SeldonPageClient } from "./seldon-page-client";
+import { getSeldonPageData } from "@/lib/ai/seldon-actions";
+
+export default async function SeldonPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ prompt?: string }>;
+}) {
+  const data = await getSeldonPageData();
+  const params = await searchParams;
+
+  if (!data) {
+    return null;
+  }
+
+  return (
+    <SeldonPageClient
+      allowed={data.allowed}
+      planId={data.planId}
+      usage={data.usage}
+      sessions={data.sessions}
+      savedBlocks={data.savedBlocks}
+      initialPrompt={params.prompt ?? ""}
+    />
+  );
+}

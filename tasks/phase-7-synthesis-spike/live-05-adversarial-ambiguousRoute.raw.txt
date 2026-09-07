@@ -1,0 +1,29 @@
+{
+  "name": "New lead welcome SMS",
+  "description": "When a new patient submits the intake form, send a single warm, reassuring SMS welcoming them to Bright Smile Dental.",
+  "trigger": {
+    "type": "event",
+    "event": "form.submitted"
+  },
+  "variables": {
+    "contact_id": "event.contact.id",
+    "first_name": "event.contact.firstName",
+    "phone": "event.contact.phone"
+  },
+  "steps": [
+    {
+      "id": "send_welcome_sms",
+      "type": "mcp_tool_call",
+      "tool": "send_sms",
+      "args": {
+        "to": "{{phone}}",
+        "body": "Hi {{first_name}}, it's the team at Bright Smile Dental 🦷 Thanks for reaching out — we got your info and we'll be in touch shortly to get you booked. No pressure, no sales pitch, just friendly care. Reply STOP to opt out."
+      },
+      "next": "done"
+    },
+    {
+      "id": "done",
+      "type": "end"
+    }
+  ]
+}

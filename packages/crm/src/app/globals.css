@@ -1,0 +1,510 @@
+@import "tailwindcss";
+@import "../styles/design-tokens.css";
+@import "../styles/components/overrides.css";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  /* Seldon Studio rebrand (2026-06-12): the UI sans is Hanken Grotesk
+     (loaded in app/layout.tsx as --font-hanken). Falls back to Geist
+     then the system stack if the webfont is unavailable. */
+  --font-sans: var(--font-hanken), var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono);
+  /* `font-display` is an alias to Geist for marketing headlines —
+     the Claude Design HTML mockup uses --font-display: 'Geist' and
+     several marketing-* sections reach for font-display. The Seldon
+     Studio serif accent (Newsreader italic) is exposed separately via
+     the `.font-display` utility class, not this token. */
+  --font-display: var(--font-geist-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-positive: var(--positive);
+  --color-caution: var(--caution);
+  --color-negative: var(--negative);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --animate-shimmer-slide: shimmer-slide var(--speed) ease-in-out infinite alternate;
+  --animate-spin-around: spin-around calc(var(--speed) * 2) infinite linear;
+  @keyframes shimmer-slide {
+  to {
+    transform: translate(calc(100cqw - 100%), 0);}}
+  @keyframes spin-around {
+  0% {
+    transform: translateZ(0) rotate(0);}
+  15%, 35% {
+    transform: translateZ(0) rotate(90deg);}
+  65%, 85% {
+    transform: translateZ(0) rotate(270deg);}
+  100% {
+    transform: translateZ(0) rotate(360deg);}}
+  --animate-blink-cursor: blink-cursor 1.2s step-end infinite
+;
+  @keyframes blink-cursor {
+  0%, 49% {
+    opacity: 1;}
+  50%, 100% {
+    opacity: 0;}}
+  --animate-marquee: marquee var(--duration) infinite linear;
+  --animate-marquee-vertical: marquee-vertical var(--duration) linear infinite;
+  @keyframes marquee {
+  from {
+    transform: translateX(0);}
+  to {
+    transform: translateX(calc(-100% - var(--gap)));}}
+  @keyframes marquee-vertical {
+  from {
+    transform: translateY(0);}
+  to {
+    transform: translateY(calc(-100% - var(--gap)));}}
+  --animate-shiny-text: shiny-text 5s cubic-bezier(0.5, 0.2, 0.3, 1) infinite;
+  @keyframes shiny-text {
+  0% {
+    background-position: 0% 0;}
+  55%, 100% {
+    background-position: -200% 0;}}}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    /* Prevent horizontal scroll on mobile when any descendant briefly
+       overflows (e.g. the hero dashboard mockup at narrow viewports,
+       wide tables, or motion transforms that extend past the viewport
+       during entry animation). Pairs with `min-w-0` on flex/grid
+       descendants. The user explicitly flagged horizontal sliding as a
+       UX failure on mobile. */
+    overflow-x: hidden;
+  }
+  body {
+    @apply bg-background text-foreground;
+    min-height: 100dvh;
+    font-feature-settings: "ss01" 1, "cv01" 1, "cv11" 1;
+    background-image: radial-gradient(circle at top, rgb(255 255 255 / 0.03), transparent 38%);
+    background-attachment: fixed;
+    /* Belt-and-suspenders: defense against any iOS Safari quirk where
+       <html> overflow-x:hidden alone isn't enough. */
+    overflow-x: hidden;
+  }
+
+  .dark body {
+    background-color: #0a0a0a;
+    background-image:
+      radial-gradient(circle at top, rgb(255 255 255 / 0.05), transparent 28%),
+      linear-gradient(180deg, #111111 0%, #0a0a0a 28%, #0a0a0a 100%);
+  }
+}
+
+/* ═══ SeldonFrame essentials (kept from original) ═══ */
+
+.crm-page {
+  min-height: 100dvh;
+  padding: 2rem;
+}
+
+@keyframes page-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@layer utilities {
+  .text-page-title {
+    font-size: 2rem;
+    line-height: 1.08;
+    letter-spacing: -0.035em;
+    font-weight: 450;
+  }
+
+  .text-section-title {
+    font-size: 1.5rem;
+    line-height: 1.15;
+    letter-spacing: -0.025em;
+    font-weight: 600;
+  }
+
+  .text-card-title {
+    font-size: 1.125rem;
+    line-height: 1.3;
+    letter-spacing: -0.02em;
+    font-weight: 550;
+  }
+
+  .text-label {
+    font-size: 0.875rem;
+    line-height: 1.4;
+    font-weight: 550;
+  }
+
+  .text-data {
+    font-family: var(--font-geist-mono);
+    font-size: 0.875rem;
+    line-height: 1.5;
+    font-weight: 400;
+  }
+
+  .text-tiny {
+    font-size: 0.75rem;
+    line-height: 1.3;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+
+  /* Seldon Studio serif/display accent — Newsreader italic. Use on
+     marketing-style display lines or emphasized numerals that should
+     read editorial rather than UI. Loaded via --font-newsreader in
+     app/layout.tsx. */
+  .font-display {
+    font-family: var(--font-newsreader), ui-serif, Georgia, serif;
+    font-style: italic;
+  }
+
+  .animate-page-enter {
+    animation: page-enter 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  /* ═══ 2026-05-17 — uniform interactive feedback ═══
+     Shared utilities so every clickable surface in the CRM gets the
+     same "feel" without 25 components hand-rolling slightly different
+     transitions. Pair them on a button:
+
+       <button className="crm-pressable crm-hover-lift">…</button>
+
+     - crm-pressable: 150ms scale on hover/active — visible affordance.
+       Use on icon buttons, chips, segment pills.
+     - crm-hover-lift: subtle 1px translateY on hover. Use on rows +
+       cards. Most crm-button-* classes already include this.
+     - crm-skeleton: shimmer placeholder for content that's loading. */
+  .crm-pressable {
+    transition: transform 150ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .crm-pressable:hover {
+    transform: scale(1.03);
+  }
+
+  .crm-pressable:active {
+    transform: scale(0.97);
+  }
+
+  .crm-hover-lift {
+    transition: transform var(--transition-fast), box-shadow var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .crm-hover-lift:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-card-hover);
+  }
+
+  @keyframes crm-skeleton-shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+
+  .crm-skeleton {
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--muted) 60%, transparent) 0%,
+      color-mix(in srgb, var(--muted) 90%, transparent) 50%,
+      color-mix(in srgb, var(--muted) 60%, transparent) 100%
+    );
+    background-size: 200% 100%;
+    animation: crm-skeleton-shimmer 1500ms ease-in-out infinite;
+    border-radius: 0.5rem;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .crm-pressable,
+    .crm-hover-lift {
+      transition: none;
+    }
+    .crm-pressable:hover,
+    .crm-pressable:active,
+    .crm-hover-lift:hover {
+      transform: none;
+    }
+    .crm-skeleton {
+      animation: none;
+    }
+  }
+
+  .text-positive {
+    color: var(--positive);
+  }
+
+  .text-caution {
+    color: var(--caution);
+  }
+
+  .text-negative {
+    color: var(--negative);
+  }
+
+  .bg-positive\/10 {
+    background-color: color-mix(in srgb, var(--positive) 10%, transparent);
+  }
+
+  .bg-caution\/10 {
+    background-color: color-mix(in srgb, var(--caution) 10%, transparent);
+  }
+
+  .bg-negative\/10 {
+    background-color: color-mix(in srgb, var(--negative) 10%, transparent);
+  }
+
+  .border-positive\/20 {
+    border-color: color-mix(in srgb, var(--positive) 20%, transparent);
+  }
+
+  .border-caution\/20 {
+    border-color: color-mix(in srgb, var(--caution) 20%, transparent);
+  }
+
+  .border-negative\/20 {
+    border-color: color-mix(in srgb, var(--negative) 20%, transparent);
+  }
+}
+
+/* ═══ /docs prose styling (v1.30.2) ═══
+   Article body styles for the docs route. Linear-style: tighter
+   leading, restrained heading scale, comfortable line length. We
+   roll our own instead of @tailwindcss/typography because it's
+   ~30 declarations and we want exact control. */
+
+.docs-prose {
+  color: var(--foreground);
+  font-size: 0.95rem;
+  line-height: 1.75;
+}
+
+.docs-prose > * + * {
+  margin-top: 1rem;
+}
+
+.docs-prose h2 {
+  font-size: 1.5rem;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+  margin-top: 2.5rem;
+  margin-bottom: 0.75rem;
+  color: var(--foreground);
+  scroll-margin-top: 5rem;
+}
+
+.docs-prose h3 {
+  font-size: 1.125rem;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  font-weight: 600;
+  margin-top: 1.75rem;
+  margin-bottom: 0.5rem;
+  color: var(--foreground);
+}
+
+.docs-prose p {
+  color: color-mix(in srgb, var(--foreground) 85%, transparent);
+}
+
+.docs-prose strong {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.docs-prose a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  text-decoration-color: color-mix(in srgb, var(--primary) 40%, transparent);
+  transition: text-decoration-color 120ms ease;
+}
+.docs-prose a:hover {
+  text-decoration-color: var(--primary);
+}
+
+.docs-prose ul,
+.docs-prose ol {
+  padding-left: 1.5rem;
+  color: color-mix(in srgb, var(--foreground) 85%, transparent);
+}
+
+.docs-prose ul {
+  list-style-type: disc;
+}
+
+.docs-prose ol {
+  list-style-type: decimal;
+}
+
+.docs-prose li {
+  margin-top: 0.375rem;
+  padding-left: 0.25rem;
+}
+
+.docs-prose li::marker {
+  color: color-mix(in srgb, var(--foreground) 50%, transparent);
+}
+
+.docs-prose code {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.85em;
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--muted) 60%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  color: var(--foreground);
+}
+
+.docs-prose pre {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+.docs-prose pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+.docs-prose em {
+  color: color-mix(in srgb, var(--foreground) 90%, transparent);
+  font-style: italic;
+}
+
+.docs-prose blockquote {
+  border-left: 3px solid var(--border);
+  padding-left: 1rem;
+  margin-left: 0;
+  color: var(--muted-foreground);
+  font-style: italic;
+}
+
+/* ═══ /marketing prose (v1.31.3) ═══
+   Variant of .docs-prose for the marketing route group, which
+   hardcodes the dark theme regardless of the root theme setting
+   (visitors land on seldonframe.com always-dark, even if their
+   system prefers light). Uses the marketing palette: #fafafa
+   foreground, #a1a1aa muted, #1FAE85 accent, white/5 borders. */
+
+.marketing-prose {
+  color: #fafafa;
+  font-size: 0.95rem;
+  line-height: 1.75;
+}
+
+.marketing-prose > * + * {
+  margin-top: 1rem;
+}
+
+.marketing-prose h2 {
+  font-size: 1.5rem;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+  margin-top: 2.5rem;
+  margin-bottom: 0.75rem;
+  color: #fafafa;
+}
+
+.marketing-prose h3 {
+  font-size: 1.125rem;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  font-weight: 600;
+  margin-top: 1.75rem;
+  margin-bottom: 0.5rem;
+  color: #fafafa;
+}
+
+.marketing-prose p {
+  color: #a1a1aa;
+}
+
+.marketing-prose strong {
+  color: #fafafa;
+  font-weight: 600;
+}
+
+.marketing-prose a {
+  color: #1FAE85;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  text-decoration-color: rgba(31, 174, 133, 0.4);
+  transition: text-decoration-color 120ms ease;
+}
+.marketing-prose a:hover {
+  text-decoration-color: #1FAE85;
+}
+
+.marketing-prose ul,
+.marketing-prose ol {
+  padding-left: 1.5rem;
+  color: #a1a1aa;
+}
+
+.marketing-prose ul {
+  list-style-type: disc;
+}
+
+.marketing-prose ol {
+  list-style-type: decimal;
+}
+
+.marketing-prose li {
+  margin-top: 0.375rem;
+  padding-left: 0.25rem;
+}
+
+.marketing-prose li::marker {
+  color: #71717a;
+}
+
+.marketing-prose code {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.85em;
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #fafafa;
+}
+
+.marketing-prose em {
+  color: #d4d4d8;
+  font-style: italic;
+}

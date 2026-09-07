@@ -1,0 +1,92 @@
+name: CI
+
+# Runs on every PR and every push to main. Fails closed on unit-test
+# failures so specs can't silently rot. Added 2026-04-21 as part of
+# Scope 3 Step 2b.1 PR 1 — before this, the repo had only a deploy
+# workflow (deploy-demo.yml) that ran on push-to-main without a test
+# gate.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.18.1
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Migration journal check
+        # Fails the PR if a drizzle/*.sql file isn't registered in
+        # meta/_journal.json (and isn't a known out-of-band migration).
+        # An un-journaled file silently never runs via drizzle-kit migrate —
+        # the exact cause of the 0019 / 0055 production outages. No DB needed.
+        run: pnpm db:check-journaled
+
+      - name: Typecheck (crm)
+        # Lands as a CI gate only now: fix/copilot-persist-ephemeral fixed
+        # the last standing tsc error in the package (TS2353 — route.ts's
+        # `persist: false` on executeTurn's input had no matching property).
+        # Kept out of `pnpm test:unit` below so a failure reports as its own
+        # clearly-named step. Runs BEFORE the unit-test suite (fail-fast: a
+        # ~40s typecheck shouldn't wait on a full test run to report).
+        run: pnpm --filter @seldonframe/crm exec tsc --noEmit
+
+      - name: Unit tests
+        run: pnpm test:unit
+
+      - name: BLOCK.md emit drift-detector
+        run: pnpm emit:blocks:check
+
+      - name: Event-registry drift-detector
+        run: pnpm emit:event-registry:check
+
+      - name: Generator regression net
+        run: cd packages/crm && node --import tsx --test tests/regression/generator-prompts.spec.ts
+
+  e2e-smoke:
+    runs-on: ubuntu-latest
+    if: vars.E2E_BASE_URL != ''
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.18.1
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright chromium
+        run: pnpm --filter @seldonframe/crm exec playwright install --with-deps chromium
+
+      - name: Funnel render-tier smoke
+        # RENDER tier only — never set E2E_FULL here, it creates data.
+        run: pnpm --filter @seldonframe/crm exec playwright test e2e/funnel-smoke.spec.ts
+        env:
+          E2E_BASE_URL: ${{ vars.E2E_BASE_URL }}

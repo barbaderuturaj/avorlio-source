@@ -1,0 +1,322 @@
+{
+  "$schema": "./schema.json",
+  "version": 1,
+  "workspace": {
+    "name": "[Your Business Name]",
+    "industry": "general",
+    "tagline": "Local service, clear next steps.",
+    "theme": {
+      "mode": "light",
+      "accent": "#1A1A1A",
+      "displayFont": "cal-sans",
+      "bodyFont": "inter",
+      "radiusScale": "default",
+      "logoUrl": null,
+      "heroImageUrl": null
+    },
+    "contact": {
+      "phone": "",
+      "emergencyPhone": null,
+      "email": null,
+      "address": {
+        "street": "[Street address]",
+        "city": "[City]",
+        "region": "[State or province]",
+        "postalCode": "[Postal code]",
+        "country": "US"
+      },
+      "hours": {
+        "mon": [9, 17],
+        "tue": [9, 17],
+        "wed": [9, 17],
+        "thu": [9, 17],
+        "fri": [9, 17],
+        "sat": null,
+        "sun": null
+      },
+      "timezone": "America/New_York",
+      "serviceArea": "[City] and surrounding area"
+    }
+  },
+  "landing": {
+    "renderer": "general-service-v1",
+    "sections": [
+      {
+        "type": "hero",
+        "eyebrow": "[City] · [Service Category]",
+        "headline": "Reliable [service] you can count on",
+        "subhead": "Tell us what you need and we'll help route your request.",
+        "ctaPrimary": { "label": "Request service", "href": "/book", "kind": "primary" },
+        "ctaSecondary": { "label": "Get in touch", "href": "/intake", "kind": "secondary" },
+        "imageUrl": null,
+        "variant": "split-image-right"
+      },
+      {
+        "type": "trust-strip",
+        "items": [
+          { "icon": "MapPin", "label": "Local service area" },
+          { "icon": "ClipboardCheck", "label": "Clear request intake" },
+          { "icon": "Clock", "label": "Business-hours scheduling" }
+        ]
+      },
+      {
+        "type": "services-grid",
+        "headline": "Services",
+        "subhead": "What we do best.",
+        "layout": "grid-3",
+        "items": [
+          {
+            "icon": "Wrench",
+            "title": "[Service]",
+            "description": "[Service description]"
+          },
+          {
+            "icon": "Settings",
+            "title": "[Service]",
+            "description": "[Service description]"
+          },
+          {
+            "icon": "Sparkles",
+            "title": "[Service]",
+            "description": "[Service description]"
+          }
+        ]
+      },
+      {
+        "type": "about",
+        "headline": "[About headline]",
+        "body": "[About copy]",
+        "photoUrl": null,
+        "ownerName": "[Owner Name]",
+        "ownerTitle": "Owner"
+      },
+      {
+        "type": "mid-cta",
+        "headline": "Ready to get started?",
+        "subhead": "Tell us what you need and the team can follow up.",
+        "ctaPrimary": { "label": "Request service", "href": "/book", "kind": "primary" },
+        "ctaSecondary": { "label": "Get in touch", "href": "/intake", "kind": "secondary" },
+        "embedQuoteForm": true
+      },
+      {
+        "type": "testimonials",
+        "headline": "[Customer feedback headline]",
+        "featured": {
+          "quote": "[Verified customer quote]",
+          "authorName": "[Customer Name]",
+          "authorRole": "[Customer Role]"
+        },
+        "items": [
+          {
+            "quote": "[Verified customer quote]",
+            "authorName": "[Customer Name]",
+            "authorRole": "[Customer Role]"
+          },
+          {
+            "quote": "[Verified customer quote]",
+            "authorName": "[Customer Name]",
+            "authorRole": "[Customer Role]"
+          },
+          {
+            "quote": "[Verified customer quote]",
+            "authorName": "[Customer Name]",
+            "authorRole": "[Customer Role]"
+          }
+        ]
+      },
+      {
+        "type": "service-area",
+        "headline": "Service area",
+        "description": "We serve [City] and surrounding areas within roughly [N] miles."
+      },
+      {
+        "type": "faq",
+        "headline": "Frequently asked questions",
+        "items": [
+          {
+            "question": "How do I request service?",
+            "answer": "Share what you need and the team can review the request."
+          },
+          {
+            "question": "What information should I provide?",
+            "answer": "Share the service you need, your contact details, and any useful notes about the request."
+          },
+          {
+            "question": "What areas do you serve?",
+            "answer": "We serve [City] and the surrounding area."
+          },
+          {
+            "question": "How do you handle pricing?",
+            "answer": "Pricing depends on the service and scope. A person from the team can confirm pricing details."
+          }
+        ]
+      },
+      {
+        "type": "footer",
+        "showHours": true,
+        "showAddress": true,
+        "showServiceArea": true,
+        "social": [],
+        "legal": [
+          { "label": "Privacy", "href": "/privacy" },
+          { "label": "Terms", "href": "/terms" }
+        ]
+      }
+    ]
+  },
+  "booking": {
+    "renderer": "calcom-month-v1",
+    "eventType": {
+      "title": "Service visit",
+      "description": "Service visit to understand your needs and plan next steps.",
+      "durationMinutes": 60,
+      "location": { "kind": "phone" },
+      "bufferMinutes": 0
+    },
+    "availability": {
+      "weekly": {
+        "mon": [9, 17],
+        "tue": [9, 17],
+        "wed": [9, 17],
+        "thu": [9, 17],
+        "fri": [9, 17],
+        "sat": null,
+        "sun": null
+      },
+      "blackoutDates": [],
+      "leadTimeHours": 4,
+      "advanceWindowDays": 60
+    },
+    "formFields": [
+      { "id": "name",  "label": "Full name", "type": "text",  "required": true,  "placeholder": "Jane Smith" },
+      { "id": "email", "label": "Email",     "type": "email", "required": true,  "placeholder": "you@example.com" },
+      { "id": "phone", "label": "Phone",     "type": "phone", "required": false, "placeholder": "(555) 555-0100" },
+      { "id": "notes", "label": "What can we help with?", "type": "textarea", "required": false }
+    ],
+    "confirmation": {
+      "headline": "Your booking is confirmed",
+      "message": "Your appointment request has been scheduled.",
+      "successRedirectUrl": null
+    }
+  },
+  "intake": {
+    "renderer": "formbricks-stack-v1",
+    "title": "Tell us about your project",
+    "description": "Quick 5-question form. Takes about a minute.",
+    "questions": [
+      { "id": "fullName",   "type": "text",     "label": "What's your name?",     "required": true },
+      { "id": "phone",      "type": "phone",    "label": "Best phone to reach you?", "required": true },
+      { "id": "email",      "type": "email",    "label": "Email",                 "required": true },
+      {
+        "id": "service",
+        "type": "select",
+        "label": "What service do you need?",
+        "required": true,
+        "options": ["Other / not sure"]
+      },
+      {
+        "id": "details",
+        "type": "textarea",
+        "label": "Tell us a bit about what you're looking for",
+        "helper": "A few sentences is plenty.",
+        "required": false,
+        "validation": { "maxLength": 1000 }
+      }
+    ],
+    "completion": {
+      "headline": "Got it — thanks!",
+      "message": "We received your request."
+    }
+  },
+  "admin": {
+    "renderer": "twenty-shell-v1",
+    "sidebarOrder": ["contacts", "deals", "activities"],
+    "objects": [
+      {
+        "id": "contacts",
+        "label": "Contacts",
+        "icon": "User",
+        "fields": [
+          { "id": "name",    "label": "Name",    "type": "text",  "required": true,  "showInSidebar": true },
+          { "id": "email",   "label": "Email",   "type": "email" },
+          { "id": "phone",   "label": "Phone",   "type": "phone" },
+          { "id": "company", "label": "Company", "type": "text" },
+          { "id": "source",  "label": "Source",  "type": "select", "options": ["Website", "Referral", "Walk-in", "Repeat customer", "Other"] },
+          { "id": "notes",   "label": "Notes",   "type": "longtext" }
+        ],
+        "views": [
+          {
+            "id": "all-contacts",
+            "label": "All contacts",
+            "kind": "table",
+            "isDefault": true,
+            "table": {
+              "columns": ["name", "email", "phone", "company", "source"],
+              "sortBy": { "field": "name", "direction": "asc" }
+            }
+          }
+        ]
+      },
+      {
+        "id": "deals",
+        "label": "Deals",
+        "icon": "Briefcase",
+        "fields": [
+          { "id": "name",     "label": "Deal name", "type": "text",     "required": true,  "showInSidebar": true },
+          { "id": "contact",  "label": "Contact",   "type": "relation", "relationTo": "contacts", "showInSidebar": true },
+          { "id": "amount",   "label": "Amount",    "type": "currency" },
+          { "id": "stage",    "label": "Stage",     "type": "select",   "required": true,  "options": ["Lead", "Qualified", "Quote sent", "Won", "Lost"], "showInSidebar": true },
+          { "id": "close_date","label": "Close date","type": "date" }
+        ],
+        "views": [
+          {
+            "id": "pipeline",
+            "label": "Pipeline",
+            "kind": "kanban",
+            "isDefault": true,
+            "kanban": {
+              "stageField": "stage",
+              "stages": ["Lead", "Qualified", "Quote sent", "Won", "Lost"],
+              "cardFields": ["contact", "amount", "close_date"],
+              "aggregate": { "field": "amount", "kind": "sum" }
+            }
+          },
+          {
+            "id": "all-deals",
+            "label": "All deals",
+            "kind": "table",
+            "isDefault": false,
+            "table": {
+              "columns": ["name", "contact", "amount", "stage", "close_date"],
+              "sortBy": { "field": "close_date", "direction": "desc" }
+            }
+          }
+        ]
+      },
+      {
+        "id": "activities",
+        "label": "Activities",
+        "icon": "Activity",
+        "fields": [
+          { "id": "subject",  "label": "Subject",   "type": "text",     "required": true,  "showInSidebar": true },
+          { "id": "kind",     "label": "Kind",      "type": "select",   "options": ["Call", "Email", "SMS", "Meeting", "Note"], "showInSidebar": true },
+          { "id": "contact",  "label": "Contact",   "type": "relation", "relationTo": "contacts" },
+          { "id": "occurred_at","label":"When",      "type": "datetime", "showInSidebar": true },
+          { "id": "body",     "label": "Notes",     "type": "longtext" }
+        ],
+        "views": [
+          {
+            "id": "timeline",
+            "label": "Timeline",
+            "kind": "table",
+            "isDefault": true,
+            "table": {
+              "columns": ["subject", "kind", "contact", "occurred_at"],
+              "sortBy": { "field": "occurred_at", "direction": "desc" }
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

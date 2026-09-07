@@ -1,0 +1,622 @@
+// ICP-3 (task 1.2) — stateless agent turn runner.
+//
+// WHY this exists: the production runtime `executeTurn` (runtime.ts) is the
+// canonical agent-brain loop, but it is DB-COUPLED — it loads a persisted
+// `agentConversations` row + an `agents` row and PERSISTS the user turn, the
+// assistant turn, conversation aggregates, and an activity row. The Agent
+// Builder needs to TEST a TEMPLATE (table `agent_templates`, no `agents` row, no
+// conversation) and the test MUST NOT persist anything or create real bookings.
+//
+// So this module lifts the SAME LLM↔tools loop out of executeTurn into a pure,
+// DB-free, dependency-injected function. It reuses the exact same building
+// blocks the production runtime uses — `composeSystemPrompt` (the channel-
+// agnostic brain: persona + soul + FAQ + pricing + hard-rules), the
+// `getToolsForCapabilities` / `findTool` tool registry, the same `MODEL`, the
+// same bounded Anthropic Messages-API message
+// shape. It does NOT re-implement prompt assembly or tool dispatch; it only
+// drops the persistence + budgeting + validator-regen layers that don't apply
+// to a throwaway sandbox turn.
+//
+// Sandboxing: the caller passes `testMode: true`, which flows into every tool's
+// `ToolExecuteContext`. Every write tool (book_appointment, escalate_to_human,
+// take_message) short-circuits on `ctx.testMode` and returns a synthetic result
+// with NO database write (see tools.ts). Read-only tools (look_up_availability)
+// still run, so the agent can demonstrate realistic behavior. Nothing here
+// imports `@/db` — there is no code path from this module to a mutation.
+//
+// The Anthropic client is INJECTED (not constructed here) so unit tests exercise
+// the loop with a fake client and never hit the network. The server action that
+// wraps this resolves the real client via `getAIClient` (the org's BYOK key).
+
+import type Anthropic from "@anthropic-ai/sdk";
+import type { OrgSoul } from "@/lib/soul/types";
+import type { AgentBlueprint, AgentToolCall, AgentToolResult } from "@/db/schema/agents";
+import { composeSystemPrompt } from "./prompt";
+import { sanitizeUnbackedOperationalPromises } from "./validators";
+import {
+  enforceExplicitConfirmation,
+  type PendingConfirmationAction,
+} from "./explicit-confirmation";
+import {
+  getToolsForCapabilities,
+  buildAvailabilityAssistantMessage,
+  type AgentTool,
+  type ToolExecuteContext,
+} from "./tools";
+import { resolveTurnModel } from "./runtime/turn-model";
+import {
+  cachedSystemBlocks,
+  cachedToolParams,
+  withMovingCacheBreakpoint,
+  serializeToolResultCapped,
+  capErrorText,
+  type LooseMessage,
+} from "./turn-token-economy";
+
+// Mirror runtime.ts exactly so a template test behaves like the live agent.
+const MODEL =
+  process.env.ANTHROPIC_AGENT_MODEL?.trim() || "claude-sonnet-4-5-20250929";
+const MAX_TURN_ITERATIONS = 3; // Studio sandbox loop cap per single turn
+const MAX_TOOL_CALLS = 4; // bounds multi-tool responses as well as loop retries
+const MAX_TOKENS = 1024;
+const TOOL_LOOP_LIMIT_MESSAGE =
+  "I couldn't complete that request right now. Please try again in a moment.";
+
+/** A chat message in a stateless turn. `tool_use` / `tool_result` blocks are
+ *  handled internally per-turn; the optional pending action is the small
+ *  structured exception needed to bind a later confirmation to one proposal. */
+export type StatelessChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+  /** Ephemeral Studio state: binds an affirmative to the exact pending action. */
+  pendingAction?: PendingConfirmationAction;
+};
+
+/** A surfaced tool call (name only is enough for the test panel's "checked
+ *  availability" note; input kept for richer display / debugging). */
+export type StatelessToolCall = {
+  name: string;
+  input: Record<string, unknown>;
+};
+
+/** One tool-dispatch event, fired at call-start and again at its result
+ *  (agent lifecycle slice, T5 — the supervised run's live action log DI
+ *  seam). `line` is a short, ALREADY-SUMMARIZED human line (tool name plus a
+ *  plain-language gloss) — never the raw input/output payload, so a caller
+ *  persisting these (e.g. supervised_runs.action_log) can never leak a
+ *  secret or a raw tool result. */
+export type StatelessToolEvent = {
+  tool: string;
+  phase: "start" | "result";
+  /** Present only on phase:"result" — whether the call succeeded. */
+  ok?: boolean;
+  line: string;
+};
+
+export type RunStatelessAgentTurnInput = {
+  /** Workspace identity — passed into ToolExecuteContext so read-only tools
+   *  (availability) resolve against the right workspace. */
+  orgId: string;
+  orgSlug: string;
+  /** Business display name for the persona ("You are the receptionist for …"). */
+  orgName: string;
+  /** Workspace soul (industry, services, voice, hours). May be null. */
+  soul: OrgSoul | null;
+  /** IANA timezone for temporal grounding + slot labels. */
+  timezone: string;
+  /** The TEMPLATE's blueprint (greeting / customSkillMd / faq / capabilities /
+   *  voice / pricingFacts). The brain is built from this verbatim. */
+  blueprint: AgentBlueprint;
+  /** Conversation so far (plain text turns). The latest user message is the
+   *  last element. */
+  messages: StatelessChatMessage[];
+  /** Whether to sandbox tool execution. Templates ALWAYS pass true. */
+  testMode: boolean;
+  /** Injected Anthropic client (resolved from the org's key by the caller; a
+   *  fake in tests). */
+  client: Anthropic;
+  /** Optional wall-clock override for temporal grounding (tests pin it). */
+  now?: Date;
+  /** Taste mode / cost-pinned callers: force THIS model for every iteration —
+   *  bypasses resolveTurnModel entirely (no adaptive/recovery escalation).
+   *  Absent => today's behavior. */
+  modelOverride?: string;
+  /** Replaces the default 1024 output cap when set. */
+  maxTokensOverride?: number;
+  /** Optional DI hook (agent lifecycle slice, T5) — invoked at each tool
+   *  call's start and again at its result, inside the existing dispatch
+   *  loop. Default no-op: every existing caller is byte-for-byte
+   *  unaffected. Never throws into the loop — a callback error is caught
+   *  and swallowed so a logging bug can never break a live agent turn. */
+  onToolEvent?: (event: StatelessToolEvent) => void;
+  /** Deterministic replay — Reelier phase 2c slice 1 (OBSERVE MODE ONLY,
+   *  2026-07-17). Optional DI hook that wraps ONE tool execute() call for
+   *  observation only (timing a real trace-record recorder builds from it —
+   *  see lib/deployments/replay/recorder.ts). MUST return whatever `run()`
+   *  resolves to, and MUST let whatever `run()` throws propagate unchanged —
+   *  this is a pure observation seam, never a place to alter turn behavior.
+   *  Default undefined: every existing caller (chat/voice/SMS/eval/template
+   *  test surfaces) takes the identical unwrapped path — this hook is only
+   *  ever passed by the email-dispatch seam, and only when
+   *  SF_DETERMINISTIC_REPLAY=1. */
+  wrapToolCall?: <T>(tool: string, args: unknown, run: () => Promise<T>) => Promise<T>;
+  /** H1 hotfix (2026-07-11) — forwarded to getToolsForCapabilities: when
+   *  true, every wrapped connector (MCP/vetted/byo AND composio) tool
+   *  executes as a synthetic no-op instead of calling the real
+   *  toolkit/API. Distinct from `testMode` (which only sandboxes SF's own
+   *  native write tools) — the eval harness sets this true; supervised-run
+   *  and every other caller leave it unset (real connector execution,
+   *  unchanged). Default false/undefined. */
+  sandboxConnectors?: boolean;
+  /** Email-agent slice (Part A2) — the operator's sent-mail voice profile
+   *  (Brain note `voice-profiles/email.md`), for an email-channel event/
+   *  schedule run. The caller (a DB-coupled deps builder) resolves it, since
+   *  this module stays DB-free; absent/null → no-op, byte-for-byte unchanged. */
+  voiceProfileNote?: string | null;
+};
+
+/**
+ * Fixed, secret-safe gloss for a failed tool call — used ONLY for the
+ * `onToolEvent` line (which a caller like the supervised-run action log
+ * (lib/agents/lifecycle/supervised-run.ts) PERSISTS durably). The raw
+ * `Error.message` from a thrown tool execution can carry a connector's raw
+ * response body, a stack fragment, or worse — a secret — so it must never
+ * reach a durable, operator-visible log (Wave 1 review, F3: "summarized,
+ * never secrets"). The detailed message still flows to the LLM via the
+ * `tool_result` content below (non-persisted, used only to help the model
+ * recover mid-turn).
+ */
+export function toolFailureGloss(toolName: string): string {
+  return `${toolName} failed`;
+}
+
+/** Common id-shaped field names, checked in order (F-F item 2 — the ACTION
+ *  lane's target/proof suffix). Best-effort, generic across tool shapes —
+ *  Composio result shapes vary by toolkit/action and aren't generically
+ *  introspectable beyond common conventions, so a toolkit whose result uses
+ *  an uncommon id field name simply gets no proof suffix (documented
+ *  limit, not a bug: the line still renders, just without the extra id). */
+const PROOF_FIELD_NAMES = [
+  "id",
+  "messageId",
+  "message_id",
+  "threadId",
+  "thread_id",
+  "eventId",
+  "event_id",
+  "recordId",
+  "record_id",
+  "bookingId",
+  "booking_id",
+  "uid",
+];
+
+/** A short id-like string can be at most this long to count as a "proof" —
+ *  guards against an id-named field actually smuggling a body/blob through
+ *  (the summarized/no-secrets rule — never a raw payload in the durable,
+ *  operator-visible action log). */
+const MAX_PROOF_LENGTH = 64;
+
+/**
+ * Extract a cheap, short target/proof id from a tool's raw result, for the
+ * supervised run's ACTION lane ("Sent — GMAIL_SEND_EMAIL_id: abc123").
+ * Shallow (top-level fields only), never recurses into nested objects, and
+ * only ever returns a short existing string — never a number coerced to
+ * string, never an object, never anything long enough to be a body rather
+ * than an id. Pure; never throws. Returns `undefined` when nothing
+ * id-shaped is found (the line still renders without a suffix).
+ */
+export function extractToolProof(output: unknown): string | undefined {
+  if (output == null || typeof output !== "object" || Array.isArray(output)) return undefined;
+  const record = output as Record<string, unknown>;
+  for (const field of PROOF_FIELD_NAMES) {
+    const value = record[field];
+    if (
+      typeof value === "string" &&
+      value.trim().length > 0 &&
+      value.length <= MAX_PROOF_LENGTH &&
+      // An id-named field carrying an email address or embedded whitespace
+      // is smuggling PII/free text through an "id" field, not a real short
+      // id — reject it rather than surface it in the operator-visible log.
+      !value.includes("@") &&
+      !/\s/.test(value)
+    ) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+/** Fires `onToolEvent` if provided, swallowing any error the callback
+ *  throws — a logging/observability bug must never break a live agent
+ *  turn's tool dispatch loop. */
+function emitToolEvent(
+  onToolEvent: ((event: StatelessToolEvent) => void) | undefined,
+  event: StatelessToolEvent,
+): void {
+  if (!onToolEvent) return;
+  try {
+    onToolEvent(event);
+  } catch {
+    // Never let a callback failure affect the turn loop.
+  }
+}
+
+export type RunStatelessAgentTurnResult =
+  | {
+      ok: true;
+      reply: string;
+      toolCalls: StatelessToolCall[];
+      pendingAction?: PendingConfirmationAction;
+    }
+  | { ok: false; reason: string; message: string };
+
+// The Anthropic Messages-API message shape (mirrors runtime.ts).
+type AnthropicMessage = {
+  role: "user" | "assistant";
+  content:
+    | string
+    | Array<
+        | { type: "text"; text: string }
+        | { type: "tool_use"; id: string; name: string; input: unknown }
+        | {
+            type: "tool_result";
+            tool_use_id: string;
+            content: string;
+            is_error?: boolean;
+          }
+      >;
+};
+
+/**
+ * Run ONE agent turn statelessly. Builds the system prompt from the blueprint
+ * (same composer as production), exposes the blueprint's tool allowlist, and
+ * loops LLM↔tools until `end_turn` or the iteration cap — identical to
+ * executeTurn's inner loop, minus all persistence. Returns the assistant's
+ * final text plus the tool calls it made (for the "checked availability" note).
+ *
+ * Pure aside from (a) the injected `client.messages.create` network call and
+ * (b) read-only tool `execute()` calls (which hit `listPublicBookingSlotsAction`
+ * in real use, but never mutate). No DB writes occur from this module.
+ */
+export async function runStatelessAgentTurn(
+  input: RunStatelessAgentTurnInput,
+): Promise<RunStatelessAgentTurnResult> {
+  const archetype = input.blueprint.archetype ?? "voice-receptionist";
+
+  const systemPrompt = await composeSystemPrompt({
+    orgName: input.orgName,
+    soul: input.soul as Parameters<typeof composeSystemPrompt>[0]["soul"],
+    blueprint: input.blueprint,
+    archetype,
+    testMode: input.testMode,
+    now: input.now ?? new Date(),
+    timezone: input.timezone || "UTC",
+    voiceProfileNote: input.voiceProfileNote,
+  });
+
+  // Same seam as production: native (capability-filtered) tools plus any MCP
+  // connector tools bound on the template's blueprint. Templates rarely bind
+  // connectors, so this is usually the identical native list; when they do, the
+  // sandbox exercises them too (the bearer is read from the workspace's
+  // encrypted store via the default deps). orgId threads the secret lookup.
+  const tools = await getToolsForCapabilities(input.blueprint.capabilities, {
+    orgId: input.orgId,
+    connectors: input.blueprint.connectors,
+    sandboxConnectors: input.sandboxConnectors,
+  });
+
+  // Seed the messages array from the plain-text chat history.
+  const messages: AnthropicMessage[] = input.messages.map((m) => ({
+    role: m.role,
+    content: m.content,
+  }));
+
+  // Adaptive per-turn model (execution-side mirror of the author path): spend the
+  // premium model only on HARD turns, stay on the cheap MODEL otherwise. Signals
+  // are derived from the in-scope context — the latest user message, the resolved
+  // tool allowlist (so a write/booking/escalate tool bumps to premium), and the
+  // turn position. `priorToolError` is recomputed inside the loop so a recovery
+  // iteration (after a failed tool call) also escalates. Fail-soft: resolveTurnModel
+  // never throws — any oddity → MODEL. Honors SF_ADAPTIVE_RUNTIME_MODEL=off.
+  const lastUserMessage = [...input.messages].reverse().find((m) => m.role === "user")
+    ?.content;
+  const toolNamesAvailable = tools.map((t) => t.name);
+  let priorToolError = false;
+
+  const allToolCalls: StatelessToolCall[] = [];
+  const runtimeToolCalls: AgentToolCall[] = [];
+  const runtimeToolResults: AgentToolResult[] = [];
+  const latestAssistantMessage = [...input.messages]
+    .reverse()
+    .find((message) => message.role === "assistant");
+  let pendingAction = latestAssistantMessage?.pendingAction ?? null;
+  let confirmationConsumed = false;
+  let stateChangeSucceeded = false;
+  let deterministicAvailabilityReply: string | null = null;
+  let toolBudgetExhausted = false;
+  let finalText = "";
+
+  turnLoop: for (let iter = 0; iter < MAX_TURN_ITERATIONS; iter++) {
+    const turnModel = input.modelOverride ?? resolveTurnModel({
+      userMessage: lastUserMessage,
+      toolNamesAvailable,
+      priorToolError,
+      turnIndex: input.messages.length,
+      defaultModel: MODEL,
+    });
+    let response: Anthropic.Messages.Message;
+    try {
+      // Token economy (2026-07-16): system + tools are static across the loop
+      // → one cache breakpoint each; the moving breakpoint on the last message
+      // block makes iteration N+1's growing prefix a cache READ instead of
+      // full-price input. Three markers total (≤ the API's limit of 4).
+      response = await input.client.messages.create({
+        model: turnModel,
+        max_tokens: input.maxTokensOverride ?? MAX_TOKENS,
+        system: cachedSystemBlocks(systemPrompt) as Anthropic.Messages.MessageCreateParams["system"],
+        tools: cachedToolParams(
+          tools.map((t) => ({
+            name: t.name,
+            description: t.description,
+            input_schema: t.jsonSchema as Anthropic.Messages.Tool.InputSchema,
+          })),
+        ) as Anthropic.Messages.ToolUnion[],
+        messages: withMovingCacheBreakpoint(
+          messages as LooseMessage[],
+        ) as Anthropic.Messages.MessageParam[],
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      // Test sandbox → surface the real diagnostic (operator is debugging
+      // their own template, not a customer). Mirrors runtime.ts test-mode.
+      return {
+        ok: false,
+        reason: "llm_error",
+        message: `[runtime error] ${detail.slice(0, 300)}`,
+      };
+    }
+
+    const textBlocks: string[] = [];
+    const toolUseBlocks: Array<{ id: string; name: string; input: unknown }> =
+      [];
+    for (const block of response.content) {
+      if (block.type === "text") {
+        textBlocks.push(block.text);
+      } else if (block.type === "tool_use") {
+        toolUseBlocks.push({
+          id: block.id,
+          name: block.name,
+          input: block.input,
+        });
+      }
+    }
+
+    if (textBlocks.length > 0) {
+      finalText = textBlocks.join("\n");
+    }
+
+    if (response.stop_reason === "end_turn" || toolUseBlocks.length === 0) {
+      break;
+    }
+
+    // Append the assistant's tool-call message (mid-turn).
+    messages.push({
+      role: "assistant",
+      content: response.content as AnthropicMessage["content"],
+    });
+
+    // Execute each tool through the SAME registry + ToolExecuteContext the
+    // production runtime uses — with testMode set, so writes are sandboxed.
+    const toolResultsForThisIter: Array<{
+      type: "tool_result";
+      tool_use_id: string;
+      content: string;
+      is_error?: boolean;
+    }> = [];
+    for (const tu of toolUseBlocks) {
+      if (stateChangeSucceeded) break;
+      if (allToolCalls.length >= MAX_TOOL_CALLS) {
+        toolBudgetExhausted = true;
+        break;
+      }
+      const gatedInput = enforceExplicitConfirmation(
+        tu.name,
+        tu.input,
+        lastUserMessage,
+        pendingAction,
+        confirmationConsumed,
+      );
+      allToolCalls.push({
+        name: tu.name,
+        input: (gatedInput as Record<string, unknown>) ?? {},
+      });
+      runtimeToolCalls.push({
+        id: tu.id,
+        name: tu.name,
+        input: (gatedInput as Record<string, unknown>) ?? {},
+      });
+      emitToolEvent(input.onToolEvent, { tool: tu.name, phase: "start", line: `Calling ${tu.name}…` });
+      // Resolve across the built tool set (natives + any wrapped MCP tools),
+      // matching production's dispatch. Native-only templates resolve exactly as
+      // the prior findTool lookup did.
+      const tool = tools.find((t) => t.name === tu.name);
+      if (!tool) {
+        runtimeToolResults.push({
+          toolCallId: tu.id,
+          ok: false,
+          error: `Unknown tool: ${tu.name}`,
+        });
+        toolResultsForThisIter.push({
+          type: "tool_result",
+          tool_use_id: tu.id,
+          content: `Error: unknown tool ${tu.name}`,
+          is_error: true,
+        });
+        emitToolEvent(input.onToolEvent, {
+          tool: tu.name,
+          phase: "result",
+          ok: false,
+          line: `${tu.name} failed: unknown tool`,
+        });
+        continue;
+      }
+      const parsed = tool.inputSchema.safeParse(gatedInput);
+      if (!parsed.success) {
+        runtimeToolResults.push({
+          toolCallId: tu.id,
+          ok: false,
+          error: `Input validation failed: ${parsed.error.message}`,
+        });
+        toolResultsForThisIter.push({
+          type: "tool_result",
+          tool_use_id: tu.id,
+          content: `Error: ${parsed.error.message}`,
+          is_error: true,
+        });
+        emitToolEvent(input.onToolEvent, {
+          tool: tu.name,
+          phase: "result",
+          ok: false,
+          line: `${tu.name} failed: invalid input`,
+        });
+        continue;
+      }
+      const ctx: ToolExecuteContext = {
+        orgId: input.orgId,
+        orgSlug: input.orgSlug,
+        // No real agent row in a template test — use a stable sentinel.
+        agentId: "template-test",
+        conversationId: "template-test",
+        // Sandbox: write tools return synthetic results, no DB writes.
+        testMode: input.testMode,
+        timezone: input.timezone || undefined,
+      };
+      try {
+        const runExecute = () =>
+          (tool as AgentTool<unknown, unknown>).execute(parsed.data, ctx);
+        const output = input.wrapToolCall
+          ? await input.wrapToolCall(tu.name, parsed.data, runExecute)
+          : await runExecute();
+        if (tu.name === "look_up_availability") {
+          const availabilityReply = buildAvailabilityAssistantMessage(output);
+          if (availabilityReply) {
+            deterministicAvailabilityReply = availabilityReply;
+          }
+        }
+        if (
+          output &&
+          typeof output === "object" &&
+          (output as { needsConfirmation?: unknown }).needsConfirmation === true
+        ) {
+          pendingAction = {
+            toolName: tu.name,
+            input: { ...((gatedInput as Record<string, unknown>) ?? {}), confirmed: false },
+          };
+        } else if (
+          tu.name === "book_appointment" ||
+          tu.name === "reschedule_appointment" ||
+          tu.name === "cancel_appointment"
+        ) {
+          const outputRecord = output && typeof output === "object"
+            ? (output as { ok?: unknown })
+            : null;
+          if (outputRecord?.ok === true) {
+            confirmationConsumed = true;
+            pendingAction = null;
+            stateChangeSucceeded = true;
+          }
+        }
+        runtimeToolResults.push({ toolCallId: tu.id, ok: true, output });
+        toolResultsForThisIter.push({
+          type: "tool_result",
+          tool_use_id: tu.id,
+          // Hard-capped (token economy, 2026-07-16): an unbounded connector
+          // payload (e.g. GMAIL_FETCH_EMAILS) must never ride the loop at
+          // full size — it gets re-sent every remaining iteration.
+          content: serializeToolResultCapped(output),
+        });
+        // F-F item 2 — a short target/proof suffix when the result has a
+        // cheap id field (never the raw payload; extractToolProof caps
+        // length and only reads top-level string fields).
+        const proof = extractToolProof(output);
+        emitToolEvent(input.onToolEvent, {
+          tool: tu.name,
+          phase: "result",
+          ok: true,
+          line: proof ? `${tu.name} succeeded (${proof}).` : `${tu.name} succeeded.`,
+        });
+        if (deterministicAvailabilityReply) break;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        runtimeToolResults.push({ toolCallId: tu.id, ok: false, error: message });
+        // The raw `message` stays ONLY in this non-persisted tool_result
+        // content — it's fed back to the LLM within THIS turn to help it
+        // recover, and is never itself written to a durable store. The
+        // onToolEvent `line` below, which a caller may persist (e.g. the
+        // supervised run's durable action_log), gets the fixed gloss
+        // instead (Wave 1 review, F3 — "summarized, never secrets").
+        toolResultsForThisIter.push({
+          type: "tool_result",
+          tool_use_id: tu.id,
+          // Capped: connector errors can embed whole upstream response bodies.
+          content: `Error: ${capErrorText(message)}`,
+          is_error: true,
+        });
+        emitToolEvent(input.onToolEvent, {
+          tool: tu.name,
+          phase: "result",
+          ok: false,
+          line: toolFailureGloss(tu.name),
+        });
+      }
+    }
+
+    if (deterministicAvailabilityReply) {
+      finalText = deterministicAvailabilityReply;
+      break turnLoop;
+    }
+    if (toolBudgetExhausted) {
+      finalText = TOOL_LOOP_LIMIT_MESSAGE;
+      break turnLoop;
+    }
+
+    if (stateChangeSucceeded) {
+      const successfulTool = allToolCalls[allToolCalls.length - 1]?.name;
+      finalText =
+        successfulTool === "book_appointment"
+          ? "Your appointment was booked."
+          : successfulTool === "reschedule_appointment"
+            ? "Your appointment was rescheduled."
+            : successfulTool === "cancel_appointment"
+              ? "Your appointment was canceled."
+              : finalText;
+      break turnLoop;
+    }
+
+    // Did any tool in this iteration error? If so, the NEXT iteration is a
+    // recovery turn → escalate it to the premium model via resolveTurnModel.
+    priorToolError = toolResultsForThisIter.some((r) => r.is_error === true);
+
+    messages.push({ role: "user", content: toolResultsForThisIter });
+
+    if (iter === MAX_TURN_ITERATIONS - 1) {
+      finalText = TOOL_LOOP_LIMIT_MESSAGE;
+      break turnLoop;
+    }
+  }
+
+  return {
+    ok: true,
+    reply: sanitizeUnbackedOperationalPromises(
+      finalText,
+      runtimeToolCalls,
+      runtimeToolResults,
+    ),
+    toolCalls: allToolCalls,
+    ...(pendingAction ? { pendingAction } : {}),
+  };
+}
+
+// Re-export the AgentToolCall type for callers that want the canonical shape.
+export type { AgentToolCall };

@@ -1,0 +1,489 @@
+"use client";
+
+import Link from "next/link";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { Check, Command, ChevronsUpDown, Menu, Moon, Search, Sun } from "lucide-react";
+import { useTheme } from "next-themes";
+import { usePathname } from "next/navigation";
+import { useLabels } from "@/lib/hooks/use-labels";
+import { signOutAllSessionsAction } from "@/lib/auth/actions";
+import { NotificationsBell } from "@/components/layout/notifications-bell";
+import posthog from "posthog-js";
+import type { NotificationItem } from "@/lib/notifications/feed";
+
+/*
+  Square UI class reference (source of truth):
+  - templates/dashboard-2/components/dashboard/header.tsx
+    - header shell: "flex items-center gap-2 sm:gap-3 px-3 sm:px-6 py-3 sm:py-4 border-b bg-card sticky top-0 z-10 w-full"
+    - title: "text-base sm:text-lg font-medium flex-1 truncate"
+    - search shell: "hidden md:block relative"
+    - search icon: "absolute left-3 top-1/2 -translate-y-1/2 size-5 text-muted-foreground"
+    - input shell: "pl-10 pr-14 w-[180px] lg:w-[220px] h-9 bg-card border"
+*/
+
+const staticTitleMap: Record<string, string> = {
+  // 2026-06-20 — six-noun nav: page titles aligned to the renamed nav
+  // nouns. Home (was Dashboard), Agents (was Automations), Inbox (the
+  // Conversations page), Money (the Deals page — handled in getTitle so
+  // it still respects soul labels). /emails stays "Messaging" to match
+  // its Inbox sub-item label.
+  "/dashboard": "Home",
+  "/seldon": "Seldon It",
+  "/orgs": "Organizations",
+  "/bookings": "Booking",
+  // 2026-05-17 — "/landing" page title kept out of the map since the
+  // nav item is gone. Existing /landing pages still render (no route
+  // deletion) but they aren't a first-class workspace surface anymore.
+  "/emails": "Messaging",
+  "/conversations": "Inbox",
+  // ICP-3 — "Agents" noun is the Agent Builder (/studio/agents); the legacy
+  // catalog at /automations is now titled "Automations".
+  "/studio/agents": "Agents",
+  "/automations": "Automations",
+  "/proposals": "Proposals",
+  "/hub": "Hub",
+  "/settings": "Settings",
+  "/clients/new": "New Client",
+};
+
+function getTitle(pathname: string, labels: ReturnType<typeof useLabels>) {
+  if (pathname === "/contacts") {
+    return labels.contact.plural;
+  }
+
+  if (pathname === "/deals") {
+    return labels.deal.plural;
+  }
+
+  if (pathname === "/bookings") {
+    return "Booking";
+  }
+
+  if (pathname === "/forms") {
+    return labels.intakeForm.plural;
+  }
+
+  if (pathname === "/activities") {
+    return labels.activity.plural;
+  }
+
+  if (pathname === "/settings/profile") {
+    return "Business Profile";
+  }
+
+  if (pathname === "/settings/pipeline") {
+    return "Pipeline Settings";
+  }
+
+  if (pathname === "/settings/fields") {
+    return "Custom Fields";
+  }
+
+  if (pathname === "/settings/team") {
+    return "Team";
+  }
+
+  if (pathname === "/settings/webhooks") {
+    return "Webhook Endpoints";
+  }
+
+  if (pathname === "/settings/api") {
+    return "API Keys";
+  }
+
+  if (pathname === "/settings/payments") {
+    return "Payments";
+  }
+
+  if (pathname === "/settings/billing") {
+    return "Billing";
+  }
+
+  if (pathname === "/settings/integrations/kit") {
+    return "Kit Integration";
+  }
+
+  if (pathname === "/settings/soul-transfer") {
+    return "Soul Export / Import";
+  }
+
+  if (pathname.startsWith("/contacts/")) {
+    return labels.contact.singular;
+  }
+
+  if (pathname.startsWith("/deals/")) {
+    return labels.deal.singular;
+  }
+
+  if (pathname.startsWith("/forms/")) {
+    return labels.intakeForm.plural;
+  }
+
+  if (pathname.startsWith("/landing/")) {
+    return "Pages";
+  }
+
+  if (pathname.startsWith("/settings/")) {
+    return "Settings";
+  }
+
+  return staticTitleMap[pathname] ?? "Dashboard";
+}
+
+export function DashboardTopbar({
+  userName,
+  userEmail,
+  avatarFallback,
+  workspaceName,
+  activeWorkspaceId,
+  workspaceOptions,
+  switchWorkspaceAction,
+  isOperatorSession = false,
+  notifications = [],
+  primaryOrgId = null,
+}: {
+  userName: string;
+  userEmail: string;
+  avatarFallback: string;
+  canAccessSeldon: boolean;
+  workspaceName: string;
+  activeWorkspaceId: string | null;
+  workspaceOptions: Array<{ id: string; name: string; slug: string; contactCount: number; soulId: string | null }>;
+  switchWorkspaceAction: (formData: FormData) => void | Promise<void>;
+  /** v1.25.3 — operator session: hide Docs link (SF developer docs).
+   *  Their support comes from their agency, not SF documentation. */
+  isOperatorSession?: boolean;
+  /** 2026-05-17 — pre-fetched notification feed from the dashboard
+   *  layout. Empty array hides the unread badge and shows "all caught
+   *  up". */
+  notifications?: NotificationItem[];
+  /** 2026-05-17 — agency's primary workspace id, used to mark the
+   *  "YOUR AGENCY" row in the dropdown and to route the agency's own
+   *  workspace flip to /dashboard (not the Ready hub, which is
+   *  meaningless for the agency's own workspace). */
+  primaryOrgId?: string | null;
+}) {
+  const pathname = usePathname();
+  const labels = useLabels();
+  const title = getTitle(pathname, labels);
+  const { theme, setTheme } = useTheme();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  // 2026-07-07 — fixed-position anchors for the portaled dropdowns below.
+  // See the portal note near their render sites: both popovers are
+  // portaled to document.body because the sticky topbar's z-index +
+  // backdrop-blur trap their z-30 panels inside a stacking context that
+  // the sticky command bar (z-20) paints over. Same fix as
+  // notifications-bell.tsx.
+  const [menuAnchor, setMenuAnchor] = useState<{ top: number; right: number } | null>(null);
+  const [workspaceMenuAnchor, setWorkspaceMenuAnchor] = useState<{ top: number; right: number } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const workspaceMenuRef = useRef<HTMLDivElement>(null);
+  const workspaceMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const workspaceIdBySlug = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const workspace of workspaceOptions) {
+      map[workspace.slug] = workspace.id;
+    }
+    return map;
+  }, [workspaceOptions]);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      const target = event.target as Node;
+      // The popover is portaled to document.body, so menuRef (on the
+      // portaled panel) and menuButtonRef (on the trigger) must both be
+      // checked — neither is an ancestor of the other anymore.
+      if (menuRef.current?.contains(target)) return;
+      if (menuButtonRef.current?.contains(target)) return;
+      setMenuOpen(false);
+    }
+
+    if (menuOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [menuOpen]);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      const target = event.target as Node;
+      if (workspaceMenuRef.current?.contains(target)) return;
+      if (workspaceMenuButtonRef.current?.contains(target)) return;
+      setWorkspaceMenuOpen(false);
+    }
+
+    if (workspaceMenuOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [workspaceMenuOpen]);
+
+  // Reposition the portaled popovers under their triggers on
+  // scroll/resize, mirroring notifications-bell.tsx.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const position = () => {
+      const btn = menuButtonRef.current;
+      if (!btn) return;
+      const rect = btn.getBoundingClientRect();
+      setMenuAnchor({
+        top: rect.bottom + 8,
+        right: Math.max(8, window.innerWidth - rect.right),
+      });
+    };
+    position();
+    window.addEventListener("resize", position);
+    window.addEventListener("scroll", position, true);
+    return () => {
+      window.removeEventListener("resize", position);
+      window.removeEventListener("scroll", position, true);
+    };
+  }, [menuOpen]);
+
+  useEffect(() => {
+    if (!workspaceMenuOpen) return;
+    const position = () => {
+      const btn = workspaceMenuButtonRef.current;
+      if (!btn) return;
+      const rect = btn.getBoundingClientRect();
+      setWorkspaceMenuAnchor({
+        top: rect.bottom + 8,
+        right: Math.max(8, window.innerWidth - rect.right),
+      });
+    };
+    position();
+    window.addEventListener("resize", position);
+    window.addEventListener("scroll", position, true);
+    return () => {
+      window.removeEventListener("resize", position);
+      window.removeEventListener("scroll", position, true);
+    };
+  }, [workspaceMenuOpen]);
+
+  return (
+    <header className="sticky top-0 z-10 flex w-full items-center gap-2 rounded-2xl border border-border/80 bg-card/88 px-3 py-3 shadow-(--shadow-xs) backdrop-blur-xl sm:gap-3 sm:px-5 sm:py-4">
+      <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-3">
+        <button
+          type="button"
+          className="crm-topbar-icon-btn flex h-11 w-11 items-center justify-center md:hidden"
+          aria-label="Open navigation menu"
+          onClick={() => window.dispatchEvent(new CustomEvent("crm:mobile-sidebar-open"))}
+        >
+          <Menu className="h-5 w-5" />
+        </button>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-base font-semibold tracking-tight sm:text-lg">{title}</p>
+          <p className="truncate text-xs text-muted-foreground">Stay focused on the current client workspace.</p>
+        </div>
+      </div>
+
+      <div className="relative hidden shrink-0 lg:block">
+        <button
+          ref={workspaceMenuButtonRef}
+          type="button"
+          onClick={() => {
+            setWorkspaceMenuOpen((current) => {
+              const next = !current;
+              if (next) {
+                // Anchor synchronously so the portaled panel's first
+                // render is already positioned (no flash before the
+                // reposition effect runs).
+                const btn = workspaceMenuButtonRef.current;
+                if (btn) {
+                  const rect = btn.getBoundingClientRect();
+                  setWorkspaceMenuAnchor({
+                    top: rect.bottom + 8,
+                    right: Math.max(8, window.innerWidth - rect.right),
+                  });
+                }
+              }
+              return next;
+            });
+          }}
+          className="flex h-10 min-w-[240px] items-center gap-3 rounded-xl border border-border/80 bg-background/80 px-3 text-left shadow-(--shadow-xs) transition-all hover:border-border hover:bg-background"
+        >
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium text-foreground">{workspaceName}</p>
+            <p className="truncate text-[11px] text-muted-foreground">Switch client workspace</p>
+          </div>
+          <ChevronsUpDown className="size-4 text-muted-foreground" />
+        </button>
+
+        {workspaceMenuOpen && typeof document !== "undefined"
+          ? createPortal(
+              <div
+                ref={workspaceMenuRef}
+                style={{
+                  position: "fixed",
+                  top: workspaceMenuAnchor?.top ?? 0,
+                  right: workspaceMenuAnchor?.right ?? 0,
+                }}
+                className="z-[60] w-[320px] rounded-2xl border border-border/80 bg-card/96 p-2.5 shadow-(--shadow-dropdown) backdrop-blur-xl"
+              >
+                <p className="px-2 pb-1 text-[10px] font-semibold tracking-[0.16em] text-muted-foreground/80">YOUR WORKSPACES</p>
+                <div className="space-y-1">
+                  {/* 2026-05-17 — see sidebar.tsx for the rationale on
+                      switching from <form action={switchWorkspaceAction}>
+                      to plain Links targeting /switch-workspace?to=…&next=…
+                      TL;DR: onClick closes the menu (popover unmounts)
+                      BEFORE the form's server action dispatch completes,
+                      so the switch silently never happened. */}
+                  {workspaceOptions.map((workspace) => {
+                    const isPrimaryAgencyOrg = workspace.id === primaryOrgId;
+                    const nextPath = isPrimaryAgencyOrg
+                      ? "/dashboard"
+                      : `/clients/${workspace.slug}/ready`;
+                    const href = `/switch-workspace?to=${encodeURIComponent(workspace.id)}&next=${encodeURIComponent(nextPath)}`;
+                    return (
+                      // 2026-05-17 — plain <a> not <Link>: see sidebar.tsx
+                      // for the rationale. TL;DR — soft navigation keeps
+                      // the cached layout chrome so the new workspace name
+                      // doesn't appear in the sidebar/topbar until refresh.
+                      // <a> forces a hard navigation that re-renders the
+                      // layout with the new cookie applied.
+                      <a
+                        key={workspace.id}
+                        href={href}
+                        className="crm-pressable flex w-full items-start gap-2 rounded-xl px-2.5 py-2.5 text-left transition-[background-color,transform] duration-150 ease-out hover:bg-accent/60"
+                        onClick={() => setWorkspaceMenuOpen(false)}
+                      >
+                        <span className="mt-0.5 inline-flex size-4 items-center justify-center text-primary">
+                          {activeWorkspaceId === workspace.id ? <Check className="size-3.5" /> : null}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-medium text-foreground">
+                            {workspace.name}
+                            {isPrimaryAgencyOrg ? (
+                              <span className="ml-1.5 inline-flex items-center rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 align-middle text-[9px] font-semibold tracking-[0.08em] text-emerald-700 dark:text-emerald-300">
+                                YOUR AGENCY
+                              </span>
+                            ) : null}
+                          </span>
+                          <span className="block truncate text-xs text-muted-foreground">{workspace.contactCount.toLocaleString()} clients · {workspace.soulId ? workspace.soulId.charAt(0).toUpperCase() + workspace.soulId.slice(1) : "Custom"}</span>
+                        </span>
+                      </a>
+                    );
+                  })}
+                </div>
+              </div>,
+              document.body,
+            )
+          : null}
+      </div>
+
+      <div className="relative mx-auto hidden flex-1 md:block md:max-w-[320px]">
+        <button
+          type="button"
+          className="crm-topbar-input h-9 w-full pl-10 pr-14 text-left text-sm text-muted-foreground"
+          onClick={() => window.dispatchEvent(new CustomEvent("crm:command-palette-toggle", { detail: { open: true } }))}
+        >
+          Search Anything...
+        </button>
+        <Search className="absolute left-3 top-1/2 size-5 -translate-y-1/2 text-muted-foreground" />
+        <span className="absolute right-2 top-1/2 inline-flex -translate-y-1/2 items-center gap-0.5 rounded-md border border-border bg-background/80 px-1.5 py-0.5 text-xs text-muted-foreground shadow-(--shadow-xs)">
+          <Command className="size-3" />
+          <span>K</span>
+        </span>
+      </div>
+
+      <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-2">
+        {/* v1.25.3 — Docs link is for SF builders. Hidden for
+            operator sessions. */}
+        {!isOperatorSession ? (
+          <Link
+            href="/docs"
+            className="hidden h-9 items-center rounded-xl border border-border/80 bg-background/70 px-3 text-sm font-medium text-muted-foreground shadow-(--shadow-xs) transition hover:border-border hover:bg-background hover:text-foreground lg:inline-flex"
+          >
+            Docs
+          </Link>
+        ) : null}
+
+        <button type="button" className="crm-topbar-icon-btn" aria-label="Toggle theme" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+          {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+        </button>
+
+        <NotificationsBell
+          items={notifications}
+          switchWorkspaceAction={switchWorkspaceAction}
+          activeWorkspaceId={activeWorkspaceId}
+          workspaceIdBySlug={workspaceIdBySlug}
+        />
+
+        <div className="relative">
+          <button
+            ref={menuButtonRef}
+            type="button"
+            onClick={() => {
+              setMenuOpen((current) => {
+                const next = !current;
+                if (next) {
+                  // Anchor synchronously — see the workspace switcher
+                  // toggle above for the rationale.
+                  const btn = menuButtonRef.current;
+                  if (btn) {
+                    const rect = btn.getBoundingClientRect();
+                    setMenuAnchor({
+                      top: rect.bottom + 8,
+                      right: Math.max(8, window.innerWidth - rect.right),
+                    });
+                  }
+                }
+                return next;
+              });
+            }}
+            className="crm-topbar-icon-btn h-9 w-9 text-xs font-semibold"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            aria-label="User menu"
+          >
+            {avatarFallback}
+          </button>
+
+          {menuOpen && typeof document !== "undefined"
+            ? createPortal(
+                <div
+                  ref={menuRef}
+                  style={{ position: "fixed", top: menuAnchor?.top ?? 0, right: menuAnchor?.right ?? 0 }}
+                  className="z-[60] w-56 rounded-2xl border border-border/80 bg-card/96 p-2 shadow-(--shadow-dropdown) backdrop-blur-xl sm:w-64"
+                  role="menu"
+                >
+                  <div className="px-2 py-2">
+                    <p className="truncate text-sm font-medium text-foreground">{userName}</p>
+                    <p className="truncate text-xs text-muted-foreground">{userEmail}</p>
+                  </div>
+                  <div className="my-1 h-px bg-border" />
+                  <Link
+                    href="/settings"
+                    className="block rounded-xl px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent/70 hover:text-foreground"
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Settings
+                  </Link>
+                  <form action={signOutAllSessionsAction} onSubmit={() => posthog.reset()}>
+                    <button
+                      type="submit"
+                      className="w-full rounded-xl px-2.5 py-2 text-left text-sm text-muted-foreground transition-colors hover:bg-accent/70 hover:text-foreground"
+                    >
+                      Log out
+                    </button>
+                  </form>
+                </div>,
+                document.body,
+              )
+            : null}
+        </div>
+
+        <span className="hidden text-label text-foreground xl:inline">{userName}</span>
+      </div>
+    </header>
+  );
+}

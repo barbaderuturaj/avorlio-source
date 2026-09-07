@@ -1,0 +1,1256 @@
+"use server";
+
+import { randomUUID } from "node:crypto";
+import bcrypt from "bcryptjs";
+import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { cookies } from "next/headers";
+import { headers } from "next/headers";
+import { redirect } from "next/navigation";
+import { auth } from "@/auth";
+import { db } from "@/db";
+import { contacts, orgMembers, organizations, partnerAgencies, users } from "@/db/schema";
+import { getOrgFeatures, normalizeTierId } from "@/lib/billing/features";
+import { enforceWorkspaceLimit, maxFullWorkspacesForTier } from "@/lib/billing/limits";
+import { assertWritable } from "@/lib/demo/server";
+import { getPlan } from "@/lib/billing/plans";
+import { getOrgSubscription } from "@/lib/billing/subscription";
+import { getOwnedWorkspaceCount } from "@/lib/web-onboarding/owned-workspace-count";
+import { installSoul, type FrameworkConfig } from "@/lib/soul/install";
+import { seedInitialBlocks } from "@/lib/soul-compiler/blocks";
+import type { SoulV4 } from "@/lib/soul-compiler/schema";
+import { mintWorkspaceToken } from "@/lib/auth/workspace-token";
+import {
+  ADMIN_TOKEN_SENTINEL_USER_ID,
+  resolveAdminTokenContext,
+} from "@/lib/auth/admin-token";
+import { logEvent } from "@/lib/observability/log";
+
+const FREE_WORKSPACE_ALLOWANCE = 1;
+
+/**
+ * v1.25.2 — synthetic session ids (admin-token sentinel, operator-
+ * portal session) carry recognizable string prefixes that aren't
+ * valid uuids. Postgres rejects them at the column-type level with
+ * 22P02 "invalid input syntax for type uuid". Use this guard before
+ * passing user ids into queries that compare against uuid columns.
+ *
+ * Pattern from RFC 4122: 8-4-4-4-12 hex with hyphens.
+ */
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isUuidShape(value: string | null | undefined): boolean {
+  return typeof value === "string" && UUID_SHAPE.test(value);
+}
+
+function slugify(value: string) {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 48);
+}
+
+async function requireBillingUser() {
+  const session = await auth();
+
+  if (session?.user?.id) {
+    return getBillingUserById(session.user.id);
+  }
+
+  // v1.1.5 / Issue #9 — admin-token sessions don't have a backing
+  // users row. Synthesize a billing-user from the workspace's
+  // organizations row (plan + subscriptionStatus live there for
+  // workspace-scoped billing) so the dashboard layout, /settings, and
+  // anything else that calls requireBillingUser() doesn't 401 the
+  // operator out of their own workspace just because they entered via
+  // the admin-token URL instead of NextAuth.
+  const adminCtx = await resolveAdminTokenContext();
+  if (adminCtx?.orgId) {
+    return getBillingUserForAdminTokenOrg(adminCtx.orgId);
+  }
+
+  // contract:throw-ok: requireBillingUser is only reached AFTER
+  // requireAuth has confirmed an authenticated session; no-session +
+  // no-admin-token here is a programmer error (caller forgot to
+  // requireAuth first). The throw is the right signal to fix the
+  // caller. End-user-reachable callers all redirect to /login first.
+  throw new Error("Unauthorized");
+}
+
+async function getBillingUserById(userId: string) {
+  if (!userId) {
+    // contract:throw-ok: empty userId is a programmer-error guard.
+    // All call sites pass a session.user.id which is non-empty when
+    // the session exists. Reaching this branch with empty string
+    // means the caller didn't check auth — a bug at the call site.
+    throw new Error("Unauthorized");
+  }
+
+  // v1.1.5 / Issue #9 — when callers pass the admin-token sentinel
+  // user.id (e.g. from `getCurrentUser()` returning the synthetic
+  // session), short-circuit to the workspace-backed billing user so
+  // we don't 401 on a UUID that intentionally doesn't exist in users.
+  if (userId === ADMIN_TOKEN_SENTINEL_USER_ID) {
+    const adminCtx = await resolveAdminTokenContext();
+    if (adminCtx?.orgId) {
+      return getBillingUserForAdminTokenOrg(adminCtx.orgId);
+    }
+    // contract:throw-ok: admin-token sentinel id should ALWAYS come
+    // with an admin-token cookie — this branch is unreachable in
+    // normal flow. Stale cookie or programmer-error bypass.
+    throw new Error("Unauthorized");
+  }
+
+  const [dbUser] = await db
+    .select({
+      id: users.id,
+      orgId: users.orgId,
+      planId: users.planId,
+      stripeSubscriptionId: users.stripeSubscriptionId,
+      subscriptionStatus: users.subscriptionStatus,
+      name: users.name,
+      email: users.email,
+    })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+
+  if (!dbUser) {
+    // v1.7.3 — session has a user.id but the users row doesn't exist
+    // (NextAuth Drizzle-adapter race? failed insert? imported user
+    // from a different deployment?). Pre-1.7.3 this threw
+    // "Unauthorized" and crashed every server-component that touched
+    // billing — including /dashboard, which then showed the
+    // unhelpful "This page couldn't load" frontend error.
+    //
+    // The right behavior is to treat this as "user exists in session,
+    // but has no workspace state yet" — return a synthesized record
+    // with no orgId/plan so downstream code (dashboard layout, page,
+    // settings) renders an empty state instead of crashing.
+    // listManagedOrganizations + getOwnedWorkspaceCount return []/0
+    // for these synthesized users, so the empty state ("no workspaces
+    // yet — create one or claim an existing one") triggers naturally.
+    console.warn(
+      `[billing/orgs] Session user.id=${userId} not found in users table — returning synthesized empty record. If this persists, the Drizzle NextAuth adapter may have failed to insert the user; check sign-in logs.`,
+    );
+    return {
+      id: userId,
+      orgId: null,
+      planId: null,
+      stripeSubscriptionId: null,
+      subscriptionStatus: null,
+      name: null,
+      email: null,
+    };
+  }
+
+  return dbUser;
+}
+
+/**
+ * v1.1.5 / Issue #9 — synthesize a billing-user from an org row for
+ * admin-token sessions. Plan lives on the organizations table directly;
+ * stripe IDs + subscription status live in the `subscription` jsonb
+ * column. We project both into the same shape getBillingUserById
+ * returns so downstream callers (loadWorkspaceTierStatus, billing
+ * portal helpers, workspace-limit checks) don't need to branch.
+ *
+ * The synthesized .id matches the admin-token sentinel so downstream
+ * comparisons that gate on "is this a real user?" still work.
+ */
+async function getBillingUserForAdminTokenOrg(orgId: string) {
+  const [orgRow] = await db
+    .select({
+      id: organizations.id,
+      plan: organizations.plan,
+      subscription: organizations.subscription,
+      name: organizations.name,
+    })
+    .from(organizations)
+    .where(eq(organizations.id, orgId))
+    .limit(1);
+
+  if (!orgRow) {
+    // contract:throw-ok: admin-token cookie referenced a non-existent
+    // org. Stale cookie after workspace deletion. Caller's try/catch
+    // surfaces "session expired, please re-auth."
+    throw new Error("Unauthorized");
+  }
+
+  const sub = (orgRow.subscription ?? {}) as {
+    stripeSubscriptionId?: string | null;
+    status?: string | null;
+  };
+
+  return {
+    id: ADMIN_TOKEN_SENTINEL_USER_ID,
+    orgId: orgRow.id,
+    planId: orgRow.plan ?? null,
+    stripeSubscriptionId: sub.stripeSubscriptionId ?? null,
+    subscriptionStatus: sub.status ?? null,
+    name: orgRow.name,
+    email: null,
+  };
+}
+
+
+// NOTE: this string is also pattern-matched in two callers:
+//   - packages/crm/src/app/api/v1/workspace/create/route.ts (quota error detection)
+//   - packages/crm/src/app/orgs/new/page.tsx (UI quota detection)
+// Both match on the durable substring "additional workspace requires a paid tier"
+// — kept stable across pricing migrations so quota detection survives.
+//
+// April 30, 2026 — pricing migration. Old tier names (Starter $49,
+// Operator $99, Agency $149) replaced with the usage-based tiers
+// (Growth $29, Scale $99 unlimited workspaces).
+const WORKSPACE_UPGRADE_REQUIRED_MESSAGE =
+  "You've used your free workspace. Each additional workspace requires a paid tier (Growth $29/mo for up to 3 workspaces, or Scale $99/mo for unlimited).";
+
+/**
+ * April 30, 2026 — pricing migration. The old "per-workspace add-on
+ * quantity" model (legacy WORKSPACE_ADDON_MONTHLY_PRICE_ID) is gone.
+ * Workspace caps now flow from the user's tier:
+ *   Free   → 1 workspace
+ *   Growth → 3 workspaces
+ *   Scale  → unlimited
+ *
+ * `loadWorkspaceTierStatus` keeps the old shape (active / quantity /
+ * itemId) for backward compat with callers that read it for display,
+ * but `quantity` is now the tier's `maxOrgs - FREE_WORKSPACE_ALLOWANCE`
+ * (i.e. paid-only count: Growth=2, Scale=∞ rendered as 999).
+ */
+function loadWorkspaceTierStatus(
+  orgSubscription?: Awaited<ReturnType<typeof getOrgSubscription>>
+) {
+  const tier = normalizeTierId(orgSubscription?.tier ?? null);
+  const stripeSubscriptionId = orgSubscription?.stripeSubscriptionId ?? null;
+  const active = tier !== "inactive";
+
+  // 2026-08-07 — this used to be a hardcoded `agency`/`workspace`-only
+  // table left over from before the 2026-07-08 pricing ladder. It never
+  // learned the 5 new sellable tier ids (builder / managed /
+  // agency_starter / agency_growth / agency_scale), so every one of
+  // them silently fell into the `: 0` branch and displayed a 1-workspace
+  // cap here — even though `enforceWorkspaceLimit` (the actual gate)
+  // already read builder/agency_* as unlimited from the catalog. Now
+  // derived from the SAME `maxFullWorkspacesForTier` the gate uses, so
+  // this display value can't drift from enforcement again. Unlimited
+  // (-1) renders as the sentinel total 999 (quantity = 999 -
+  // FREE_WORKSPACE_ALLOWANCE) so the "X / Y" UI keeps working without a
+  // special case — the real gate is still `enforceWorkspaceLimit`.
+  const cap = maxFullWorkspacesForTier(tier);
+  const tierAllowance =
+    cap === -1 ? 999 - FREE_WORKSPACE_ALLOWANCE : Math.max(0, cap - FREE_WORKSPACE_ALLOWANCE);
+
+  return {
+    stripeSubscriptionId,
+    active,
+    quantity: tierAllowance,
+    itemId: null as string | null,
+    tier,
+  };
+}
+
+// 2026-08-07 — deps seam (mirrors the enforceWorkspaceLimit DI pattern
+// in lib/billing/limits.ts, and the repo-wide preference for DI over
+// mock.module — see tests/unit/auth/magic-link-redirect.spec.ts) so
+// this composition — count-then-gate — is unit-testable with no DB.
+// This is the exact gate the MCP path (POST /api/v1/workspace/create,
+// via createWorkspaceFromSoulAction / createWorkspaceFromSetupAction)
+// runs through.
+export type EnsureWorkspaceCreationBillingDeps = {
+  getOwnedWorkspaceCount: (userId: string, excludeOrgId?: string | null) => Promise<number>;
+  enforceWorkspaceLimit: typeof enforceWorkspaceLimit;
+};
+
+const defaultEnsureWorkspaceCreationBillingDeps: EnsureWorkspaceCreationBillingDeps = {
+  getOwnedWorkspaceCount,
+  enforceWorkspaceLimit,
+};
+
+/**
+ * Count-then-gate for workspace creation. `excludeOrgId` (the caller's
+ * own primary org, `user.orgId`) is threaded into the shared counter so
+ * the operator's own primary org is never counted against their
+ * tenant-workspace cap — this was the P0 bug: the old private counter
+ * here counted `organizations.ownerId === userId`, which INCLUDES the
+ * primary org every signup path stamps at account creation, so a
+ * brand-new user's count was already 1 before they ever created a
+ * workspace, and `1 < 1` (cap 1, first-workspace-free) was false.
+ */
+export async function ensureWorkspaceCreationBillingForUser(
+  user: Awaited<ReturnType<typeof getBillingUserById>>,
+  deps: EnsureWorkspaceCreationBillingDeps = defaultEnsureWorkspaceCreationBillingDeps,
+) {
+  const existingWorkspaces = await deps.getOwnedWorkspaceCount(user.id, user.orgId ?? null);
+  const decision = await deps.enforceWorkspaceLimit({
+    userId: user.id,
+    primaryOrgId: user.orgId ?? null,
+    ownedWorkspaceCount: existingWorkspaces,
+  });
+  if (!decision.allowed) {
+    // contract:throw-ok: workspace-creation-limit gate. All callers
+    // are server actions or API routes that catch this specific
+    // message and surface a tier-upgrade UI. The throw is caught
+    // by the caller's try/catch — never reaches SSR boundary.
+    throw new Error(WORKSPACE_UPGRADE_REQUIRED_MESSAGE);
+  }
+}
+
+function buildMembershipOrgCondition(membershipOrgIds: string[]) {
+  if (membershipOrgIds.length === 0) {
+    return sql`false`;
+  }
+
+  if (membershipOrgIds.length === 1) {
+    return eq(organizations.id, membershipOrgIds[0]);
+  }
+
+  return or(...membershipOrgIds.map((orgId) => eq(organizations.id, orgId))) ?? sql`false`;
+}
+
+/**
+ * 2026-06-16 — agency-attached workspace discovery.
+ *
+ * `attachWorkspaceToAgency` (lib/partner-agencies/store.ts) sets
+ * `organizations.parent_agency_id` on client workspaces but does NOT
+ * backfill `org_members` or `organizations.owner_id`. This means that
+ * if the agency workspaces were created anonymously (no real userId on
+ * the bearer token) and then attached to the agency, the standard
+ * `listManagedOrganizations` query misses them entirely:
+ *   - `ownerId` → null (anonymous creation)
+ *   - `parentUserId` → null (anonymous creation)
+ *   - `org_members` → no row for this user
+ *   - `user.orgId` → the user's PRIMARY org, not the client workspace
+ *
+ * Fix: also include any workspace whose `parentAgencyId` is an agency
+ * owned by this user (via `partner_agencies.owner_user_id = userId`).
+ * This is the canonical "I own the agency → I can see its clients" path.
+ *
+ * Returns the list of workspace IDs to union into the main query via
+ * an `inArray` condition. Empty array when the user owns no agencies.
+ */
+/** 2026-07-08 — exported so lib/billing/limits.ts can count sub-account
+ *  attachments for enforceSubAccountLimitForUser (the handoff-boundary
+ *  gate). Same read the org list + billing rollup already used
+ *  internally; no new query shape. */
+export async function fetchAgencyAttachedWorkspaceIds(userId: string): Promise<string[]> {
+  if (!isUuidShape(userId)) return [];
+
+  // Find partner_agencies this user owns.
+  const ownedAgencies = await db
+    .select({ id: partnerAgencies.id })
+    .from(partnerAgencies)
+    .where(eq(partnerAgencies.ownerUserId, userId));
+
+  if (ownedAgencies.length === 0) return [];
+
+  const agencyIds = ownedAgencies.map((a) => a.id);
+
+  // Find organizations attached to any of those agencies. Exclude archived
+  // client workspaces (front-office bridge) so they drop out of the agency's
+  // active workspace list + the billing rollup.
+  const attached = await db
+    .select({ id: organizations.id })
+    .from(organizations)
+    .where(
+      and(
+        inArray(organizations.parentAgencyId, agencyIds),
+        isNull(organizations.archivedAt),
+      ),
+    );
+
+  return attached.map((ws) => ws.id);
+}
+
+async function logOrgListDiag(tag: string, membershipIds: unknown, extra: Record<string, unknown>) {
+  let requestPath = "unknown";
+  let host = "unknown";
+
+  try {
+    const headerStore = await headers();
+    requestPath = headerStore.get("x-pathname") ?? headerStore.get("next-url") ?? "unknown";
+    host = headerStore.get("host") ?? "unknown";
+  } catch {
+    requestPath = "unknown";
+    host = "unknown";
+  }
+
+  // Successful read diagnostic — info severity, NOT error.
+  // (Earlier this was console.error during incident triage; left at error
+  // by mistake and polluted Sentry/Vercel error budgets. See v1.55 cleanup.)
+  logEvent(
+    "org_list_diag",
+    {
+      tag,
+      request_path: requestPath,
+      host,
+      pid: process.pid,
+      membership_ids_raw: membershipIds,
+      is_array: Array.isArray(membershipIds),
+      typeof_value: typeof membershipIds,
+      length: Array.isArray(membershipIds) ? membershipIds.length : null,
+      ...extra,
+    },
+    { severity: "info" },
+  );
+}
+
+export async function getWorkspaceLimitStatus() {
+  const user = await requireBillingUser();
+  const plan = getPlan(user.planId ?? "");
+  const orgSubscription = await getOrgSubscription(user.orgId);
+  const orgFeatures = getOrgFeatures(orgSubscription.tier ?? "free");
+  const ownedWorkspaceCount = await getOwnedWorkspaceCount(user.id, user.orgId ?? null);
+  const tierStatus = loadWorkspaceTierStatus(orgSubscription);
+  // Tier-based cap: free=1, growth=3, scale=unlimited (rendered as
+  // 999 here so the UI's "X / Y" display still works without a
+  // special-case branch — the actual gate lives in enforceWorkspaceLimit).
+  // Keep workspace-limit presentation aligned with the real creation gate:
+  // without a Stripe secret this deployment is self-hosted, so hosted
+  // subscription workspace caps do not apply. 999 is display-only; the
+  // authoritative self-hosted gate in enforceWorkspaceLimit is unlimited.
+  const selfHosted = !process.env.STRIPE_SECRET_KEY;
+  const maxOrgs = selfHosted
+    ? 999
+    : FREE_WORKSPACE_ALLOWANCE + tierStatus.quantity;
+  const canCreate = selfHosted || ownedWorkspaceCount < maxOrgs;
+
+  return {
+    plan,
+    tier: orgSubscription.tier ?? "free",
+    features: orgFeatures,
+    currentOrgs: ownedWorkspaceCount,
+    maxOrgs,
+    canCreate,
+  };
+}
+
+export async function getWorkspaceLimitStatusForUser(userId: string) {
+  const user = await getBillingUserById(userId);
+  const plan = getPlan(user.planId ?? "");
+  const orgSubscription = await getOrgSubscription(user.orgId);
+  const orgFeatures = getOrgFeatures(orgSubscription.tier ?? "free");
+  const ownedWorkspaceCount = await getOwnedWorkspaceCount(user.id, user.orgId ?? null);
+  const tierStatus = loadWorkspaceTierStatus(orgSubscription);
+  // Tier-based cap: free=1, growth=3, scale=unlimited (rendered as
+  // 999 here so the UI's "X / Y" display still works without a
+  // special-case branch — the actual gate lives in enforceWorkspaceLimit).
+  // Keep workspace-limit presentation aligned with the real creation gate:
+  // without a Stripe secret this deployment is self-hosted, so hosted
+  // subscription workspace caps do not apply. 999 is display-only; the
+  // authoritative self-hosted gate in enforceWorkspaceLimit is unlimited.
+  const selfHosted = !process.env.STRIPE_SECRET_KEY;
+  const maxOrgs = selfHosted
+    ? 999
+    : FREE_WORKSPACE_ALLOWANCE + tierStatus.quantity;
+  const canCreate = selfHosted || ownedWorkspaceCount < maxOrgs;
+
+  return {
+    plan,
+    tier: orgSubscription.tier ?? "free",
+    features: orgFeatures,
+    currentOrgs: ownedWorkspaceCount,
+    maxOrgs,
+    canCreate,
+  };
+}
+
+export async function listManagedOrganizations(userId?: string) {
+  const user = userId ? await getBillingUserById(userId) : await requireBillingUser();
+
+  // v1.25.2 — synthetic ids (admin-token sentinel, operator-portal
+  // session) aren't valid uuids and would crash the org_members
+  // query with 22P02. Both session types are workspace-scoped, so
+  // return [] (the caller's empty-state path handles this fine —
+  // workspace switcher doesn't render).
+  if (!isUuidShape(user.id)) {
+    return [];
+  }
+
+  const [membershipRows, agencyAttachedIds] = await Promise.all([
+    db
+      .select({ orgId: orgMembers.orgId })
+      .from(orgMembers)
+      .where(eq(orgMembers.userId, user.id)),
+    // 2026-06-16 — include workspaces attached to partner agencies owned
+    // by this user. `attachWorkspaceToAgency` sets parent_agency_id but
+    // does NOT create org_members rows, so agency-attached client
+    // workspaces are otherwise invisible to the listing query when the
+    // workspace was created anonymously (ownerId = null, parentUserId = null).
+    fetchAgencyAttachedWorkspaceIds(user.id),
+  ]);
+
+  const membershipOrgIds = membershipRows.map((row) => row.orgId);
+
+  await logOrgListDiag("listManagedOrganizations", membershipOrgIds, {
+    userId: user.id,
+    userOrgId: user.orgId,
+    agencyAttachedCount: agencyAttachedIds.length,
+  });
+
+  // v1.7.3 — user.orgId is now nullable (synthesized empty record path
+  // in getBillingUserById when session.user.id has no users row). Build
+  // OR conditions defensively: include the eq(orgId) clause only when
+  // user.orgId is set; otherwise fall back to the other paths.
+  const orgListOrConditions = [
+    eq(organizations.parentUserId, user.id),
+    eq(organizations.ownerId, user.id),
+    buildMembershipOrgCondition(membershipOrgIds),
+  ];
+  if (user.orgId) {
+    orgListOrConditions.push(eq(organizations.id, user.orgId));
+  }
+  // 2026-06-16 — union in agency-attached workspaces. inArray handles
+  // deduplication via the set semantics of OR; SQL deduplicates the
+  // result rows at the query level.
+  if (agencyAttachedIds.length > 0) {
+    orgListOrConditions.push(inArray(organizations.id, agencyAttachedIds));
+  }
+  const rows = await db
+    .select({
+      id: organizations.id,
+      name: organizations.name,
+      slug: organizations.slug,
+      soulId: organizations.soulId,
+      parentUserId: organizations.parentUserId,
+      ownerId: organizations.ownerId,
+      createdAt: organizations.createdAt,
+    })
+    .from(organizations)
+    // Exclude archived client workspaces (front-office bridge) from the
+    // workspace switcher + dashboard org list.
+    .where(and(or(...orgListOrConditions), isNull(organizations.archivedAt)));
+
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const counts = await Promise.all(
+    rows.map(async (org) => {
+      const [contactCount] = await db
+        .select({ count: sql<number>`count(*)` })
+        .from(contacts)
+        .where(eq(contacts.orgId, org.id));
+
+      return {
+        orgId: org.id,
+        count: contactCount ? Number(contactCount.count) : 0,
+      };
+    })
+  );
+
+  const countMap = new Map(counts.map((row) => [row.orgId, row.count]));
+
+  return rows
+    .map((org) => ({
+      ...org,
+      contactCount: countMap.get(org.id) ?? 0,
+    }))
+    .sort((a, b) => Number(new Date(b.createdAt)) - Number(new Date(a.createdAt)));
+}
+
+export async function listManagedOrganizationsForUser(userId: string) {
+  const user = await getBillingUserById(userId);
+
+  // v1.25.2 — same defense-in-depth as listManagedOrganizations.
+  if (!isUuidShape(user.id)) {
+    return [];
+  }
+
+  const [membershipRows, agencyAttachedIds] = await Promise.all([
+    db
+      .select({ orgId: orgMembers.orgId })
+      .from(orgMembers)
+      .where(eq(orgMembers.userId, user.id)),
+    // 2026-06-16 — see listManagedOrganizations for rationale.
+    fetchAgencyAttachedWorkspaceIds(user.id),
+  ]);
+
+  const membershipOrgIds = membershipRows.map((row) => row.orgId);
+
+  await logOrgListDiag("listManagedOrganizationsForUser", membershipOrgIds, {
+    userId: user.id,
+    userOrgId: user.orgId,
+    inputUserId: userId,
+    agencyAttachedCount: agencyAttachedIds.length,
+  });
+
+  // v1.7.3 — user.orgId is now nullable (synthesized empty record path
+  // in getBillingUserById when session.user.id has no users row). Build
+  // OR conditions defensively: include the eq(orgId) clause only when
+  // user.orgId is set; otherwise fall back to the other paths.
+  const orgListOrConditions = [
+    eq(organizations.parentUserId, user.id),
+    eq(organizations.ownerId, user.id),
+    buildMembershipOrgCondition(membershipOrgIds),
+  ];
+  if (user.orgId) {
+    orgListOrConditions.push(eq(organizations.id, user.orgId));
+  }
+  // 2026-06-16 — union in agency-attached workspaces.
+  if (agencyAttachedIds.length > 0) {
+    orgListOrConditions.push(inArray(organizations.id, agencyAttachedIds));
+  }
+  const rows = await db
+    .select({
+      id: organizations.id,
+      name: organizations.name,
+      slug: organizations.slug,
+      soulId: organizations.soulId,
+      parentUserId: organizations.parentUserId,
+      ownerId: organizations.ownerId,
+      createdAt: organizations.createdAt,
+    })
+    .from(organizations)
+    // Exclude archived client workspaces (front-office bridge) from the
+    // workspace switcher + dashboard org list.
+    .where(and(or(...orgListOrConditions), isNull(organizations.archivedAt)));
+
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const counts = await Promise.all(
+    rows.map(async (org) => {
+      const [contactCount] = await db
+        .select({ count: sql<number>`count(*)` })
+        .from(contacts)
+        .where(eq(contacts.orgId, org.id));
+
+      return {
+        orgId: org.id,
+        count: contactCount ? Number(contactCount.count) : 0,
+      };
+    })
+  );
+
+  const countMap = new Map(counts.map((row) => [row.orgId, row.count]));
+
+  return rows
+    .map((org) => ({
+      ...org,
+      contactCount: countMap.get(org.id) ?? 0,
+    }))
+    .sort((a, b) => Number(new Date(b.createdAt)) - Number(new Date(a.createdAt)));
+}
+
+export async function setActiveOrgAction(formData: FormData) {
+  const user = await requireBillingUser();
+  const orgId = String(formData.get("orgId") ?? "");
+  const redirectTo = String(formData.get("redirectTo") ?? "/dashboard");
+
+  const [membership] = await db
+    .select({ orgId: orgMembers.orgId })
+    .from(orgMembers)
+    .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, user.id)))
+    .limit(1);
+
+  if (membership?.orgId) {
+    const cookieStore = await cookies();
+    cookieStore.set("sf_active_org_id", membership.orgId, {
+      path: "/",
+      httpOnly: true,
+      sameSite: "lax",
+      maxAge: 60 * 60 * 24 * 30,
+    });
+
+    redirect(redirectTo.startsWith("/") ? redirectTo : "/dashboard");
+  }
+
+  const [org] = await db
+    .select({ id: organizations.id })
+    .from(organizations)
+    .where(
+      and(
+        eq(organizations.id, orgId),
+        // v1.7.3 — user.orgId nullable; include the eq clause only
+        // when set, fall back to ownerId/parentUserId paths otherwise.
+        user.orgId
+          ? or(eq(organizations.parentUserId, user.id), eq(organizations.ownerId, user.id), eq(organizations.id, user.orgId))
+          : or(eq(organizations.parentUserId, user.id), eq(organizations.ownerId, user.id)),
+      )
+    )
+    .limit(1);
+
+  if (!org) {
+    // contract:throw-ok: setActiveOrgAction is a form-submit server
+    // action; the form posts an org id from a list the user just
+    // saw. Reaching this means the org was deleted between page
+    // render and form submit OR the user crafted a bad post —
+    // either way, form-submit error UI surfaces it cleanly.
+    throw new Error("Organization not found");
+  }
+
+  const cookieStore = await cookies();
+  cookieStore.set("sf_active_org_id", org.id, {
+    path: "/",
+    httpOnly: true,
+    sameSite: "lax",
+    maxAge: 60 * 60 * 24 * 30,
+  });
+
+  redirect(redirectTo.startsWith("/") ? redirectTo : "/dashboard");
+}
+
+export async function createManagedOrganizationAction(formData: FormData) {
+  assertWritable();
+
+  const user = await requireBillingUser();
+  const businessName = String(formData.get("businessName") ?? "").trim();
+  const soulId = String(formData.get("soulId") ?? "coach").trim() || "coach";
+  const ownerName = String(formData.get("ownerName") ?? "").trim();
+  const ownerEmail = String(formData.get("ownerEmail") ?? "").trim();
+
+  if (!businessName) {
+    // contract:throw-ok: form-submit input validation; caller's UI
+    // shows the error inline. Same pattern as Stripe selectPlanAction.
+    throw new Error("Business name is required");
+  }
+
+  const limitStatus = await getWorkspaceLimitStatusForUser(user.id);
+  if (limitStatus.tier === "free") {
+    // contract:throw-ok: tier gate; caller's form-submit error UI
+    // surfaces the upgrade pitch.
+    throw new Error("Pro plan required to create managed organizations");
+  }
+
+  if (!limitStatus.canCreate) {
+    // contract:throw-ok: workspace-limit gate; same form-submit UX.
+    throw new Error("Organization limit reached for current plan");
+  }
+
+  const baseSlug = slugify(businessName) || `client-${randomUUID().slice(0, 8)}`;
+  let slug = baseSlug;
+
+  for (let index = 0; index < 8; index += 1) {
+    const [existing] = await db.select({ id: organizations.id }).from(organizations).where(eq(organizations.slug, slug)).limit(1);
+    if (!existing) {
+      break;
+    }
+
+    slug = `${baseSlug}-${Math.floor(Math.random() * 10000)}`;
+  }
+
+  const [org] = await db
+    .insert(organizations)
+    .values({
+      name: businessName,
+      slug,
+      ownerId: user.id,
+      parentUserId: user.id,
+      plan: "pro",
+    })
+    .returning({ id: organizations.id });
+
+  if (!org) {
+    // contract:throw-ok: db.insert.returning empty — DB error during
+    // workspace creation. Form-submit error UI handles this.
+    throw new Error("Could not create organization");
+  }
+
+  await installSoul({
+    orgId: org.id,
+    soulId,
+    markCompleted: true,
+  });
+
+  await db.insert(orgMembers).values({
+    orgId: org.id,
+    userId: user.id,
+    role: "owner",
+  });
+
+  if (ownerEmail) {
+    const tempPassword = randomUUID();
+    const passwordHash = await bcrypt.hash(tempPassword, 10);
+
+    const [owner] = await db
+      .insert(users)
+      .values({
+        orgId: org.id,
+        name: ownerName || businessName,
+        email: ownerEmail,
+        role: "owner",
+        passwordHash,
+      })
+      .returning({ id: users.id });
+
+    if (owner?.id) {
+      await db.update(organizations).set({ ownerId: owner.id, updatedAt: new Date() }).where(eq(organizations.id, org.id));
+
+      // 2026-08-06 funnel observability — alias the org-keyed distinct id
+      // to the new owner, same as every other ownerId-claim site. Lazy
+      // import keeps posthog-node out of module graphs that don't need it.
+      try {
+        const { aliasOrgToUser } = await import("@/lib/analytics/funnel");
+        aliasOrgToUser(owner.id, org.id);
+      } catch (error) {
+        console.warn(
+          `[billing/orgs] aliasOrgToUser threw (swallowed): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
+  const cookieStore = await cookies();
+  cookieStore.set("sf_active_org_id", org.id, {
+    path: "/",
+    httpOnly: true,
+    sameSite: "lax",
+    maxAge: 60 * 60 * 24 * 30,
+  });
+
+  redirect("/dashboard");
+}
+
+type CreateWorkspaceFromSetupInput = {
+  businessName: string;
+  frameworkId: string;
+  generatedFramework?: FrameworkConfig | null;
+  location?: string;
+  websiteUrl?: string;
+  journeyDescription?: string;
+  enabledAutomations?: string[];
+};
+
+function toSlug(value: string) {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 48);
+}
+
+function mapSoulToFrameworkConfig(soul: SoulV4): FrameworkConfig {
+  const bookingConfig = soul.booking_config;
+
+  const bookingTypes = bookingConfig
+    ? bookingConfig.services.map((service) => ({
+        name: service.name,
+        slug: toSlug(service.name) || `service-${randomUUID().slice(0, 8)}`,
+        durationMinutes: bookingConfig.default_duration_minutes,
+        price: service.price,
+        description: service.description,
+        bufferBefore: bookingConfig.buffer_minutes,
+        bufferAfter: bookingConfig.buffer_minutes,
+        maxPerDay: 8,
+      }))
+    : [];
+
+  const landingHeadline = soul.tagline.trim() || `${soul.business_name} in one place`;
+
+  return {
+    id: soul.base_framework,
+    name: soul.business_name,
+    description: soul.soul_description,
+    icon: soul.audience_type === "product" ? "rocket" : "sparkles",
+    defaultBusinessName: soul.business_name,
+    contactLabel: { singular: "Contact", plural: "Contacts" },
+    dealLabel: { singular: "Deal", plural: "Deals" },
+    activityLabel: { singular: "Activity", plural: "Activities" },
+    voice: {
+      tone: soul.audience_type === "product" ? "clear, concise, technical" : "warm, direct, supportive",
+      personality: soul.tagline,
+    },
+    pipeline: soul.pipeline_stages.map((stage, index) => ({
+      name: stage.name,
+      order: index + 1,
+    })),
+    bookingTypes,
+    emailTemplates: [
+      {
+        name: "Welcome",
+        tag: "welcome",
+        subject: `Welcome to ${soul.business_name}`,
+        body: `Hi {{firstName}},\n\nWelcome to ${soul.business_name}. ${soul.tagline}`,
+      },
+      {
+        name: "Follow-up",
+        tag: "follow_up",
+        subject: `Quick follow-up from ${soul.business_name}`,
+        body: "Hi {{firstName}},\n\nChecking in to see how we can help.",
+      },
+    ],
+    intakeForm: {
+      name: "Client Intake",
+      slug: "client-intake",
+      fields: soul.intake_form_fields.map((field) => ({
+        label: field.label,
+        type: field.type,
+        required: field.required,
+        options: field.options,
+      })),
+    },
+    landingPage: {
+      headline: landingHeadline,
+      subhead: soul.soul_description,
+      cta: soul.audience_type === "product" ? "Join now" : "Book now",
+    },
+  };
+}
+
+type CreateWorkspaceFromSoulInput = {
+  soul: SoulV4;
+  sourceText?: string;
+  pagesUsed?: string[];
+  /**
+   * v1.47 — when false, skips landing-page block seeding. Used by the
+   * lean URL flow where the agency's client already has a website.
+   * Default true (full v2 flow unchanged for create_full_workspace +
+   * create_workspace_v2 callers).
+   */
+  includeLandingPage?: boolean;
+};
+
+type CreateWorkspaceFromSoulOptions = {
+  userId?: string;
+  /**
+   * v1.49 — when true, skip user/billing requirements entirely. The
+   * workspace is created with `ownerId: null` + `plan: "free"` and a
+   * 7-day bearer token is minted for admin access. Used by the
+   * anonymous URL-input path in /api/v1/workspace/create so operators
+   * can create their first workspace from a URL without a
+   * SELDONFRAME_API_KEY (matches the existing anonymous Google-paste
+   * path's UX).
+   */
+  anonymous?: boolean;
+};
+
+export async function createWorkspaceFromSoulAction(input: CreateWorkspaceFromSoulInput, options?: CreateWorkspaceFromSoulOptions) {
+  assertWritable();
+
+  // v1.49 — three modes:
+  //  1. userId provided → look up that user (existing auth'd path)
+  //  2. anonymous: true → skip user/billing entirely (new lean URL path)
+  //  3. neither → fall back to requireBillingUser() (legacy form-submit)
+  let user: Awaited<ReturnType<typeof getBillingUserById>> | null = null;
+  if (options?.anonymous === true) {
+    user = null;
+  } else if (options?.userId) {
+    user = await getBillingUserById(options.userId);
+  } else {
+    user = await requireBillingUser();
+  }
+
+  const soul = input.soul;
+  const businessName = String(soul.business_name ?? "").trim();
+
+  if (!businessName) {
+    // contract:throw-ok: form-submit input validation; inline error UI.
+    throw new Error("Business name is required");
+  }
+
+  // Billing checks only apply when a user is attached (auth'd path).
+  // Anonymous workspaces are free-tier with bearer-token admin access;
+  // they don't count toward any user's workspace quota.
+  if (user) {
+    await ensureWorkspaceCreationBillingForUser(user);
+  }
+
+  const baseSlug = slugify(businessName) || `workspace-${randomUUID().slice(0, 8)}`;
+  let slug = baseSlug;
+
+  for (let index = 0; index < 8; index += 1) {
+    const [existing] = await db.select({ id: organizations.id }).from(organizations).where(eq(organizations.slug, slug)).limit(1);
+    if (!existing) {
+      break;
+    }
+
+    slug = `${baseSlug}-${Math.floor(Math.random() * 10000)}`;
+  }
+
+  const [org] = await db
+    .insert(organizations)
+    .values({
+      name: businessName,
+      slug,
+      // v1.49 — anonymous workspaces have NULL ownership and free plan;
+      // auth'd workspaces tie to the billing user with pro plan.
+      ownerId: user?.id ?? null,
+      parentUserId: user?.id ?? null,
+      plan: user ? "pro" : "free",
+      settings: {
+        soulCompiler: {
+          sourceType: (input.pagesUsed?.length ?? 0) > 0 ? "url" : "description",
+          pagesUsed: input.pagesUsed ?? [],
+          generatedAt: new Date().toISOString(),
+        },
+      },
+    })
+    .returning({ id: organizations.id, slug: organizations.slug, name: organizations.name });
+
+  if (!org) {
+    // contract:throw-ok: db.insert.returning empty — DB error during
+    // workspace creation. Form-submit error UI handles this.
+    throw new Error("Could not create workspace");
+  }
+
+  console.info(`Workspace record created successfully with id: ${org.id}, slug: ${org.slug}`);
+
+  // orgMembers insert is auth'd-path only — anonymous workspaces have
+  // no user to add as a member. Operators who later claim the workspace
+  // via NextAuth signup get added to orgMembers at claim time.
+  if (user) {
+    await db.insert(orgMembers).values({
+      orgId: org.id,
+      userId: user.id,
+      role: "owner",
+    });
+  }
+
+  const ownerName = businessName.split(" ")[0] || "";
+  const framework = mapSoulToFrameworkConfig(soul);
+
+  await installSoul({
+    orgId: org.id,
+    frameworkId: framework.id,
+    framework,
+    answers: {
+      ownerName,
+      ownerFullName: ownerName,
+      businessName,
+      journeyDescription: String(input.sourceText ?? ""),
+      enabledAutomations: [],
+    },
+    markCompleted: true,
+  });
+
+  // v1.47 — landing-page block seeding is now opt-out. The lean URL
+  // flow (create_workspace_from_url) passes includeLandingPage=false
+  // because the agency's client already has their own website; the
+  // chatbot embed snippet is the canonical deliverable. Operators who
+  // DO want a SeldonFrame-hosted landing page call generate_landing_page
+  // explicitly later.
+  const includeLandingPage = input.includeLandingPage !== false;
+  if (includeLandingPage) {
+    await seedInitialBlocks(org.id, soul.base_framework);
+  }
+
+  // v1.49 — anonymous workspaces mint a 7-day bearer token for admin
+  // access (same lifetime as the existing anonymous Google-paste path).
+  // Auth'd workspaces don't need this — the operator logs in via
+  // NextAuth + has session cookies.
+  let bearerToken: string | undefined;
+  let bearerTokenExpiresAt: Date | null | undefined;
+  if (options?.anonymous === true) {
+    const minted = await mintWorkspaceToken(org.id, {
+      name: "mcp:anonymous-url-create",
+      expiresInDays: 7,
+    });
+    bearerToken = minted.token;
+    bearerTokenExpiresAt = minted.expiresAt;
+  }
+
+  // Cookie set is auth'd-path only — anonymous flow uses the bearer
+  // token via Authorization header instead of session cookies.
+  if (user) {
+    const cookieStore = await cookies();
+    cookieStore.set("sf_active_org_id", org.id, {
+      path: "/",
+      httpOnly: true,
+      sameSite: "lax",
+      maxAge: 60 * 60 * 24 * 30,
+    });
+  }
+
+  return {
+    orgId: org.id,
+    slug: org.slug,
+    name: org.name,
+    bearerToken,
+    bearerTokenExpiresAt,
+  };
+}
+
+export async function createWorkspaceFromSetupAction(input: CreateWorkspaceFromSetupInput) {
+  assertWritable();
+
+  const user = await requireBillingUser();
+  const businessName = String(input.businessName ?? "").trim();
+  const frameworkId = String(input.frameworkId ?? "").trim();
+  const generatedFramework = input.generatedFramework ?? null;
+
+  if (!businessName) {
+    // contract:throw-ok: form-submit input validation; inline error UI.
+    throw new Error("Business name is required");
+  }
+
+  if (!frameworkId) {
+    // contract:throw-ok: form-submit input validation; inline error UI.
+    throw new Error("Framework is required");
+  }
+
+  await ensureWorkspaceCreationBillingForUser(user);
+
+  const baseSlug = slugify(businessName) || `workspace-${randomUUID().slice(0, 8)}`;
+  let slug = baseSlug;
+
+  for (let index = 0; index < 8; index += 1) {
+    const [existing] = await db.select({ id: organizations.id }).from(organizations).where(eq(organizations.slug, slug)).limit(1);
+    if (!existing) {
+      break;
+    }
+
+    slug = `${baseSlug}-${Math.floor(Math.random() * 10000)}`;
+  }
+
+  const [org] = await db
+    .insert(organizations)
+    .values({
+      name: businessName,
+      slug,
+      ownerId: user.id,
+      parentUserId: user.id,
+      plan: "pro",
+    })
+    .returning({ id: organizations.id });
+
+  if (!org) {
+    // contract:throw-ok: db.insert.returning empty — DB error during
+    // workspace creation. Form-submit error UI handles this.
+    throw new Error("Could not create workspace");
+  }
+
+  await db.insert(orgMembers).values({
+    orgId: org.id,
+    userId: user.id,
+    role: "owner",
+  });
+
+  const ownerName = businessName.split(" ")[0] || "";
+
+  await installSoul({
+    orgId: org.id,
+    frameworkId,
+    framework: generatedFramework ?? undefined,
+    answers: {
+      ownerName,
+      ownerFullName: ownerName,
+      businessName,
+      location: String(input.location ?? ""),
+      websiteUrl: String(input.websiteUrl ?? ""),
+      journeyDescription: String(input.journeyDescription ?? ""),
+      enabledAutomations: Array.isArray(input.enabledAutomations) ? input.enabledAutomations : [],
+    },
+    markCompleted: true,
+  });
+
+  const cookieStore = await cookies();
+  cookieStore.set("sf_active_org_id", org.id, {
+    path: "/",
+    httpOnly: true,
+    sameSite: "lax",
+    maxAge: 60 * 60 * 24 * 30,
+  });
+
+  return { orgId: org.id };
+}
+
+// ─── P0-2: claim-and-upgrade for guest (admin-token) workspaces ────
+
+export type ClaimWorkspaceResult =
+  | { ok: true; userId: string; userExisted: boolean }
+  | { ok: false; reason: "email_taken" | "workspace_already_claimed" | "workspace_not_found" };
+
+/**
+ * Convert a guest (admin-token) workspace into a real account-backed
+ * workspace, ahead of a Stripe upgrade.
+ *
+ * Operators created their workspace via MCP (no signup), got an admin
+ * URL with a `wst_…` bearer cookie, and now want to pay. Stripe Checkout
+ * needs a real user record (`users.id` foreign key on subscriptions).
+ *
+ * Flow:
+ *   - Verify the org exists + has `ownerId IS NULL` (true for all
+ *     `createAnonymousWorkspace` rows).
+ *   - If `users.email` is already taken → return `email_taken` so the
+ *     caller can ask the operator to sign in instead. Re-using a
+ *     stranger's user record would silently merge two unrelated
+ *     workspaces into one billing customer.
+ *   - Insert a fresh user with `orgId = workspaceId` + the supplied
+ *     email + name.
+ *   - Set `organizations.ownerId = newUser.id` so dashboard layout +
+ *     billing flows recognize the operator as a real account holder.
+ *
+ * The admin-token cookie keeps working until it expires — operators
+ * see no friction during the upgrade. Once they're paying, the next
+ * sign-up step (set password / verify email) lands them in a normal
+ * NextAuth session and the bearer cookie can be retired.
+ */
+export async function claimAnonymousWorkspaceForEmail(
+  workspaceId: string,
+  email: string,
+  name?: string
+): Promise<ClaimWorkspaceResult> {
+  const normalizedEmail = email.trim().toLowerCase();
+  if (!normalizedEmail || !workspaceId) {
+    return { ok: false, reason: "workspace_not_found" };
+  }
+
+  const [org] = await db
+    .select({ id: organizations.id, ownerId: organizations.ownerId, name: organizations.name })
+    .from(organizations)
+    .where(eq(organizations.id, workspaceId))
+    .limit(1);
+
+  if (!org) return { ok: false, reason: "workspace_not_found" };
+  if (org.ownerId) return { ok: false, reason: "workspace_already_claimed" };
+
+  const [existingUser] = await db
+    .select({ id: users.id, orgId: users.orgId })
+    .from(users)
+    .where(eq(users.email, normalizedEmail))
+    .limit(1);
+
+  if (existingUser) {
+    // Refuse to silently attach the workspace to an existing account —
+    // that's a confused-deputy attack vector if a stranger types a
+    // real customer's email into the upgrade form.
+    return { ok: false, reason: "email_taken" };
+  }
+
+  const displayName = name?.trim() || normalizedEmail.split("@")[0] || "Workspace owner";
+
+  const [createdUser] = await db
+    .insert(users)
+    .values({
+      orgId: workspaceId,
+      email: normalizedEmail,
+      name: displayName,
+      role: "owner",
+      // No password yet — operator can set one later via account-recovery
+      // flow. Email-verification timestamp stays null.
+    })
+    .returning({ id: users.id });
+
+  if (!createdUser) {
+    return { ok: false, reason: "workspace_not_found" };
+  }
+
+  await db
+    .update(organizations)
+    .set({ ownerId: createdUser.id, updatedAt: new Date() })
+    .where(eq(organizations.id, workspaceId));
+
+  // 2026-08-06 funnel observability — this is the canonical anonymous-org
+  // claim path (admin-token workspace -> real account). Alias the
+  // org-keyed distinct id to the new user so PostHog can join
+  // workspace_created (orgId-keyed) to signed_up/checkout_started
+  // (userId-keyed). Lazy import keeps posthog-node out of module graphs
+  // that don't need it.
+  try {
+    const { aliasOrgToUser } = await import("@/lib/analytics/funnel");
+    aliasOrgToUser(createdUser.id, workspaceId);
+  } catch (error) {
+    console.warn(
+      `[billing/orgs] aliasOrgToUser threw (swallowed): ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  return { ok: true, userId: createdUser.id, userExisted: false };
+}

@@ -1,0 +1,68 @@
+{
+  "name": "New-patient intake → SMS concierge → book consult → email confirmation",
+  "description": "When a new patient submits the intake form, wait 2 minutes, then text them by name to thank them and ask about timing. Confirm insurance via SMS, book the next new-patient consultation, and email a confirmation with the clinic address.",
+  "trigger": {
+    "type": "event",
+    "event": "form.submitted",
+    "filter": {
+      "form_id": "form_new_patient_intake"
+    }
+  },
+  "variables": {
+    "contact_id": "event.contact.id",
+    "first_name": "event.contact.firstName",
+    "email": "event.contact.email",
+    "phone": "event.contact.phone",
+    "reason_for_visit": "event.submission.reason_for_visit",
+    "intake_has_insurance": "event.submission.has_insurance"
+  },
+  "steps": [
+    {
+      "id": "wait_2min",
+      "type": "wait",
+      "seconds": 120,
+      "next": "sms_concierge"
+    },
+    {
+      "id": "sms_concierge",
+      "type": "conversation",
+      "channel": "sms",
+      "initial_message": "Hi {{first_name}}, it's Bright Smile Dental 🦷 — thanks so much for reaching out, we're glad you did. No pressure at all, just wanted to say hi and help get you in. What days/times tend to work best for you? And just to double-check — do you have dental insurance, or would you like us to walk you through the options?",
+      "exit_when": "The patient has shared (a) at least one preferred day/time window for their visit AND (b) whether they have dental insurance (yes, no, or unsure). Be warm, reassuring, no sales pressure. If they ask questions, answer briefly and steer gently back to timing + insurance.",
+      "on_exit": {
+        "extract": {
+          "preferred_time_iso": "The patient's preferred appointment start time as an ISO 8601 datetime in the clinic's local timezone. If they gave a vague window, pick the earliest reasonable slot inside it.",
+          "has_insurance": "One of: yes | no | unsure"
+        },
+        "next": "book_consult"
+      }
+    },
+    {
+      "id": "book_consult",
+      "type": "mcp_tool_call",
+      "tool": "create_booking",
+      "args": {
+        "appointment_type_id": "appt_new_patient_consult",
+        "contact_id": "{{contact_id}}",
+        "start_time": "{{preferred_time_iso}}",
+        "notes": "Reason for visit: {{reason_for_visit}} | Insurance: {{has_insurance}}"
+      },
+      "next": "email_confirmation"
+    },
+    {
+      "id": "email_confirmation",
+      "type": "mcp_tool_call",
+      "tool": "send_email",
+      "args": {
+        "to": "{{email}}",
+        "subject": "You're booked in, {{first_name}} — see you soon at Bright Smile Dental",
+        "body": "Hi {{first_name}},\n\nYou're all set for your free new-patient consultation at Bright Smile Dental. We're looking forward to meeting you — and we promise, it's a calm, judgment-free visit.\n\n📅 Appointment: New-patient consultation (45 min, complimentary)\n🕒 When: {{preferred_time_iso}}\n📍 Where: Bright Smile Dental — please reply to this email if you need the exact address or parking info and we'll send it right over.\n\nIf anything changes, just reply to this email or text us back — no problem at all.\n\nTalk soon,\nThe Bright Smile Dental team"
+      },
+      "next": "done"
+    },
+    {
+      "id": "done",
+      "type": "end"
+    }
+  ]
+}

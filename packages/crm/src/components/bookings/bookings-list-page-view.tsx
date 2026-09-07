@@ -1,0 +1,137 @@
+// v1.24.0 — shared bookings page view (admin + operator portal)
+//
+// One source of truth for the /bookings surface. Used by:
+//   - /bookings/page.tsx                       (admin dashboard)
+//   - /portal/<slug>/bookings/page.tsx         (operator portal mirror)
+
+import { eq } from "drizzle-orm";
+import {
+  createAppointmentTypeAction,
+  // 2026-05-18 — edit action for the slide-out sheet on /bookings.
+  // Operator reported the Edit button did nothing.
+  editAppointmentTypeAction,
+  listAppointmentTypes,
+  listBookings,
+  // Task 7 — click-to-create booking or blocked time from the week calendar.
+  createBookingAction,
+  createBlockedTimeAction,
+  // Task 8 — drag-to-reschedule from the week calendar.
+  rescheduleBookingAction,
+} from "@/lib/bookings/actions";
+import { db } from "@/db";
+import { organizations } from "@/db/schema";
+import { listContacts } from "@/lib/contacts/actions";
+import { getIntegrationSettings } from "@/lib/integrations/actions";
+import { getLabels } from "@/lib/soul/labels";
+import { getSoul } from "@/lib/soul/server";
+import { getBookingDefaults } from "@/lib/crm/template-suggestions";
+// Workspace-level booking availability + rules (Mon-Fri 09:00-17:00 defaults
+// when unset). Rendered below the calendar; the public slot generator reads
+// the same settings.booking blob this fetch resolves.
+import { getWorkspaceBookingRules } from "@/lib/bookings/workspace-rules";
+import { BookingsPageContent } from "@/components/bookings/bookings-page-content";
+
+export type BookingsListPageViewProps = {
+  orgId: string;
+  /** When true, hide write affordances (create-appointment-type form,
+   *  status changes). v1.24.1 will refactor for dual-auth. */
+  readonly?: boolean;
+};
+
+export async function BookingsListPageView({
+  orgId,
+  readonly = false,
+}: BookingsListPageViewProps) {
+  void readonly;
+  const [labels, bookingTypes, bookings, contacts, soul, integrationSettings, workspaceBookingRules, orgRow] =
+    await Promise.all([
+      getLabels(orgId),
+      listAppointmentTypes(orgId),
+      listBookings(orgId),
+      listContacts({ orgId }),
+      getSoul(orgId),
+      getIntegrationSettings().catch(() => null),
+      // Workspace-wide availability + booking rules for the panel below the
+      // calendar. Returns documented defaults when settings.booking is unset.
+      getWorkspaceBookingRules(orgId),
+      // v1.40.9 — also fetch workspace timezone so bookings render in the
+      // operator's local time (e.g. America/Los_Angeles), not in the
+      // viewer's browser timezone. Pre-1.40.9 a 9 AM PDT booking rendered
+      // as 12 PM EDT for a viewer in EDT.
+      db
+        .select({
+          slug: organizations.slug,
+          timezone: organizations.timezone,
+          // 2026-05-17 — pull the personality vertical from settings.crmPersonality
+          // so the Create Type drawer can offer plumbing/HVAC/dental/etc-
+          // shaped placeholders + duration options + quick-start templates
+          // instead of the coaching default.
+          settings: organizations.settings,
+        })
+        .from(organizations)
+        .where(eq(organizations.id, orgId))
+        .limit(1)
+        .then((r) => r[0] ?? null),
+    ]);
+
+  void integrationSettings;
+  const orgSlug = orgRow?.slug ?? "";
+  const workspaceTimezone = orgRow?.timezone ?? "UTC";
+  const personalityVertical =
+    (orgRow?.settings as { crmPersonality?: { vertical?: string } } | null | undefined)
+      ?.crmPersonality?.vertical ?? null;
+  const bookingDefaults = getBookingDefaults(personalityVertical);
+
+  return (
+    <section className="animate-page-enter space-y-3 sm:space-y-4">
+      <div className="border-b border-border bg-background px-3 sm:px-6 py-2 sm:py-2.5">
+        <h1 className="text-sm md:text-base lg:text-lg font-semibold text-foreground truncate">
+          {labels.activity.plural} · Booking
+        </h1>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          Manage appointment types and upcoming{" "}
+          {labels.activity.plural.toLowerCase()}.
+        </p>
+      </div>
+
+      <BookingsPageContent
+        labels={{ contact: labels.contact, activity: labels.activity }}
+        bookingTypes={bookingTypes.map((row) => ({
+          id: row.id,
+          title: row.title,
+          bookingSlug: row.bookingSlug,
+          metadata: row.metadata,
+        }))}
+        bookings={bookings.map((row) => ({
+          id: row.id,
+          title: row.title,
+          startsAt: row.startsAt,
+          endsAt: row.endsAt,
+          status: row.status,
+          contactId: row.contactId,
+          notes: row.notes,
+        }))}
+        contacts={contacts.map((row) => ({
+          id: row.id,
+          firstName: row.firstName,
+          lastName: row.lastName,
+          phone: row.phone,
+          email: row.email,
+        }))}
+        suggestedServices={soul?.services ?? []}
+        orgSlug={orgSlug}
+        publicBaseUrl={`https://${process.env.WORKSPACE_BASE_DOMAIN?.trim() || "app.seldonframe.com"}`}
+        workspaceTimezone={workspaceTimezone}
+        workspaceBookingRules={workspaceBookingRules}
+        calendarConnected={false}
+        googleCalendarConnectUrl=""
+        createAppointmentTypeAction={createAppointmentTypeAction}
+        editAppointmentTypeAction={editAppointmentTypeAction}
+        bookingDefaults={bookingDefaults}
+        createBookingAction={createBookingAction}
+        createBlockedTimeAction={createBlockedTimeAction}
+        rescheduleBookingAction={rescheduleBookingAction}
+      />
+    </section>
+  );
+}
