@@ -99,6 +99,12 @@ export default async function LoginPage({
           <Link href="/terms" className="underline-offset-4 hover:underline">
             Terms of Service
           </Link>
+          <a
+            href="https://github.com/barbaderuturaj/avorlio-source"
+            className="underline-offset-4 hover:underline"
+          >
+            Source Code · AGPL-3.0
+          </a>
           <span className="ml-auto">&copy; 2026 Avorlio</span>
         </div>
       </footer>

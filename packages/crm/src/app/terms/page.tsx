@@ -1,185 +1,164 @@
 import Link from "next/link";
-import { AGENCY_PLAN_FACTS, BUILDER_PRICING_CLAIM, HOSTED_AI_POLICY } from "@/lib/marketing/public-claims";
 
 export const metadata = {
-  title: "Terms of Service — SeldonFrame",
+  title: "Terms of Service — Avorlio",
+  description: "Terms governing use of Avorlio.",
 };
 
 export default function TermsPage() {
   return (
     <main className="mx-auto max-w-3xl px-6 py-16">
-      <h1 className="mb-2 text-3xl font-bold">Terms of Service — SeldonFrame</h1>
-      <p className="text-sm text-muted-foreground">Last updated: June 2026</p>
+      <h1 className="text-3xl font-bold">Terms of Service — Avorlio</h1>
+      <p className="mt-2 text-sm text-muted-foreground">Last updated: September 8, 2026</p>
 
-      <section>
-        <h2 className="mb-4 mt-10 text-xl font-semibold">1. What is SeldonFrame</h2>
-        <p className="text-base leading-relaxed text-muted-foreground">
-          SeldonFrame is a business identity operating system. It provides CRM, booking, landing pages, email, and
-          payment tools — all connected through a single business identity layer called the &quot;soul.&quot; You configure your
-          soul once, and every feature adapts to your business automatically. If a feature you need doesn&apos;t exist,
-          you can describe it and the AI-powered &quot;Seldon It&quot; feature will build it for you.
-        </p>
-        <p className="mt-4 text-base leading-relaxed text-muted-foreground">SeldonFrame is available as:</p>
-        <ul className="mt-3 list-disc space-y-2 pl-6 text-base leading-relaxed text-muted-foreground">
-          <li>A free, open-source self-hosted version</li>
-          <li>A managed cloud service at app.seldonframe.com</li>
-        </ul>
-      </section>
+      <div className="mt-10 space-y-8 text-base leading-relaxed text-muted-foreground">
+        <section>
+          <h2 className="mb-3 text-xl font-semibold text-foreground">1. About Avorlio</h2>
+          <p>
+            Avorlio provides an AI front office for service businesses. Depending on the
+            configuration selected by a customer, Avorlio may capture website leads, answer
+            approved business questions, collect lead information, help qualify prospects,
+            schedule appointments, connect with calendars, and send email follow-up.
+          </p>
+        </section>
 
-      <section>
-        <h2 className="mb-4 mt-10 text-xl font-semibold">2. Accounts</h2>
-        <ul className="list-disc space-y-3 pl-6 text-base leading-relaxed text-muted-foreground">
-          <li>You must provide accurate information during signup</li>
-          <li>You are responsible for maintaining the security of your account</li>
-          <li>One account per person; business accounts belong to the business</li>
-        </ul>
-      </section>
+        <section>
+          <h2 className="mb-3 text-xl font-semibold text-foreground">2. Your account and business</h2>
+          <p>
+            You must provide accurate account and business information and have authority to use
+            Avorlio for the business you configure. You are responsible for keeping your account
+            credentials secure and for activity performed through your account.
+          </p>
+        </section>
 
-      <section>
-        <h2 className="mb-4 mt-10 text-xl font-semibold">3. Acceptable Use</h2>
-        <ul className="list-disc space-y-3 pl-6 text-base leading-relaxed text-muted-foreground">
-          <li>Use SeldonFrame for lawful business purposes</li>
-          <li>Do not use the platform to send spam or unsolicited communications</li>
-          <li>Do not attempt to access other users&apos; data</li>
-          <li>Do not reverse engineer or attack the service</li>
-        </ul>
-      </section>
+        <section>
+          <h2 className="mb-3 text-xl font-semibold text-foreground">3. Customer responsibilities</h2>
+          <p>
+            You are responsible for the accuracy of business information, services, pricing,
+            availability, policies, emergency instructions, and other content supplied to Avorlio.
+            You are also responsible for providing any notices or obtaining any consents required
+            when collecting or communicating with your customers and leads.
+          </p>
+        </section>
 
-      <section>
-        <h2 className="mb-4 mt-10 text-xl font-semibold">4. Your Data</h2>
-        <ul className="list-disc space-y-3 pl-6 text-base leading-relaxed text-muted-foreground">
-          <li>You own your data (contacts, bookings, emails, soul configuration)</li>
-          <li>We do not claim ownership of any content you create</li>
-          <li>
-            You grant us a limited license to host and process your data solely to provide the service
-          </li>
-          <li>You can export or delete your data at any time</li>
-        </ul>
-      </section>
+        <section>
+          <h2 className="mb-3 text-xl font-semibold text-foreground">4. AI-generated responses</h2>
+          <p>
+            AI systems can make mistakes. Avorlio is designed to use approved business information
+            and guardrails, but generated responses should not be treated as professional, medical,
+            legal, financial, safety, or emergency advice. Businesses remain responsible for
+            reviewing their configuration and providing appropriate escalation instructions.
+          </p>
+        </section>
 
-      <section>
-        <h2 className="mb-4 mt-10 text-xl font-semibold">5. Subscription and Billing</h2>
-        <p className="text-base leading-relaxed text-muted-foreground">
-          Paid plans are billed monthly or annually through Stripe. You can cancel at any time. Cancellation takes
-          effect at the end of the current billing period. Refunds are handled on a case-by-case basis.
-        </p>
-        <p className="mt-4 text-base leading-relaxed text-muted-foreground">
-          {`Plans include Free (the free build-and-claim flow), ${BUILDER_PRICING_CLAIM} Managed ($${AGENCY_PLAN_FACTS[1].priceMonthly}/month for one managed workspace), and Agency Starter ($${AGENCY_PLAN_FACTS[2].priceMonthly}/month for ${AGENCY_PLAN_FACTS[2].audience}), Agency Growth ($${AGENCY_PLAN_FACTS[3].priceMonthly}/month for ${AGENCY_PLAN_FACTS[3].audience}), and Agency Scale ($${AGENCY_PLAN_FACTS[4].priceMonthly}/month for ${AGENCY_PLAN_FACTS[4].audience}). ${HOSTED_AI_POLICY} Usage charges, taxes, and any third-party provider costs are disclosed at checkout or in the applicable plan details. Self-hosting is available under the applicable open-source license.`}
-        </p>
-      </section>
+        <section>
+          <h2 className="mb-3 text-xl font-semibold text-foreground">5. Bookings and integrations</h2>
+          <p>
+            Avorlio may connect to third-party services such as calendar, email, AI, and
+            infrastructure providers. Their services are governed by their own terms and may
+            occasionally be unavailable or change independently of Avorlio. Appointment
+            availability also depends on the calendar and booking rules configured by the
+            business.
+          </p>
+        </section>
 
-      <section>
-        <h2 className="mb-4 mt-10 text-xl font-semibold">6. Seldon It (AI Features)</h2>
-        <p className="text-base leading-relaxed text-muted-foreground">
-          The Seldon It feature uses AI (Anthropic Claude) to generate custom software blocks based on your
-          description. Generated blocks run within your SeldonFrame instance. AI-generated code is provided as-is. You
-          should review generated features before using them with real client data.
-        </p>
-      </section>
+        <section>
+          <h2 className="mb-3 text-xl font-semibold text-foreground">6. Fees</h2>
+          <p>
+            Paid services, setup fees, recurring charges, and included features are governed by
+            the price or written offer agreed with you at purchase or onboarding. Avorlio will not
+            impose a recurring paid plan without the applicable purchase or agreement.
+          </p>
+        </section>
 
-      <section>
-        <h2 className="mb-4 mt-10 text-xl font-semibold">7. Marketplace</h2>
-        <p className="text-base leading-relaxed text-muted-foreground">
-          Pro users may list blocks, frameworks, themes, and soul packs on the SeldonFrame marketplace. Sellers keep
-          100% of sales revenue. SeldonFrame takes 0% commission. Sellers are responsible for the quality and accuracy
-          of their listings.
-        </p>
-      </section>
+        <section>
+          <h2 className="mb-3 text-xl font-semibold text-foreground">7. Acceptable use</h2>
+          <p>You may not use Avorlio to:</p>
+          <ul className="mt-3 list-disc space-y-2 pl-6">
+            <li>violate applicable law or another person&apos;s rights;</li>
+            <li>send unlawful, deceptive, abusive, or unauthorized communications;</li>
+            <li>attempt to gain unauthorized access to systems, accounts, or data;</li>
+            <li>interfere with the security or operation of the service; or</li>
+            <li>misrepresent generated output as guaranteed professional advice.</li>
+          </ul>
+        </section>
 
-      <section>
-        <h2 className="mb-4 mt-10 text-xl font-semibold">8. Affiliate Program</h2>
-        <p className="text-base leading-relaxed text-muted-foreground">
-          Users may earn 30% recurring commission on subscriptions generated through their referral link. Commission is
-          paid monthly via Stripe Connect. SeldonFrame reserves the right to modify the affiliate program terms.
-        </p>
-      </section>
+        <section>
+          <h2 className="mb-3 text-xl font-semibold text-foreground">8. Your content and data</h2>
+          <p>
+            You retain responsibility for and rights in business content and customer data you
+            provide, subject to the rights required for Avorlio to host, process, transmit, and
+            display that information solely to operate and improve the service.
+          </p>
+        </section>
 
-      <section>
-        <h2 className="mb-4 mt-10 text-xl font-semibold">9. Open Source License</h2>
-        <p className="text-base leading-relaxed text-muted-foreground">
-          The SeldonFrame source code is available under the GNU Affero General Public License, version 3
-          (AGPL-3.0). Subject to that license, you may copy, modify, self-host, redistribute, and deploy SeldonFrame
-          for your own business or your clients&apos; businesses, including as a hosted service. If you modify the
-          software and provide it to users over a network, the AGPL-3.0 source-availability obligations apply. These
-          Terms govern the SeldonFrame hosted service and do not narrow the rights granted by the open-source license.
-        </p>
-      </section>
+        <section>
+          <h2 className="mb-3 text-xl font-semibold text-foreground">9. Open-source software</h2>
+          <p>
+            Avorlio is based on and modifies SeldonFrame. Corresponding source code for the
+            deployed Avorlio version is made available under the GNU Affero General Public License
+            version 3 (AGPL-3.0).
+          </p>
+          <a
+            href="https://github.com/barbaderuturaj/avorlio-source"
+            className="mt-2 inline-block underline underline-offset-4"
+          >
+            Avorlio source code · AGPL-3.0
+          </a>
+        </section>
 
-      <section>
-        <h2 className="mb-4 mt-10 text-xl font-semibold">10. Limitation of Liability</h2>
-        <p className="text-base leading-relaxed text-muted-foreground">
-          SeldonFrame is provided &quot;as is.&quot; We do our best to keep the service reliable and secure, but we cannot
-          guarantee 100% uptime or error-free operation. We are not liable for any indirect, incidental, or
-          consequential damages.
-        </p>
-      </section>
+        <section>
+          <h2 className="mb-3 text-xl font-semibold text-foreground">10. Availability and changes</h2>
+          <p>
+            We work to keep Avorlio available and reliable, but uninterrupted operation is not
+            guaranteed. Features may be changed, improved, suspended, or removed when reasonably
+            necessary for security, reliability, legal compliance, or product operation.
+          </p>
+        </section>
 
-      <section>
-        <h2 className="mb-4 mt-10 text-xl font-semibold">11. Termination</h2>
-        <p className="text-base leading-relaxed text-muted-foreground">
-          We may suspend or terminate accounts that violate these terms. You may close your account at any time. Upon
-          termination, your data will be deleted within 30 days unless you request an export.
-        </p>
-      </section>
+        <section>
+          <h2 className="mb-3 text-xl font-semibold text-foreground">11. Disclaimer and liability</h2>
+          <p>
+            To the extent permitted by applicable law, Avorlio is provided on an “as available”
+            basis without guarantees that every lead will convert, every message will be delivered,
+            or every appointment will result in revenue. To the extent permitted by applicable law,
+            Avorlio is not liable for indirect, incidental, special, consequential, or lost-profit
+            damages arising from use of the service.
+          </p>
+        </section>
 
-      <section>
-        <h2 className="mb-4 mt-10 text-xl font-semibold">12. SMS / Text Messaging Terms</h2>
-        <p className="text-base leading-relaxed text-muted-foreground">
-          By providing your mobile number and opting in — when you submit a form, book an appointment,
-          place a call, or reply to a text — you consent to receive recurring automated text messages
-          (appointment confirmations, reminders, follow-ups, and customer-service replies) from us or our
-          service providers at that number. Consent is not a condition of any purchase.
-        </p>
-        <ul className="mt-3 list-disc space-y-3 pl-6 text-base leading-relaxed text-muted-foreground">
-          <li>
-            <strong>Program description:</strong> messages may include booking confirmations, appointment
-            reminders, missed-call follow-ups, review requests, account and service notifications, and
-            replies to messages you send.
-          </li>
-          <li>
-            <strong>Opt-out:</strong> reply <strong>STOP</strong> at any time to cancel. You will receive
-            one final confirmation message and then no further texts to that number.
-          </li>
-          <li>
-            <strong>Help:</strong> reply <strong>HELP</strong> for assistance, or email
-            support@seldonframe.com.
-          </li>
-          <li>
-            <strong>Message frequency varies</strong> based on your interactions with the business.
-          </li>
-          <li>
-            <strong>Message and data rates may apply.</strong> Your mobile carrier&apos;s standard rates
-            apply to every message you send or receive.
-          </li>
-          <li>Carriers are not liable for delayed or undelivered messages.</li>
-        </ul>
-        <p className="mt-3 text-base leading-relaxed text-muted-foreground">
-          For details on how we handle the mobile information you provide, see our{" "}
-          <Link href="/privacy" className="underline-offset-4 hover:underline">
-            Privacy Policy
-          </Link>
-          . No mobile information or SMS opt-in data is sold or shared with third parties for marketing
-          purposes.
-        </p>
-      </section>
+        <section>
+          <h2 className="mb-3 text-xl font-semibold text-foreground">12. Suspension and termination</h2>
+          <p>
+            Access may be suspended or terminated for material violations of these Terms, unlawful
+            use, security threats, or non-payment of agreed charges. You may stop using Avorlio at
+            any time, subject to any active paid agreement.
+          </p>
+        </section>
 
-      <section>
-        <h2 className="mb-4 mt-10 text-xl font-semibold">13. Contact</h2>
-        <p className="text-base leading-relaxed text-muted-foreground">
-          For questions: support@seldonframe.com
-          <br />
-          SeldonFrame is operated by Max Thule.
-        </p>
-      </section>
+        <section>
+          <h2 className="mb-3 text-xl font-semibold text-foreground">13. Changes to these Terms</h2>
+          <p>
+            These Terms may be updated as Avorlio changes. The current version and its effective
+            date will be published on this page.
+          </p>
+        </section>
 
-      <footer className="mt-12 flex flex-wrap items-center gap-4 border-t border-border pt-6 text-sm text-muted-foreground">
-        <Link href="/" className="underline-offset-4 hover:underline">
-          Back to Home
-        </Link>
-        <Link href="/privacy" className="underline-offset-4 hover:underline">
-          Privacy Policy
-        </Link>
-      </footer>
+        <section>
+          <h2 className="mb-3 text-xl font-semibold text-foreground">14. Contact</h2>
+          <p>
+            Questions about these Terms can be sent to{" "}
+            <a href="mailto:hello@avorlio.com" className="underline underline-offset-4">
+              hello@avorlio.com
+            </a>.
+          </p>
+        </section>
+      </div>
+
+      <div className="mt-12 flex gap-5 border-t pt-6 text-sm">
+        <Link href="/" className="underline underline-offset-4">Home</Link>
+        <Link href="/privacy" className="underline underline-offset-4">Privacy Policy</Link>
+      </div>
     </main>
   );
 }

@@ -26,6 +26,7 @@ const COLUMNS: readonly Column[] = [
     links: [
       { label: "Terms", href: "/terms" },
       { label: "Privacy", href: "/privacy" },
+      { label: "Source Code · AGPL-3.0", href: "https://github.com/barbaderuturaj/avorlio-source" },
     ],
   },
 ];
