@@ -22,9 +22,9 @@ import { toInternalRedirectPath } from "@/lib/auth/signup-redirect";
 
 const protectedPrefixes = ["/hub", "/dashboard", "/welcome", "/orgs", "/contacts", "/deals", "/activities", "/forms", "/settings", "/api/v1"];
 const publicPrefixes = ["/api/v1", "/api/auth"];
-const defaultAppHosts = new Set(["app.seldonframe.com", "localhost", "127.0.0.1"]);
-const marketingHosts = new Set(["seldonframe.com", "www.seldonframe.com"]);
-const appHostFallback = "app.seldonframe.com";
+const defaultAppHosts = new Set(["app.avorlio.com", "app.seldonframe.com", "localhost", "127.0.0.1"]);
+const marketingHosts = new Set(["avorlio.com", "www.avorlio.com", "seldonframe.com", "www.seldonframe.com"]);
+const appHostFallback = "app.avorlio.com";
 // The builder MCP host the /build page's connect snippet + SKILL.md advertise
 // (mirrors SKILL_MD_MCP_URL / MCP_URL — src/lib/build/skill-md.ts,
 // src/components/settings/api-key-manager.tsx). Hardcoded like those two, for
