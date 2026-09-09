@@ -206,6 +206,9 @@ export default function AvorlioHomePage() {
             <a href="/privacy" className="hover:text-white">
               Privacy
             </a>
+            <a href="/refund-policy" className="hover:text-white">
+              Refund Policy
+            </a>
             <a
               href="https://github.com/barbaderuturaj/avorlio-source"
               className="hover:text-white"

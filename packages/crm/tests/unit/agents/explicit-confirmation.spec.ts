@@ -5,6 +5,7 @@ import {
   enforceExplicitConfirmation,
   hasPriorToolConfirmationRequest,
   isExplicitAffirmativeConfirmation,
+  latestPendingConfirmationAction,
 } from "../../../src/lib/agents/explicit-confirmation";
 
 describe("isExplicitAffirmativeConfirmation", () => {
@@ -143,5 +144,94 @@ describe("enforceExplicitConfirmation", () => {
       ),
       false,
     );
+  });
+});
+
+
+describe("latestPendingConfirmationAction readBack bridge", () => {
+  test("bridges an exact server readBack replay to the pending booking action", () => {
+    const readBack =
+      "So that's Final Golden Test, Wednesday, September 9 at 8:00 AM CDT — is that correct?";
+
+    const pending = latestPendingConfirmationAction(
+      [
+        {
+          role: "assistant",
+          toolCalls: [
+            {
+              id: "booking-confirmation",
+              name: "book_appointment",
+              input: {
+                slotIso: "2026-09-09T13:00:00.000Z",
+                bookingSlug: "default",
+                fullName: "Final Golden Test",
+                confirmed: false,
+              },
+            },
+          ],
+          toolResults: [
+            {
+              toolCallId: "booking-confirmation",
+              ok: true,
+              output: {
+                ok: false,
+                needsConfirmation: true,
+                readBack,
+              },
+            },
+          ],
+        },
+        { role: "user", content: "Hey do you checked?" },
+        { role: "assistant", content: readBack },
+        { role: "user", content: "Yes" },
+      ],
+      "book_appointment",
+    );
+
+    assert.deepEqual(pending, {
+      toolName: "book_appointment",
+      input: {
+        slotIso: "2026-09-09T13:00:00.000Z",
+        bookingSlug: "default",
+        fullName: "Final Golden Test",
+        confirmed: false,
+      },
+    });
+  });
+
+  test("does not bridge unrelated assistant text to an older pending action", () => {
+    const pending = latestPendingConfirmationAction(
+      [
+        {
+          role: "assistant",
+          toolCalls: [
+            {
+              id: "booking-confirmation",
+              name: "book_appointment",
+              input: {
+                slotIso: "2026-09-09T13:00:00.000Z",
+                confirmed: false,
+              },
+            },
+          ],
+          toolResults: [
+            {
+              toolCallId: "booking-confirmation",
+              ok: true,
+              output: {
+                needsConfirmation: true,
+                readBack: "So that's Jane Doe, Wednesday at 8:00 AM — is that correct?",
+              },
+            },
+          ],
+        },
+        { role: "user", content: "What areas do you serve?" },
+        { role: "assistant", content: "We serve the Dallas area." },
+        { role: "user", content: "Yes" },
+      ],
+      "book_appointment",
+    );
+
+    assert.equal(pending, null);
   });
 });

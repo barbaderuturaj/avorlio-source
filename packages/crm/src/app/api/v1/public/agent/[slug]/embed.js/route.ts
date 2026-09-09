@@ -409,7 +409,6 @@ function renderEmbedScript(input: {
     '<textarea class="sf-agent-input" id="sf-agent-input" rows="1" placeholder="Type a message..." aria-label="Type a message"></textarea>',
     '<button class="sf-agent-send" type="submit" aria-label="Send message">Send</button>',
     '</form>',
-    '<div class="sf-agent-footer">Powered by <a href="https://seldonframe.com" target="_blank" rel="noopener">SeldonFrame</a></div>'
   ].join("");
 
   function escapeHtml(s){return String(s).replace(/[&<>"']/g, function(c){return ({"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"})[c];});}

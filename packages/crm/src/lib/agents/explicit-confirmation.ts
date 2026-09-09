@@ -73,29 +73,79 @@ export function latestPendingConfirmationAction(
   turns: HistoricalTurn[],
   toolName?: string,
 ): PendingConfirmationAction | null {
-  for (let index = turns.length - 1; index >= 0; index--) {
-    const turn = turns[index];
-    if (turn?.role !== "assistant") continue;
-    if (turn.toolCalls && turn.toolResults) {
-      for (const call of turn.toolCalls) {
-        if (toolName && call.name !== toolName) continue;
-        const result = turn.toolResults.find((candidate) => candidate.toolCallId === call.id);
-        if (!result?.ok || !result.output || typeof result.output !== "object") continue;
-        if ((result.output as { needsConfirmation?: unknown }).needsConfirmation === true) {
-          return {
-            toolName: call.name,
-            input:
-              call.input && typeof call.input === "object"
-                ? { ...(call.input as Record<string, unknown>), confirmed: false }
-                : { confirmed: false },
-          };
-        }
+  const pendingFromTurn = (
+    turn: HistoricalTurn,
+    requiredReadBack?: string,
+  ): PendingConfirmationAction | null => {
+    if (!turn.toolCalls || !turn.toolResults) return null;
+
+    for (const call of turn.toolCalls) {
+      if (toolName && call.name !== toolName) continue;
+
+      const result = turn.toolResults.find(
+        (candidate) => candidate.toolCallId === call.id,
+      );
+      if (!result?.ok || !result.output || typeof result.output !== "object") {
+        continue;
       }
+
+      const output = result.output as {
+        needsConfirmation?: unknown;
+        readBack?: unknown;
+      };
+      if (output.needsConfirmation !== true) continue;
+
+      if (
+        requiredReadBack !== undefined &&
+        (typeof output.readBack !== "string" ||
+          output.readBack.trim() !== requiredReadBack)
+      ) {
+        continue;
+      }
+
+      return {
+        toolName: call.name,
+        input:
+          call.input && typeof call.input === "object"
+            ? { ...(call.input as Record<string, unknown>), confirmed: false }
+            : { confirmed: false },
+      };
     }
-    // Only the latest assistant turn can be the proposal the current user is
-    // affirming. An older confirmation request must not authorize a later write.
+
     return null;
+  };
+
+  let latestAssistantIndex = -1;
+  for (let index = turns.length - 1; index >= 0; index--) {
+    if (turns[index]?.role === "assistant") {
+      latestAssistantIndex = index;
+      break;
+    }
   }
+
+  if (latestAssistantIndex < 0) return null;
+
+  const latestAssistant = turns[latestAssistantIndex]!;
+  const directPending = pendingFromTurn(latestAssistant);
+  if (directPending) return directPending;
+
+  // A pending write may produce its server readBack on one assistant turn and
+  // then be repeated verbatim as a text-only assistant turn after the visitor
+  // asks for clarification ("did you check?", etc.). Preserve confirmation
+  // authority only across that exact one-assistant-turn replay. Never revive an
+  // arbitrary older pending action.
+  const echoedReadBack =
+    typeof latestAssistant.content === "string"
+      ? latestAssistant.content.trim()
+      : "";
+  if (!echoedReadBack) return null;
+
+  for (let index = latestAssistantIndex - 1; index >= 0; index--) {
+    const previousAssistant = turns[index];
+    if (previousAssistant?.role !== "assistant") continue;
+    return pendingFromTurn(previousAssistant, echoedReadBack);
+  }
+
   return null;
 }
 

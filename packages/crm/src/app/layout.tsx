@@ -45,24 +45,19 @@ const newsreader = Newsreader({
 // README). The legacy /logo.svg path is kept on disk for now (not
 // removed in this commit) but no longer referenced from layout meta.
 export const metadata: Metadata = {
-  metadataBase: new URL("https://www.seldonframe.com"),
-  title: "AI Front Office - Capture leads and book appointments.",
+  metadataBase: new URL("https://avorlio.com"),
+  title: "Avorlio — AI Front Office for HVAC Companies",
   description:
-    "The agent-native, open-source alternative to GoHighLevel for agencies selling AI front offices to local businesses. Deploy branded client workspaces, booking, CRM, intake, and agents from one repeatable delivery loop.",
+    "Avorlio is a done-for-you AI Front Office for HVAC companies that captures and qualifies website leads, books appointments, and follows up automatically.",
   manifest: "/brand/manifest.webmanifest",
   icons: {
-    icon: [
-      { url: "/brand/seldonframe-favicon.svg", type: "image/svg+xml" },
-      { url: "/brand/favicon-32.png", sizes: "32x32", type: "image/png" },
-      { url: "/brand/favicon-16.png", sizes: "16x16", type: "image/png" },
-    ],
-    shortcut: "/brand/favicon.ico",
-    apple: [{ url: "/brand/favicon-180.png", sizes: "180x180" }],
+    icon: [{ url: "/brand/avorlio-favicon-v1.svg", type: "image/svg+xml" }],
+    shortcut: "/brand/avorlio-favicon-v1.svg",
   },
   openGraph: {
     title: "AI Front Office - Capture leads and book appointments.",
     description:
-      "The agent-native, open-source alternative to GoHighLevel for agencies selling AI front offices to local businesses.",
+      "Done-for-you AI Front Office for HVAC companies that captures, qualifies, books, and follows up with website leads.",
     images: [{ url: "/brand/og-image.png", width: 1200, height: 630 }],
   },
   twitter: {

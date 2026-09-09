@@ -59,16 +59,31 @@ export function enforcePublicAgentOutput(
     }
 
     if (inputRecord.confirmed !== true) {
-      // executeTurn may already have constructed the authoritative readback
-      // from the exact offered slot label. Preserve that safe text at the SSE
-      // boundary instead of rebuilding it without a timezone (the route does
-      // not carry org context). This was the live raw-ISO regression.
-      if (!/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/.test(response)) {
-        return sanitizeUnbackedOperationalPromises(response, calls, results);
-      }
       const toolReadBack = typeof outputRecord?.readBack === "string"
         ? outputRecord.readBack.trim()
         : "";
+
+      // A booking tool that reached NeedsConfirmation has already collected
+      // everything required to propose the write. Its server-generated
+      // readBack is authoritative and MUST win over any model-generated text
+      // from the same turn (for example a duplicate address/intake question).
+      // This also makes the following user's "yes" reliably refer to the
+      // persisted pending confirmation action.
+      if (
+        outputRecord?.needsConfirmation === true &&
+        toolReadBack &&
+        !/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/.test(toolReadBack)
+      ) {
+        return toolReadBack;
+      }
+
+      // executeTurn may already have constructed the authoritative readback
+      // from the exact offered slot label. Preserve other safe text unless it
+      // exposes a raw machine timestamp.
+      if (!/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/.test(response)) {
+        return sanitizeUnbackedOperationalPromises(response, calls, results);
+      }
+
       if (
         toolReadBack &&
         !/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/.test(toolReadBack)

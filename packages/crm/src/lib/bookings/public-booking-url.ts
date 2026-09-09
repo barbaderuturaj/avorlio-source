@@ -6,6 +6,17 @@ import { sanitizePublicClaimText, type VerifiedBusinessFacts } from "@/lib/landi
 
 const DEFAULT_WORKSPACE_BASE_DOMAIN = "app.seldonframe.com";
 
+function configuredAppHost(): string {
+  const configuredAppUrl = process.env.NEXT_PUBLIC_APP_URL?.trim();
+  if (!configuredAppUrl) return DEFAULT_WORKSPACE_BASE_DOMAIN;
+
+  try {
+    return new URL(configuredAppUrl).hostname.toLowerCase();
+  } catch {
+    return DEFAULT_WORKSPACE_BASE_DOMAIN;
+  }
+}
+
 export type PublicBookingTemplate = {
   slug: string;
   title: string;
@@ -16,7 +27,7 @@ function stripTrailingSlash(value: string): string {
 }
 
 function normalizedBaseDomain(baseDomain?: string | null): string {
-  return (baseDomain?.trim() || DEFAULT_WORKSPACE_BASE_DOMAIN)
+  return (baseDomain?.trim() || configuredAppHost())
     .toLowerCase()
     .replace(/^https?:\/\//, "")
     .replace(/\/.*$/, "")

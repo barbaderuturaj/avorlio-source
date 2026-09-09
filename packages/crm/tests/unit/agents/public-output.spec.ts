@@ -150,3 +150,49 @@ describe("public website-agent output boundary", () => {
     assert.doesNotMatch(output, /hiccup|follow up|email/i);
   });
 });
+
+
+describe("pending booking confirmation authority", () => {
+  test("authoritative confirmation readback overrides a duplicate intake question", () => {
+    const readBack =
+      "So that's qwerty, Wednesday, September 9 at 9:00 AM CDT — is that correct?";
+
+    const output = enforcePublicAgentOutput(
+      "Thanks for letting us know. Where is the address of the unit that needs service?",
+      [
+        {
+          id: "deterministic-slot-selection",
+          name: "book_appointment",
+          input: {
+            fullName: "qwerty",
+            phone: "+15555550123",
+            slotIso: "2026-09-09T14:00:00.000Z",
+            bookingSlug: "default",
+            confirmed: false,
+            intakeResponses: {
+              address: "123 main street, dallas",
+              urgency: "this week",
+              issue_type: "ac not cooling",
+            },
+          },
+        },
+      ],
+      [
+        {
+          toolCallId: "deterministic-slot-selection",
+          ok: true,
+          output: {
+            ok: false,
+            needsConfirmation: true,
+            readBack,
+            instruction:
+              "Read the readBack sentence to the caller verbatim and wait for confirmation.",
+          },
+        },
+      ],
+    );
+
+    assert.equal(output, readBack);
+    assert.doesNotMatch(output, /where is the address|thanks for letting us know/i);
+  });
+});
