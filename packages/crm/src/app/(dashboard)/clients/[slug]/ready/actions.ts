@@ -29,10 +29,49 @@ import { and, eq } from "drizzle-orm";
 import { auth } from "@/auth";
 import { db } from "@/db";
 import { organizations, orgMembers } from "@/db/schema";
+import { canManageWorkspace } from "@/lib/auth/managed-workspace";
+import { createDodoPlatformCheckout } from "@/lib/billing/dodo-checkout";
 import { assertWritable } from "@/lib/demo/server";
 import { markOnboardingComplete } from "@/lib/onboarding/state";
 import { sendOnboardingCompletionWelcomeEmail } from "@/lib/onboarding/welcome-email";
 import { setLandingTemplateForOrg } from "@/lib/landing/set-landing-template-for-org";
+
+export async function createDodoCheckoutAction(
+  workspaceSlug: string,
+): Promise<{ ok: true; checkoutUrl: string } | { ok: false; error: string }> {
+  const session = await auth();
+  const user = session?.user;
+  const slug = workspaceSlug.trim();
+  if (!user?.id) return { ok: false, error: "Please sign in before creating checkout." };
+  if (!slug) return { ok: false, error: "Client workspace is required." };
+
+  const [workspace] = await db
+    .select({ id: organizations.id })
+    .from(organizations)
+    .where(eq(organizations.slug, slug))
+    .limit(1);
+  if (!workspace || !(await canManageWorkspace(workspace.id, user.id))) {
+    return { ok: false, error: "You are not authorized to manage this client workspace." };
+  }
+
+  const customerEmail = user.email?.trim() ?? "";
+  if (!customerEmail) return { ok: false, error: "Your account needs an email before creating checkout." };
+
+  try {
+    const result = await createDodoPlatformCheckout({
+      orgId: workspace.id,
+      customerEmail,
+      customerName: user.name?.trim() || "Avorlio customer",
+    });
+    if (!result.checkoutUrl) {
+      return { ok: false, error: "Dodo did not return a hosted checkout URL." };
+    }
+    return { ok: true, checkoutUrl: result.checkoutUrl };
+  } catch (error) {
+    console.error("[ready/dodo-checkout] failed", error);
+    return { ok: false, error: "Dodo checkout is not configured. Check the Dodo test-mode settings." };
+  }
+}
 
 /**
  * "Maybe later" — the soft-skip path from the step-3 surface. Marks

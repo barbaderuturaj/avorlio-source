@@ -60,6 +60,23 @@ describe("HVAC internal onboarding checklist", () => {
     }), false);
   });
 
+  test("authorizes the agency owner for an attached client workspace", () => {
+    assert.equal(hasManagedWorkspaceAccess({
+      workspace: { ownerId: null, parentUserId: null, parentAgencyId: "agency-1" },
+      userId: "agency-owner",
+      agency: { ownerUserId: "agency-owner", ownerWorkspaceId: null },
+    }), true);
+  });
+
+  test("authorizes the agency owner through the agency owner workspace", () => {
+    assert.equal(hasManagedWorkspaceAccess({
+      workspace: { ownerId: null, parentUserId: null, parentAgencyId: "agency-1" },
+      userId: "agency-owner",
+      agency: { ownerUserId: null, ownerWorkspaceId: "agency-workspace" },
+      agencyOwnerWorkspaceOwnerId: "agency-owner",
+    }), true);
+  });
+
   test("preserves the intended atomic JSONB update contract", () => {
     // This test pins the implementation contract: the server action must use
     // jsonb_set against the existing settings document rather than replacing it.

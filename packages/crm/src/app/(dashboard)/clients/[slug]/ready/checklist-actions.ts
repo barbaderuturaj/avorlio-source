@@ -4,42 +4,9 @@ import { and, eq, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { auth } from "@/auth";
 import { db } from "@/db";
-import { intakeForms, orgMembers, organizations, partnerAgencies } from "@/db/schema";
-import { hasManagedWorkspaceAccess, HVAC_INTERNAL_CHECKLIST, isHvacOnboardingForm, type HvacInternalChecklistItemId } from "@/lib/onboarding/internal-checklist";
-
-async function canManageWorkspace(workspaceId: string, userId: string): Promise<boolean> {
-  const [workspace] = await db
-    .select({ ownerId: organizations.ownerId, parentUserId: organizations.parentUserId, parentAgencyId: organizations.parentAgencyId })
-    .from(organizations)
-    .where(eq(organizations.id, workspaceId))
-    .limit(1);
-  if (!workspace) return false;
-
-  const [member] = await db
-    .select({ userId: orgMembers.userId })
-    .from(orgMembers)
-    .where(and(eq(orgMembers.orgId, workspaceId), eq(orgMembers.userId, userId)))
-    .limit(1);
-  if (workspace.parentAgencyId) {
-    const [agency] = await db
-      .select({ ownerUserId: partnerAgencies.ownerUserId, ownerWorkspaceId: partnerAgencies.ownerWorkspaceId })
-      .from(partnerAgencies)
-      .where(eq(partnerAgencies.id, workspace.parentAgencyId))
-      .limit(1);
-    let agencyOwnerWorkspaceOwnerId: string | null = null;
-    if (agency?.ownerWorkspaceId) {
-      const [ownerWorkspace] = await db
-        .select({ ownerId: organizations.ownerId })
-        .from(organizations)
-        .where(eq(organizations.id, agency.ownerWorkspaceId))
-        .limit(1);
-      agencyOwnerWorkspaceOwnerId = ownerWorkspace?.ownerId ?? null;
-    }
-    return hasManagedWorkspaceAccess({ workspace, userId, memberUserId: member?.userId, agency, agencyOwnerWorkspaceOwnerId });
-  }
-
-  return hasManagedWorkspaceAccess({ workspace, userId, memberUserId: member?.userId });
-}
+import { intakeForms, organizations } from "@/db/schema";
+import { canManageWorkspace } from "@/lib/auth/managed-workspace";
+import { HVAC_INTERNAL_CHECKLIST, isHvacOnboardingForm, type HvacInternalChecklistItemId } from "@/lib/onboarding/internal-checklist";
 
 export async function toggleInternalOnboardingChecklistItem(input: {
   workspaceId: string;

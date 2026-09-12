@@ -63,6 +63,7 @@ import { ReadyDesignPicker } from "@/components/clients/design-picker/ReadyDesig
 import { resolveDesignModuleProps } from "@/components/clients/design-picker/resolve-module-props";
 import { buildChecklistView, isHvacOnboardingForm, readHvacInternalChecklist } from "@/lib/onboarding/internal-checklist";
 import { InternalOnboardingChecklist } from "./internal-onboarding-checklist";
+import { DodoCheckoutButton } from "./dodo-checkout-button";
 
 export const dynamic = "force-dynamic";
 
@@ -582,6 +583,12 @@ export default async function WorkspaceReadyPage({ params, searchParams }: Ready
             hrefs={checklistHrefs}
           />
         ) : null}
+
+        <section className="rounded-2xl border border-border/70 bg-card/40 p-5">
+          <p className="mb-1 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Internal billing</p>
+          <p className="mb-3 text-sm text-muted-foreground">Create the test-mode platform subscription for this client workspace.</p>
+          <DodoCheckoutButton workspaceSlug={workspace.slug} />
+        </section>
 
         {/* ============== R1 LANDING URL CARD ==============
             2026-05-22 — surfaces the auto-generated public landing
