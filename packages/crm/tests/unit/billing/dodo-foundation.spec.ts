@@ -110,6 +110,33 @@ test("duplicate webhook IDs are safe no-ops", () => {
   assert.equal(dodoEventIsAlreadyProcessed(["evt-1"], "evt-2"), false);
 });
 
+test("Dodo SQL uses a NULL-safe guard that preserves Stripe protection", () => {
+  const { sql: sqlText } = dialect.sqlToQuery(buildDodoSubscriptionUpdateQuery({
+    orgId: "11111111-1111-1111-1111-111111111111",
+    eventId: "evt_guard",
+    payload: {
+      subscription_id: "sub_dodo",
+      product_id: "pdt_hvac",
+      status: "active",
+    },
+  }));
+
+  // PostgreSQL JSONB extraction returns NULL for both SQL NULL and missing keys.
+  // IS DISTINCT FROM therefore permits {}, NULL, missing provider, and provider=dodo.
+  assert.match(sqlText, /subscription"->>'provider'\) IS DISTINCT FROM 'stripe'/);
+  assert.match(sqlText, /subscription"->>'stripeSubscriptionId' IS NULL/);
+  assert.doesNotMatch(sqlText, /NOT \(.*provider.*stripe.*OR/s);
+
+  // The two conjuncts intentionally retain both overwrite protections:
+  // provider=stripe is blocked, as is any present stripeSubscriptionId.
+  const guard = (subscription: { provider?: string; stripeSubscriptionId?: string } | null) =>
+    subscription?.provider !== "stripe" && subscription?.stripeSubscriptionId === undefined;
+  for (const subscription of [{}, null, { provider: "dodo" }]) assert.equal(guard(subscription), true);
+  for (const subscription of [{ provider: "stripe" }, { stripeSubscriptionId: "sub_stripe" }]) {
+    assert.equal(guard(subscription), false);
+  }
+});
+
 test("Dodo subscription SQL explicitly types JSONB-bound string parameters", () => {
   const { sql: sqlText, params } = dialect.sqlToQuery(buildDodoSubscriptionUpdateQuery({
     orgId: "11111111-1111-1111-1111-111111111111",

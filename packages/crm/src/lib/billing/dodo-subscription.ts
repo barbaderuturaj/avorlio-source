@@ -74,10 +74,8 @@ export function buildDodoSubscriptionUpdateQuery({
       updated_at = NOW()
     WHERE ${organizations.id} = ${orgId}::uuid
       AND COALESCE(${organizations.subscription}->>'provider', 'dodo') = 'dodo'
-      AND NOT (
-        ${organizations.subscription}->>'provider' = 'stripe'
-        OR ${organizations.subscription}->>'stripeSubscriptionId' IS NOT NULL
-      )
+      AND (${organizations.subscription}->>'provider') IS DISTINCT FROM 'stripe'
+      AND ${organizations.subscription}->>'stripeSubscriptionId' IS NULL
       AND NOT (COALESCE(${organizations.subscription}->'dodoProcessedEventIds', '[]'::jsonb) ? ${eventId}::text)
     RETURNING id
   `;
