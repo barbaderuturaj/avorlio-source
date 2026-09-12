@@ -6,6 +6,7 @@ import {
   DODO_PLATFORM_TIER,
 } from "@/lib/billing/dodo-checkout";
 import {
+  buildDodoSubscriptionUpdateQuery,
   dodoEventCreatesOnboardingLink,
   dodoStatusGrantsEntitlement,
   isDodoPlatformSubscriptionMetadata,
@@ -13,6 +14,9 @@ import {
 } from "@/lib/billing/dodo-subscription";
 import { getDodoConfig, readDodoWebhookHeaders, unwrapDodoWebhook } from "@/lib/billing/dodo-client";
 import { dodoEventIsAlreadyProcessed } from "@/lib/billing/dodo-subscription";
+import { PgDialect } from "drizzle-orm/pg-core";
+
+const dialect = new PgDialect();
 
 const ORIGINAL_ENV = {
   apiKey: process.env.DODO_PAYMENTS_API_KEY,
@@ -104,4 +108,33 @@ test("invalid mocked webhook signature is rejected", () => {
 test("duplicate webhook IDs are safe no-ops", () => {
   assert.equal(dodoEventIsAlreadyProcessed(["evt-1"], "evt-1"), true);
   assert.equal(dodoEventIsAlreadyProcessed(["evt-1"], "evt-2"), false);
+});
+
+test("Dodo subscription SQL explicitly types JSONB-bound string parameters", () => {
+  const { sql: sqlText, params } = dialect.sqlToQuery(buildDodoSubscriptionUpdateQuery({
+    orgId: "11111111-1111-1111-1111-111111111111",
+    eventId: "msg_123",
+    payload: {
+      subscription_id: "sub_123",
+      product_id: "pdt_123",
+      status: "active",
+      customer: null,
+      previous_billing_date: null,
+      next_billing_date: "2026-10-13T00:00:00.000Z",
+    },
+  }));
+
+  assert.match(sqlText, /\$1::text/);
+  assert.match(sqlText, /\$2::text/);
+  assert.match(sqlText, /\$3::text/);
+  assert.match(sqlText, /\$4::text/);
+  assert.match(sqlText, /\$5::text/);
+  assert.match(sqlText, /\$6::text/);
+  assert.match(sqlText, /\$7::text/);
+  assert.match(sqlText, /\$8::text/);
+  assert.match(sqlText, /jsonb_build_array\(\$9::text\)/);
+  assert.match(sqlText, /\? \$12::text/);
+  assert.match(sqlText, /\$11::uuid/);
+  assert.equal(params[0], null, "nullable customer ID remains SQL NULL");
+  assert.equal(params[7], "2026-10-13T00:00:00.000Z");
 });

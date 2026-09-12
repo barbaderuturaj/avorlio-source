@@ -41,29 +41,34 @@ export type DodoSubscriptionPayload = {
   next_billing_date?: string | null;
 };
 
-export async function applyDodoSubscriptionState(input: {
+type DodoSubscriptionUpdateInput = {
   orgId: string;
   eventId: string;
   payload: DodoSubscriptionPayload;
-  createOnboardingLink: boolean;
-}): Promise<{ applied: boolean; onboardingToken: string | null }> {
-  const { orgId, eventId, payload } = input;
+};
+
+export function buildDodoSubscriptionUpdateQuery({
+  orgId,
+  eventId,
+  payload,
+}: DodoSubscriptionUpdateInput) {
   const active = dodoStatusGrantsEntitlement(payload.status);
   const customerId = payload.customer?.customer_id ?? null;
-  const result = await db.execute(sql`
+
+  return sql`
     UPDATE ${organizations}
     SET subscription = COALESCE(${organizations.subscription}, '{}'::jsonb)
       || jsonb_build_object(
         'provider', 'dodo',
-        'dodoCustomerId', ${customerId},
-        'dodoSubscriptionId', ${payload.subscription_id},
-        'dodoProductId', ${payload.product_id},
-        'dodoStatus', ${payload.status},
-        'tier', ${active ? DODO_PLATFORM_TIER : "inactive"},
-        'status', ${active ? "active" : "canceled"},
-        'currentPeriodStart', ${payload.previous_billing_date ?? null},
-        'currentPeriodEnd', ${payload.next_billing_date ?? null},
-        'dodoProcessedEventIds', COALESCE(${organizations.subscription}->'dodoProcessedEventIds', '[]'::jsonb) || jsonb_build_array(${eventId})
+        'dodoCustomerId', ${customerId}::text,
+        'dodoSubscriptionId', ${payload.subscription_id}::text,
+        'dodoProductId', ${payload.product_id}::text,
+        'dodoStatus', ${payload.status}::text,
+        'tier', ${active ? DODO_PLATFORM_TIER : "inactive"}::text,
+        'status', ${active ? "active" : "canceled"}::text,
+        'currentPeriodStart', ${payload.previous_billing_date ?? null}::text,
+        'currentPeriodEnd', ${payload.next_billing_date ?? null}::text,
+        'dodoProcessedEventIds', COALESCE(${organizations.subscription}->'dodoProcessedEventIds', '[]'::jsonb) || jsonb_build_array(${eventId}::text)
       ),
       plan = ${active ? DODO_PLATFORM_TIER : "inactive"},
       updated_at = NOW()
@@ -73,9 +78,20 @@ export async function applyDodoSubscriptionState(input: {
         ${organizations.subscription}->>'provider' = 'stripe'
         OR ${organizations.subscription}->>'stripeSubscriptionId' IS NOT NULL
       )
-      AND NOT (COALESCE(${organizations.subscription}->'dodoProcessedEventIds', '[]'::jsonb) ? ${eventId})
+      AND NOT (COALESCE(${organizations.subscription}->'dodoProcessedEventIds', '[]'::jsonb) ? ${eventId}::text)
     RETURNING id
-  `);
+  `;
+}
+
+export async function applyDodoSubscriptionState(input: {
+  orgId: string;
+  eventId: string;
+  payload: DodoSubscriptionPayload;
+  createOnboardingLink: boolean;
+}): Promise<{ applied: boolean; onboardingToken: string | null }> {
+  const { orgId, eventId, payload } = input;
+  const active = dodoStatusGrantsEntitlement(payload.status);
+  const result = await db.execute(buildDodoSubscriptionUpdateQuery({ orgId, eventId, payload }));
 
   if (result.rows.length === 0) return { applied: false, onboardingToken: null };
   if (!active || !input.createOnboardingLink) return { applied: true, onboardingToken: null };
