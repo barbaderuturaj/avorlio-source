@@ -37,7 +37,7 @@ const STARTER_CONFIG: Record<
   },
   "speed-to-lead": {
     name: "Speed-to-Lead Responder",
-    greeting: "Thanks for reaching out — we got your message and we'll be in touch shortly!",
+    greeting: "Thanks for reaching out — we received your message and passed it to the team for follow-up.",
     trigger: { kind: "event", event: "lead.created", channel: "sms" },
   },
 };

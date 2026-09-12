@@ -204,16 +204,24 @@ function formatDate(value: string | null) {
   }).format(d);
 }
 
-function formatDateTime(value: string | null) {
+export function formatContactDateTime(value: string | null, timeZone: string) {
   if (!value) return "—";
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return "—";
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(d);
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+      timeZone, timeZoneName: "short",
+    }).format(d);
+  } catch {
+    return new Intl.DateTimeFormat("en-US", {
+      month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short",
+    }).format(d);
+  }
+}
+
+function formatDateTime(value: string | null, timeZone: string) {
+  return formatContactDateTime(value, timeZone);
 }
 
 function formatIndustryFieldValue(
@@ -281,6 +289,7 @@ export function ContactRecordDetail({
   orgId,
   orgSlug,
   clientWorkspaceSlug,
+  workspaceTimezone = "UTC",
   portalGate,
   appOrigin,
   userId,
@@ -306,6 +315,7 @@ export function ContactRecordDetail({
    * the contact has no linked workspace.
    */
   clientWorkspaceSlug?: string | null;
+  workspaceTimezone?: string;
   portalGate?: PortalGateInfo;
   appOrigin?: string | null;
   /** Current operator's user id — needed to log new activities. */
@@ -661,7 +671,7 @@ function OverviewTab({
         />
         <MetricCard
           label="Next booking"
-          value={upcomingBooking ? formatDateTime(upcomingBooking.startsAt) : "—"}
+          value={upcomingBooking ? formatDateTime(upcomingBooking.startsAt, workspaceTimezone) : "—"}
           icon={Calendar}
         />
       </div>
@@ -989,7 +999,7 @@ function OverviewTab({
               <div className="mt-3 space-y-1">
                 <p className="text-sm font-medium text-foreground">{upcomingBooking.title}</p>
                 <p className="text-xs text-muted-foreground">
-                  {formatDateTime(upcomingBooking.startsAt)}
+                  {formatDateTime(upcomingBooking.startsAt, workspaceTimezone)}
                 </p>
                 {upcomingBooking.meetingUrl ? (
                   <a
@@ -1326,7 +1336,7 @@ function ActivityDetailModal({
               {a.subject || activityTypeLabel(a.type)}
             </h2>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              {formatDateTime(a.createdAt)}
+              {formatDateTime(a.createdAt, workspaceTimezone)}
             </p>
           </div>
           <button
@@ -1360,7 +1370,7 @@ function ActivityDetailModal({
               <p className="text-[11px] uppercase tracking-wide text-muted-foreground mb-1">
                 {isTask ? "Due" : "Scheduled"}
               </p>
-              <p className="text-sm text-foreground">{formatDateTime(a.scheduledAt)}</p>
+              <p className="text-sm text-foreground">{formatDateTime(a.scheduledAt, workspaceTimezone)}</p>
             </div>
           ) : null}
 
@@ -1508,7 +1518,7 @@ function ActivityTab({
                     ) : null}
                     {a.scheduledAt ? (
                       <p className="mt-1 text-[11px] text-muted-foreground">
-                        {a.type === "task" ? "Due" : "Scheduled"} {formatDateTime(a.scheduledAt)}
+                        {a.type === "task" ? "Due" : "Scheduled"} {formatDateTime(a.scheduledAt, workspaceTimezone)}
                       </p>
                     ) : null}
                     {typeof a.metadata?.notes === "string" && a.metadata.notes.trim() ? (
@@ -1721,7 +1731,7 @@ function BookingList({
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium text-foreground">{b.title}</p>
               <p className="mt-0.5 text-xs text-muted-foreground">
-                {formatDateTime(b.startsAt)} ·{" "}
+                {formatDateTime(b.startsAt, workspaceTimezone)} ·{" "}
                 <span className="capitalize">{b.status.replace(/_/g, " ")}</span>
               </p>
             </div>

@@ -16,6 +16,7 @@ import { getPlan } from "@/lib/billing/plans";
 import { getOrgSubscription } from "@/lib/billing/subscription";
 import { getOwnedWorkspaceCount } from "@/lib/web-onboarding/owned-workspace-count";
 import { installSoul, type FrameworkConfig } from "@/lib/soul/install";
+import { resolveGeneratedSoulBookingPrice } from "@/lib/soul/generated-booking-price";
 import { seedInitialBlocks } from "@/lib/soul-compiler/blocks";
 import type { SoulV4 } from "@/lib/soul-compiler/schema";
 import { mintWorkspaceToken } from "@/lib/auth/workspace-token";
@@ -407,8 +408,15 @@ export async function getWorkspaceLimitStatus() {
   // Tier-based cap: free=1, growth=3, scale=unlimited (rendered as
   // 999 here so the UI's "X / Y" display still works without a
   // special-case branch — the actual gate lives in enforceWorkspaceLimit).
-  const maxOrgs = FREE_WORKSPACE_ALLOWANCE + tierStatus.quantity;
-  const canCreate = ownedWorkspaceCount < maxOrgs;
+  // Keep workspace-limit presentation aligned with the real creation gate:
+  // without a Stripe secret this deployment is self-hosted, so hosted
+  // subscription workspace caps do not apply. 999 is display-only; the
+  // authoritative self-hosted gate in enforceWorkspaceLimit is unlimited.
+  const selfHosted = !process.env.STRIPE_SECRET_KEY;
+  const maxOrgs = selfHosted
+    ? 999
+    : FREE_WORKSPACE_ALLOWANCE + tierStatus.quantity;
+  const canCreate = selfHosted || ownedWorkspaceCount < maxOrgs;
 
   return {
     plan,
@@ -430,8 +438,15 @@ export async function getWorkspaceLimitStatusForUser(userId: string) {
   // Tier-based cap: free=1, growth=3, scale=unlimited (rendered as
   // 999 here so the UI's "X / Y" display still works without a
   // special-case branch — the actual gate lives in enforceWorkspaceLimit).
-  const maxOrgs = FREE_WORKSPACE_ALLOWANCE + tierStatus.quantity;
-  const canCreate = ownedWorkspaceCount < maxOrgs;
+  // Keep workspace-limit presentation aligned with the real creation gate:
+  // without a Stripe secret this deployment is self-hosted, so hosted
+  // subscription workspace caps do not apply. 999 is display-only; the
+  // authoritative self-hosted gate in enforceWorkspaceLimit is unlimited.
+  const selfHosted = !process.env.STRIPE_SECRET_KEY;
+  const maxOrgs = selfHosted
+    ? 999
+    : FREE_WORKSPACE_ALLOWANCE + tierStatus.quantity;
+  const canCreate = selfHosted || ownedWorkspaceCount < maxOrgs;
 
   return {
     plan,
@@ -820,7 +835,11 @@ function mapSoulToFrameworkConfig(soul: SoulV4): FrameworkConfig {
         name: service.name,
         slug: toSlug(service.name) || `service-${randomUUID().slice(0, 8)}`,
         durationMinutes: bookingConfig.default_duration_minutes,
-        price: service.price,
+        price: resolveGeneratedSoulBookingPrice({
+          businessName: soul.business_name,
+          businessDescription: soul.soul_description,
+          price: service.price,
+        }),
         description: service.description,
         bufferBefore: bookingConfig.buffer_minutes,
         bufferAfter: bookingConfig.buffer_minutes,

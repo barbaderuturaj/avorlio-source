@@ -151,6 +151,8 @@ const adapter = {
     image?: string | null;
     emailVerified?: Date | null;
   }) {
+    throw new Error("Auth.js account creation is disabled for managed Avorlio workspaces.");
+
     try {
       console.log("[auth][adapter] createUser called for:", data.email);
       const email = data.email?.trim().toLowerCase();

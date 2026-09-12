@@ -22,27 +22,27 @@ const FAQS: readonly FaqItem[] = [
   {
     question: "What kinds of work compile well?",
     answer:
-      "Repeatable computer work with a clear start and finish: quoting, intake triage, moving data between tools, follow-up emails. If you can screen-record one clean run of it, Seldon can trace it.",
+      "Repeatable computer work with a clear start and finish: quoting, intake triage, moving data between tools, follow-up emails. If you can screen-record one clean run of it, Avorlio can trace it.",
   },
   {
     question: "Do I have to narrate?",
     answer:
-      "You don't have to, but it helps a lot — narration is half the signal. Seldon asks about anything the recording didn't show.",
+      "You don't have to, but it helps a lot - narration is half the signal. Avorlio asks about anything the recording didn't show.",
   },
   {
     question: "How do I know the agent got it right?",
     answer:
-      "You see the traced plan before anything runs: green for covered, yellow for assumed, red for missing. Seldon interviews you about the gaps, and you test the compiled agent before switching it on.",
+      "You see the traced plan before anything runs: green for covered, yellow for assumed, red for missing. Avorlio interviews you about the gaps, and you test the compiled agent before switching it on.",
   },
   {
     question: "How many recordings do I need?",
     answer:
-      "One normal, successful run is enough to start. Add more recordings to teach edge cases — Seldon merges them into one model of the job.",
+      "One normal, successful run is enough to start. Add more recordings to teach edge cases - Avorlio merges them into one model of the job.",
   },
   {
     question: "What does it cost?",
     answer:
-      "Recording, compiling, and testing are free — build the first client workspace before checkout. Agency plans start at $99/mo, carry 0% GMV, and can be cancelled anytime.",
+      "Recording, compiling, and testing are part of the Avorlio setup process. Launch details are shared during onboarding.",
   },
 ];
 

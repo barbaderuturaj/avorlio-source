@@ -342,7 +342,7 @@ const GENERAL_PERSONALITY: CRMPersonality = {
   ],
   intake: {
     title: "Get in Touch",
-    description: "Tell us a little about what you need and we'll get back to you with a quote.",
+    description: "Tell us a little about what you need and the team can follow up.",
   },
   theme: { mode: "light" },
   dashboard: {
@@ -360,29 +360,29 @@ const GENERAL_PERSONALITY: CRMPersonality = {
   },
   content_templates: {
     hero_headlines: [
-      "Trusted Local Service[ — {rating}★ from {review_count}+ Customers]",
-      "[{city}'s ]Trusted {business_name} — Free Quotes",
-      "Quality Work, Honest Pricing.[ {review_count}+ Happy Customers.]",
+      "[{city} ]Local Service from {business_name}",
+      "Service Help from {business_name}",
+      "Clear Next Steps for Your Service Needs",
     ],
     hero_subheadline:
-      "Free estimates · Licensed and insured · Local team that shows up on time.[ Serving {service_area}.]",
+      "Tell us what you need and we will route your request.[ Serving {service_area}.]",
     trust_badges: [
-      "[{rating}★ from {review_count}+ customers]",
-      "Licensed & insured",
-      "Free quotes",
-      "Local team",
+      "Local service",
+      "Clear request intake",
+      "Organized follow-up",
+      "Service-focused support",
     ],
     services_heading: "Our Services",
     faqs: [
       {
-        question: "How does the free quote work?",
+        question: "How does the request work?",
         answer_template:
-          "Tell us about your project and we'll come out (or send pricing remotely if it's simple) within 24-48 hours. No commitment, no pressure.",
+          "Tell us what you need and the team can review the details before recommending next steps.",
       },
       {
-        question: "Are you licensed and insured?",
+        question: "What information should I share?",
         answer_template:
-          "Yes. We're fully licensed and carry liability insurance for every job we take on.[ {certifications_sentence}]",
+          "Share the service you need, your contact details, and any useful notes about the request.",
       },
       {
         question: "What areas do you serve?",
@@ -392,21 +392,21 @@ const GENERAL_PERSONALITY: CRMPersonality = {
       {
         question: "How do you handle pricing?",
         answer_template:
-          "Upfront, written quotes before any work starts. No surprise charges. We'll walk you through every line before you sign.",
+          "Pricing depends on the service and scope. A person from the team can confirm pricing details.",
       },
       {
         question: "How do I get started?",
         answer_template:
-          "Book a free quote above[ or call us at {phone}]. We'll take it from there.",
+          "Submit a request above[ or call us at {phone}] and share what you need.",
       },
     ],
-    cta_button_primary: "Book a free quote →",
-    cta_button_secondary: "Get in touch →",
+    cta_button_primary: "Request service",
+    cta_button_secondary: "Get in touch",
     bottom_cta_heading: "Ready to get started?",
     bottom_cta_trust_points: [
-      "Free quote",
-      "No obligation",
-      "Local team",
+      "Service request",
+      "Clear details",
+      "Team follow-up",
     ],
   },
 };
@@ -1120,14 +1120,6 @@ const INDUSTRY_KEYWORDS: Array<{ vertical: PersonalityVertical; keywords: string
       "hvac", "heating", "cooling", "air conditioning", "air conditioner",
       "ac repair", "ac install", "furnace", "boiler", "heat pump",
       "mini-split", "mini split", "duct cleaning", "indoor air quality",
-      // Plumbing / electrical
-      "plumb", "plumber", "plumbing", "electrician", "electrical",
-      // Construction / contracting
-      "contractor", "roofing", "roofer", "landscaping", "lawn care",
-      "cleaning service", "house cleaning", "carpet cleaning",
-      "pest control", "junk removal", "moving company", "pool service",
-      "garage door", "auto repair", "appliance repair", "tree service",
-      "snow removal", "handyman", "locksmith",
     ],
   },
   {

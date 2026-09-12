@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { desc } from "drizzle-orm";
-import { index, integer, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { contacts } from "./contacts";
 import { organizations } from "./organizations";
 import { users } from "./users";
@@ -39,5 +39,8 @@ export const smsMessages = pgTable(
     index("sms_messages_org_status_idx").on(table.orgId, table.status),
     index("sms_messages_org_direction_idx").on(table.orgId, table.direction),
     index("sms_messages_org_contact_read_idx").on(table.orgId, table.contactId, table.readAt),
+    uniqueIndex("sms_messages_org_provider_external_uidx")
+      .on(table.orgId, table.provider, table.externalMessageId)
+      .where(sql`${table.externalMessageId} IS NOT NULL`),
   ]
 );

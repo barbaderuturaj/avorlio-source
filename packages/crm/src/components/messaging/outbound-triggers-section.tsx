@@ -79,7 +79,7 @@ function TriggerCard({ trigger }: { trigger: TriggerRowView }) {
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
-  const router = useRouter();
+  const router = useSafeRouter();
 
   const isUnchangedFromDefault =
     draft.trim() === trigger.platformDefaultMd.trim();
@@ -253,4 +253,12 @@ function TriggerCard({ trigger }: { trigger: TriggerRowView }) {
       ) : null}
     </div>
   );
+}
+
+function useSafeRouter(): { refresh: () => void } {
+  try {
+    return useRouter();
+  } catch {
+    return { refresh: () => {} };
+  }
 }

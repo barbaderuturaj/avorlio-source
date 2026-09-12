@@ -268,15 +268,20 @@ export async function createConnectLink(
   const sessionToolkits = Array.from(
     new Set([...COMPOSIO_TOOLKIT_SLUGS, toolkit.trim().toLowerCase()]),
   );
-  const session = await ensureSession(orgId, sessionToolkits, opts);
-  if (!session) return { redirectUrl: null };
-
   const composio =
     opts?.client !== undefined ? opts.client : await composioForOrg(orgId);
   if (!composio) return { redirectUrl: null };
 
-  // Reuse the just-ensured session to authorize the toolkit.
-  const live = await composio.use(session.sessionId);
+  // Interactive OAuth must carry its return URL on the session itself.
+  // Reusing an older session can preserve a stale/default localhost callback.
+  const live = await composio.create(opts?.entityUserId ?? orgId, {
+    toolkits: sessionToolkits,
+    manageConnections: { enable: true, callbackUrl },
+  });
+
+  if (!opts?.entityUserId) {
+    await persistSessionId(orgId, live.sessionId, opts?.actorUserId);
+  }
   const connectionRequest = await live.authorize(toolkit, { callbackUrl });
   return { redirectUrl: connectionRequest.redirectUrl ?? null };
 }

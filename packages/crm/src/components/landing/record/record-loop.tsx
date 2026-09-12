@@ -15,7 +15,7 @@ export function RecordLoop() {
   return (
     <div
       className="sf-recloop mt-7 flex w-full max-w-[560px] items-center justify-center gap-3 md:gap-4"
-      aria-label="How it works: record your screen, Seldon compiles, your agent goes live"
+        aria-label="How it works: record your screen, Avorlio compiles, your agent goes live"
     >
       {/* Stage 1 — the recording */}
       <div className="sf-stage sf-stage-1 flex min-w-0 items-center gap-2.5 rounded-[12px] border border-[var(--lp-border)] bg-[var(--lp-card)] px-3.5 py-2.5">
@@ -38,7 +38,7 @@ export function RecordLoop() {
           <span className="sf-frame sf-frame-3 -ml-[5px] block h-[14px] w-[10px] rounded-[2px] border border-[var(--lp-muted)] bg-[var(--lp-card)]" />
         </span>
         <div className="min-w-0 text-left text-[12.5px] font-[600] leading-tight text-[var(--lp-ink)]">
-          Seldon watches
+          Avorlio watches
           <div className="text-[11px] font-[400] text-[var(--lp-muted)]">frames + narration</div>
         </div>
       </div>

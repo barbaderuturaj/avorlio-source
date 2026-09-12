@@ -1,7 +1,7 @@
 // packages/crm/src/components/landing/record/record-what-you-get.tsx
 //
 // The one-product bridge for record mode (spec §4.3): a recording
-// doesn't build a lesser thing — it builds the same SeldonFrame
+// doesn't build a lesser thing - it builds the same Avorlio
 // workspace, entered sideways. Server component.
 
 const CARDS = [
@@ -19,7 +19,7 @@ const CARDS = [
   },
   {
     title: "Yours, flat price",
-    body: "Recording and compiling are free while you build the first client workspace. Agency plans start at $99/mo with 0% GMV. Cancel anytime.",
+    body: "Recording and compiling are part of the Avorlio setup process. Launch details are shared during onboarding.",
   },
 ] as const;
 
@@ -32,7 +32,7 @@ export function RecordWhatYouGet() {
           From screenshare to deployed agent
         </p>
         <h2 className="mt-3 max-w-[24ch] text-balance font-sans text-[clamp(26px,3.2vw,38px)] font-[500] leading-[1.1] tracking-[-0.02em] text-[var(--lp-ink)]">
-          The same SeldonFrame, entered sideways
+          The same Avorlio front office, entered sideways
         </h2>
         <p className="mt-4 max-w-[62ch] text-pretty text-[16px] leading-[1.55] text-[var(--lp-body)]">
           A recording doesn&apos;t build a toy. It builds the same agent + workspace the

@@ -59,14 +59,14 @@ export function RecordHero({
           No signup to start
         </p>
         <h1 className="mt-3 max-w-[20ch] text-balance font-sans text-[clamp(34px,4.8vw,56px)] font-[500] leading-[1.04] tracking-[-0.025em] text-[var(--lp-ink)]">
-          Show Seldon how you work.{" "}
+          Show Avorlio how you work.{" "}
           <em className="font-[Newsreader,Georgia,serif] font-normal not-italic tracking-[-0.01em]">
             It builds the agent.
           </em>
         </h1>
         <p className="mx-auto mt-4 max-w-[62ch] text-pretty text-[16px] leading-[1.55] text-[var(--lp-body)]">
           Screen-record yourself doing the job once — talking out loud, narration is half the
-          signal. Seldon watches, asks about what it didn&apos;t understand, and compiles a
+          signal. Avorlio watches, asks about what it didn&apos;t understand, and compiles a
           working agent.
         </p>
 

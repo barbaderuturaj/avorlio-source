@@ -18,7 +18,7 @@
 // naming used everywhere else.
 
 import { db } from "@/db";
-import { landingPages } from "@/db/schema";
+import { landingPages, organizations } from "@/db/schema";
 import { and, eq } from "drizzle-orm";
 import type { AestheticArchetypeId } from "@/lib/workspace/aesthetic-archetypes";
 import type { R1LandingPayload } from "./r1-payload-prompt";
@@ -26,6 +26,7 @@ import { normalizeTheme } from "@/lib/theme/normalize-theme";
 import type { OrgTheme } from "@/lib/theme/types";
 import { ARCHETYPES } from "@/lib/workspace/aesthetic-archetypes";
 import { applyLiveArchetype } from "./apply-live-archetype";
+import { buildGroundedMetadataDescription, buildVerifiedBusinessFacts, sanitizeR1LandingPayload } from "./factual-grounding";
 
 const R1_SLUG = "r1";
 const R1_STATUS = "published"; // public immediately, no gate
@@ -49,18 +50,27 @@ export async function saveLandingPayload(
   payload: R1LandingPayload,
   archetypeId: AestheticArchetypeId,
 ): Promise<void> {
-  const businessName = payload.footer.businessName;
-  const tagline = payload.hero.tagline;
+  const [org] = await db
+    .select({ soul: organizations.soul, settings: organizations.settings })
+    .from(organizations)
+    .where(eq(organizations.id, workspaceId))
+    .limit(1);
+  const groundedPayload = org
+    ? sanitizeR1LandingPayload(payload, buildVerifiedBusinessFacts(org.soul, org.settings))
+    : payload;
+  const groundedFacts = org ? buildVerifiedBusinessFacts(org.soul, org.settings) : null;
+  const businessName = groundedPayload.footer.businessName;
+  const tagline = groundedPayload.hero.tagline;
   const blueprintJson = {
     _r1: true,
     archetype: archetypeId,
     tagline,
-    payload,
+    payload: groundedPayload,
   } as unknown as Record<string, unknown>;
   const seo = {
     title: `${businessName} — ${tagline}`,
-    description: payload.hero.subhead,
-    ogImage: payload.hero.heroImage?.src ?? null,
+    description: groundedFacts ? buildGroundedMetadataDescription(groundedFacts) : groundedPayload.hero.subhead,
+    ogImage: groundedPayload.hero.heroImage?.src ?? null,
   } as Record<string, unknown>;
 
   const [existing] = await db
@@ -134,6 +144,7 @@ export async function loadLandingPayload(workspaceSlug: string): Promise<{
       theme: organizations.theme,
       ownerId: organizations.ownerId,
       settings: organizations.settings,
+      soul: organizations.soul,
     })
     .from(organizations)
     .where(eq(organizations.slug, workspaceSlug))
@@ -189,13 +200,15 @@ export async function loadLandingPayload(workspaceSlug: string): Promise<{
     liveArchetype in ARCHETYPES &&
     liveArchetype !== archetypeRaw;
 
-  const payload = hasLiveOverride
+  const payloadWithLiveArchetype = hasLiveOverride
     ? applyLiveArchetype(payloadRaw, liveArchetype)
     : payloadRaw;
   const archetype = hasLiveOverride
     ? (liveArchetype as AestheticArchetypeId)
     : archetypeRaw;
 
+  const facts = buildVerifiedBusinessFacts(orgRow.soul, orgRow.settings);
+  const payload = sanitizeR1LandingPayload(payloadWithLiveArchetype, facts);
   const seoRaw = (row.seo ?? {}) as Record<string, unknown>;
   return {
     payload,
@@ -206,9 +219,8 @@ export async function loadLandingPayload(workspaceSlug: string): Promise<{
     ownerId: orgRow.ownerId,
     settings: orgRow.settings,
     seo: {
-      title: (seoRaw["title"] as string | undefined) ?? payload.footer.businessName,
-      description:
-        (seoRaw["description"] as string | undefined) ?? payload.hero.subhead,
+      title: payload.footer.businessName,
+      description: buildGroundedMetadataDescription(facts),
       ogImage: (seoRaw["ogImage"] as string | null | undefined) ?? null,
     },
   };

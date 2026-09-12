@@ -11,11 +11,11 @@
 // agentId from the runtime, never trusts the LLM's word for which
 // workspace's data to read/write.
 
-import { and, eq, gte, ilike, or } from "drizzle-orm";
+import { and, eq, gte, ilike, isNull, or } from "drizzle-orm";
 import { PUBLIC_BOOKING_WINDOW_DAYS } from "@/lib/bookings/booking-window";
 import { z } from "zod";
 import { db } from "@/db";
-import { activities, agents, bookings, contacts, users } from "@/db/schema";
+import { activities, agents, bookings, contacts, organizations, users } from "@/db/schema";
 import { listPublicBookingSlotsAction } from "@/lib/bookings/actions";
 import type { AgentBlueprint } from "@/db/schema/agents";
 import type {
@@ -33,6 +33,7 @@ import {
 } from "@/lib/agents/booking/booking-policy";
 import { COPILOT_CAPABILITY } from "@/lib/agents/copilot/tools";
 import { DRAFT_FOR_APPROVAL_CAPABILITY } from "@/lib/agent-drafts/policy";
+import { resolveBookingTemplateSlug } from "@/lib/agents/booking/template-resolution";
 
 export type ToolExecuteContext = {
   orgId: string;
@@ -56,6 +57,16 @@ export type ToolExecuteContext = {
    *  instead of the raw UTC ISO. Web/text callers may omit it → formatting
    *  falls back to UTC, still human-readable, never a raw ISO. */
   timezone?: string;
+  /** Public booking template slugs resolved once by the website runtime. */
+  bookingTemplateSlugs?: readonly string[];
+  /** Required intake fields from the selected public booking template. */
+  bookingIntakeFields?: readonly {
+    id: string;
+    label: string;
+    required?: boolean;
+  }[];
+  /** Trusted human label carried only by deterministic public slot selection. */
+  selectedSlotLabel?: string;
   /** DEPLOYED-agent only (ICP-3). How this deployment books: `native` →
    *  the existing availability + booking chain (unchanged); `external_link`
    *  → the agent hands off the client's own booking URL; `api_mcp` / `cal_com`
@@ -102,6 +113,26 @@ const lookUpAvailabilityInput = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "must be YYYY-MM-DD"),
   bookingSlug: z.string().optional(),
 });
+
+export function buildAvailabilityAssistantMessage(output: unknown): string | null {
+  if (!output || typeof output !== "object") return null;
+  const record = output as { slots?: unknown; error?: unknown; code?: unknown };
+  if (record.code === "invalid_booking_slug" || record.code === "no_booking_template") {
+    return "I couldn't check availability because that booking type isn't configured.";
+  }
+  if (!Array.isArray(record.slots)) return null;
+  const labels = record.slots
+    .map((slot) =>
+      slot && typeof slot === "object" && typeof (slot as { label?: unknown }).label === "string"
+        ? (slot as { label: string }).label
+        : null,
+    )
+    .filter((label): label is string => Boolean(label));
+  if (labels.length === 0) {
+    return "I couldn't find an available appointment in that window. Please try another date.";
+  }
+  return `I found these available times: ${labels.join("; ")}. Which works best for you?`;
+}
 
 // 2026-05-22 — chatbot UX cap. Surfacing 6+ slots in a chat bubble
 // overwhelms visitors and tanks pick-rate (Hick's law: more options =
@@ -360,6 +391,7 @@ export const lookUpAvailability: AgentTool<
   // Native result, OR a booking-mode handoff (ICP-3, deployed agents on a
   // non-native mode — no slot lookup, just the handoff message/url).
   | { slots: LabeledSlot[]; durationMinutes: number; date: string; timezone: string }
+  | { error: string; code: string; validBookingSlugs: string[]; slots: never[]; durationMinutes: number; date: string; timezone: string }
   | { bookingHandoff: "external_link" | "followup"; message: string; url?: string | null }
 > & {
   execute: (
@@ -368,12 +400,13 @@ export const lookUpAvailability: AgentTool<
     deps?: LookUpAvailabilityDeps,
   ) => Promise<
     | { slots: LabeledSlot[]; durationMinutes: number; date: string; timezone: string }
+    | { error: string; code: string; validBookingSlugs: string[]; slots: never[]; durationMinutes: number; date: string; timezone: string }
     | { bookingHandoff: "external_link" | "followup"; message: string; url?: string | null }
   >;
 } = {
   name: "look_up_availability",
   description:
-    "Get the next available appointment slots starting from a given date. Walks forward day-by-day, accumulating up to 3 slots total across at most 14 days. Returns `slots` as {iso, label} pairs PLUS the workspace `timezone`. `label` is the time already converted to the BUSINESS'S local timezone and ready to read aloud / show (e.g. 'Monday, June 1 at 10:00 AM PDT') — ALWAYS quote the `label`, never the raw `iso`, and never convert times yourself. `iso` is the machine timestamp — pass it VERBATIM to book_appointment as slotIso.",
+    "Get the next available appointment slots starting from a given date. Walks forward day-by-day, accumulating up to 3 slots total across at most 14 days. Do not derive bookingSlug from the requested service name; omit it unless a valid configured booking type is explicitly provided. Returns `slots` as {iso, label} pairs PLUS the workspace `timezone`. `label` is the time already converted to the BUSINESS'S local timezone and ready to read aloud / show (e.g. 'Monday, June 1 at 10:00 AM PDT') — ALWAYS quote the `label`, never the raw `iso`, and never convert times yourself. `iso` is the machine timestamp — pass it VERBATIM to book_appointment as slotIso.",
   inputSchema: lookUpAvailabilityInput,
   jsonSchema: {
     type: "object",
@@ -385,7 +418,7 @@ export const lookUpAvailability: AgentTool<
       },
       bookingSlug: {
         type: "string",
-        description: "Optional booking type slug (default: 'default')",
+        description: "Optional configured booking type slug. Never use a service name as a slug; omit this field when unsure.",
       },
     },
     required: ["date"],
@@ -412,11 +445,26 @@ export const lookUpAvailability: AgentTool<
       return {
         bookingHandoff: "followup",
         message:
-          "I've got your details — our team will reach out shortly to lock in a time.",
+          "I've got your details — a team member can follow up to schedule a time.",
       };
     }
     // mode === "native": existing code path continues unchanged ↓
-    const bookingSlug = input.bookingSlug ?? "default";
+    const bookingResolution = resolveBookingTemplateSlug(
+      input.bookingSlug,
+      ctx.bookingTemplateSlugs,
+    );
+    if (!bookingResolution.ok) {
+      return {
+        error: bookingResolution.code,
+        code: bookingResolution.code,
+        validBookingSlugs: bookingResolution.validBookingSlugs,
+        slots: [],
+        durationMinutes: 30,
+        date: input.date,
+        timezone: ctx.timezone ?? "UTC",
+      };
+    }
+    const bookingSlug = bookingResolution.bookingSlug;
 
     // ── per-client booking policy (P1) ──
     // A DEPLOYED agent's slots are SHAPED by the client's policy (duration /
@@ -502,6 +550,35 @@ export const lookUpAvailability: AgentTool<
           let dayFits = dayCandidates.filter((iso) =>
             slotFitsFreeWindows(iso, policy.durationMinutes, windows),
           );
+
+          // A connected external calendar is only ONE source of availability
+          // truth. SeldonFrame may already contain a scheduled/blocked booking
+          // for a time that Google/Outlook still reports as free.
+          //
+          // listPublicBookingSlotsAction already removes those internal
+          // conflicts. When it resolves a real native booking context it also
+          // returns workspaceTimezone, which lets us distinguish that case from
+          // an external-only deployment with no native booking configuration.
+          //
+          // Therefore the externally-free candidates must also be present in
+          // native/public availability before we offer them.
+          const nativeDay = await listSlots({
+            orgSlug: ctx.orgSlug,
+            bookingSlug,
+            date: dayISO,
+          });
+          const nativeTimezone = (
+            nativeDay as { workspaceTimezone?: string }
+          ).workspaceTimezone;
+
+          if (
+            typeof nativeTimezone === "string" &&
+            nativeTimezone.trim().length > 0
+          ) {
+            const nativeFree = new Set(nativeDay.slots);
+            dayFits = dayFits.filter((iso) => nativeFree.has(iso));
+          }
+
           // Cap per day at policy.maxPerDay (when a policy is set + a cap exists).
           if (hasPolicy && typeof policy.maxPerDay === "number") {
             dayFits = dayFits.slice(0, policy.maxPerDay);
@@ -653,14 +730,40 @@ export function buildBookingReadBack(args: {
   slotIso: string;
   service?: string;
   timezone?: string;
+  slotLabel?: string;
 }): string {
-  const when = args.timezone
-    ? formatSlotLabel(args.slotIso, args.timezone)
-    : args.slotIso;
+  const when = args.slotLabel?.trim()
+    ? args.slotLabel.trim()
+    : args.timezone
+      ? formatSlotLabel(args.slotIso, args.timezone)
+      : args.slotIso;
   const parts = [args.fullName, args.service, when].filter(
     (p): p is string => typeof p === "string" && p.trim().length > 0,
   );
   return `So that's ${parts.join(", ")} — is that correct?`;
+}
+
+async function resolveToolTimezone(ctx: ToolExecuteContext): Promise<string> {
+  if (typeof ctx.timezone === "string" && ctx.timezone.trim().length > 0) {
+    return ctx.timezone;
+  }
+  try {
+    const [org] = await db
+      .select({ timezone: organizations.timezone })
+      .from(organizations)
+      .where(eq(organizations.id, ctx.orgId))
+      .limit(1);
+    return org?.timezone ?? "UTC";
+  } catch (err) {
+    console.warn(
+      JSON.stringify({
+        event: "booking_timezone_lookup_failed",
+        orgId: ctx.orgId,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+    return "UTC";
+  }
 }
 
 /** The shape every write tool returns when it needs the caller to confirm
@@ -689,7 +792,16 @@ const bookAppointmentInput = z
     // below requires AT LEAST ONE contact method.
     email: z.string().email().optional(),
     phone: z.string().optional(),
-    slotIso: z.string(),
+    // Slots come from look_up_availability as canonical UTC timestamps. Reject
+    // malformed reconstructions (for example `...:00:000Z`) at the tool
+    // boundary, before a booking write is attempted. The booking action keeps
+    // its independent server-side availability validation.
+    slotIso: z
+      .string()
+      .regex(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/,
+        "must be the exact UTC ISO value returned by look_up_availability",
+      ),
     notes: z.string().optional(),
     bookingSlug: z.string().optional(),
     /** voice R1 — vertical-aware intake field responses keyed by field id
@@ -789,7 +901,7 @@ export type BookingNeedsFieldsResult = {
 
 export const bookAppointment: AgentTool<
   z.infer<typeof bookAppointmentInput>,
-  | { ok: boolean; bookingId?: string; testMode?: boolean; error?: string }
+  | { ok: boolean; bookingId?: string; testMode?: boolean; error?: string; startsAt?: string; displayTime?: string }
   | BookingHandoffResult
   | BookingNeedsFieldsResult
   | NeedsConfirmation
@@ -799,7 +911,7 @@ export const bookAppointment: AgentTool<
     ctx: ToolExecuteContext,
     deps?: BookAppointmentDeps,
   ) => Promise<
-    | { ok: boolean; bookingId?: string; testMode?: boolean; error?: string }
+    | { ok: boolean; bookingId?: string; testMode?: boolean; error?: string; startsAt?: string; displayTime?: string }
     | BookingHandoffResult
     | BookingNeedsFieldsResult
     | NeedsConfirmation
@@ -827,8 +939,10 @@ export const bookAppointment: AgentTool<
       },
       slotIso: {
         type: "string",
+        format: "date-time",
+        pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,3})?Z$",
         description:
-          "MUST be the `iso` field of one of the slots returned by look_up_availability, copied VERBATIM. Format is full UTC ISO with Z suffix (e.g. '2026-05-13T16:00:00Z'). Do NOT pass the human `label` (e.g. '10:00 AM PDT') or a naive local time like '2026-05-13T09:00' — those get misinterpreted and book the wrong time.",
+          "MUST be copied character-for-character from the chosen slot's `iso` field returned by look_up_availability. Do not reconstruct, trim, add/remove fractional seconds, convert, or calculate it. Format is full UTC ISO with Z suffix (e.g. '2026-05-13T16:00:00Z'). Do NOT pass the human `label` (e.g. '10:00 AM PDT') or a naive local time like '2026-05-13T09:00' — those get misinterpreted and book the wrong time.",
       },
       intakeResponses: {
         type: "object",
@@ -878,10 +992,59 @@ export const bookAppointment: AgentTool<
         ok: true,
         bookingHandoff: "followup",
         message:
-          "I've got your details — our team will reach out shortly to confirm and schedule your time.",
+          "I've got your details — a team member can follow up to confirm and schedule a time.",
       };
     }
     // mode === "native": existing code path continues unchanged ↓
+    const bookingResolution = resolveBookingTemplateSlug(
+      input.bookingSlug,
+      ctx.bookingTemplateSlugs,
+    );
+    if (!bookingResolution.ok) {
+      return {
+        ok: false,
+        error: bookingResolution.code,
+        code: bookingResolution.code,
+        validBookingSlugs: bookingResolution.validBookingSlugs,
+      };
+    }
+    const bookingSlug = bookingResolution.bookingSlug;
+
+    // Required booking fields are authoritative server data. Public workspace
+    // agents use the selected template's intake schema; deployed agents use
+    // their resolved booking policy. Validate before even proposing the write
+    // so a model cannot obtain confirmation for an incomplete payload.
+    const policy = ctx.booking?.policy ?? resolveBookingPolicy(null, null, ctx.timezone);
+    const requiredFields = [...new Set([
+      ...(ctx.booking?.policy?.requiredFields ?? []),
+      ...(ctx.bookingIntakeFields ?? [])
+        .filter((field) => field.required === true)
+        .map((field) => field.id),
+    ])];
+    const fieldValue = (field: string): string | undefined => {
+      if (["name", "full_name", "fullname"].includes(field)) return input.fullName;
+      if (["phone", "telephone", "mobile"].includes(field)) {
+        return (
+          input.intakeResponses?.phone ??
+          input.phone ??
+          (typeof ctx.callerPhone === "string" ? ctx.callerPhone : undefined)
+        );
+      }
+      if (["email", "e-mail"].includes(field)) return input.email;
+      return input.intakeResponses?.[field];
+    };
+    const missing = requiredFields.filter((field) => {
+      const value = fieldValue(field);
+      return !(typeof value === "string" && value.trim().length > 0);
+    });
+    if (missing.length > 0) {
+      return {
+        ok: false,
+        needs: missing,
+        message: `Please collect: ${missing.join(", ")}`,
+      };
+    }
+
     // Confirmation gate — no write until the caller has confirmed the read-back.
     if (input.confirmed !== true) {
       return {
@@ -890,9 +1053,10 @@ export const bookAppointment: AgentTool<
         readBack: buildBookingReadBack({
           fullName: input.fullName,
           slotIso: input.slotIso,
+          slotLabel: ctx.selectedSlotLabel,
           // Voice calls carry the workspace timezone → the read-back speaks a
           // human-local time, never the raw UTC ISO. Web/text omit it (UTC).
-          timezone: ctx.timezone,
+          timezone: await resolveToolTimezone(ctx),
         }),
         instruction: CONFIRM_INSTRUCTION,
       };
@@ -903,46 +1067,6 @@ export const bookAppointment: AgentTool<
         testMode: true,
         bookingId: `test-${Date.now()}`,
       };
-    }
-
-    // ── required-fields gate (per-client booking policy, P1) ──
-    // The client's policy names the fields that MUST be collected before a
-    // booking is written (e.g. a plumber requires name+phone+address). This is a
-    // DEPLOYED-agent gate: it fires ONLY when a per-client policy is actually
-    // threaded onto ctx.booking.policy. Workspace/operator agents (no
-    // ctx.booking) keep the byte-for-byte original behavior — never gated by the
-    // system-default required fields. When a policy IS present, validate before
-    // any write: a missing/blank field returns the needs-list so the agent asks
-    // the caller and re-calls — never a partial booking. Field → source mapping
-    // mirrors how the write resolves contact info:
-    //   name  → input.fullName
-    //   phone → intakeResponses.phone | input.phone | caller ID (any present)
-    //   email → input.email
-    //   other → intakeResponses[field]
-    const policy = ctx.booking?.policy ?? resolveBookingPolicy(null, null, ctx.timezone);
-    if (ctx.booking?.policy) {
-      const fieldValue = (field: string): string | undefined => {
-        if (field === "name") return input.fullName;
-        if (field === "phone") {
-          return (
-            input.intakeResponses?.phone ??
-            input.phone ??
-            (typeof ctx.callerPhone === "string" ? ctx.callerPhone : undefined)
-          );
-        }
-        if (field === "email") return input.email;
-        return input.intakeResponses?.[field];
-      };
-      const missing = policy.requiredFields.filter(
-        (f) => !(typeof fieldValue(f) === "string" && fieldValue(f)!.trim().length > 0),
-      );
-      if (missing.length > 0) {
-        return {
-          ok: false,
-          needs: missing,
-          message: `Please collect: ${missing.join(", ")}`,
-        };
-      }
     }
 
     try {
@@ -982,24 +1106,75 @@ export const bookAppointment: AgentTool<
       // handoff to a payment flow which v1.26 doesn't model). When email is
       // absent we pass "" — the submit action treats empty email as "resolve
       // the contact by phone" and stores null for the email columns.
-      const bookingSlug = input.bookingSlug ?? "default";
       const intakeArg =
         Object.keys(intakeResponses).length > 0 ? intakeResponses : undefined;
 
       // The native booking write — the EXISTING path, byte-for-byte. Reused both
       // for the native deployment AND as the book_external fallback below, so the
-      // args + return shape are guaranteed identical. Returns { ok: true } today.
+      // args + return shape are guaranteed identical.
       const writeNative = async () => {
-        await deps.submitBooking({
-          orgSlug: ctx.orgSlug,
-          bookingSlug,
-          fullName: input.fullName,
-          email: input.email ?? "",
-          notes: input.notes || undefined,
+        let result: unknown;
+        try {
+          result = await deps.submitBooking({
+            orgSlug: ctx.orgSlug,
+            bookingSlug,
+            fullName: input.fullName,
+            email: input.email ?? "",
+            notes: input.notes || undefined,
+            startsAt: input.slotIso,
+            intakeResponses: intakeArg,
+          });
+        } catch (err) {
+          // The public action may throw after its booking insert has committed
+          // (for example, an event/notification side effect). Recover only an
+          // exact same-org/name/email/start row so the caller never retries a
+          // booking that already exists.
+          const emailMatch = input.email
+            ? eq(bookings.email, input.email)
+            : isNull(bookings.email);
+          const [committed] = await db
+            .select({ id: bookings.id, status: bookings.status })
+            .from(bookings)
+            .where(
+              and(
+                eq(bookings.orgId, ctx.orgId),
+                eq(bookings.fullName, input.fullName),
+                emailMatch,
+                eq(bookings.startsAt, new Date(input.slotIso)),
+              ),
+            )
+            .limit(1);
+          if (!committed) throw err;
+          result = {
+            success: true,
+            bookingId: committed.id,
+            paymentRequired: committed.status === "pending_payment" ? true : undefined,
+          };
+        }
+        const bookingResult = result && typeof result === "object"
+          ? (result as Record<string, unknown>)
+          : null;
+        if (bookingResult?.success === false || bookingResult?.ok === false) {
+          return {
+            ok: false,
+            error: typeof bookingResult.error === "string" ? bookingResult.error : "booking_failed",
+          };
+        }
+        const checkoutUrl =
+          typeof bookingResult?.checkoutUrl === "string" && bookingResult.checkoutUrl.trim()
+            ? bookingResult.checkoutUrl.trim()
+            : undefined;
+        const paymentRequired =
+          bookingResult?.paymentRequired === true || Boolean(checkoutUrl);
+
+        return {
+          ok: true,
+          bookingId: typeof bookingResult?.bookingId === "string" ? bookingResult.bookingId : undefined,
           startsAt: input.slotIso,
-          intakeResponses: intakeArg,
-        });
-        return { ok: true } as { ok: boolean; bookingId?: string };
+          displayTime: formatSlotLabel(input.slotIso, await resolveToolTimezone(ctx)),
+          paymentRequired: paymentRequired || undefined,
+          checkoutUrl,
+        };
       };
 
       // ── pluggable-backend write (ICP-3, Task 4) ──
@@ -1168,11 +1343,26 @@ export const findMyExistingAppointment: AgentTool<
 
 // ─── escalate_to_human ─────────────────────────────────────────────────────
 
+function normalizeOptionalContactValue(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 const escalateToHumanInput = z.object({
   reason: z.string().min(3),
-  contactEmail: z.string().email().optional(),
-  contactPhone: z.string().optional(),
-  contactName: z.string().optional(),
+  contactEmail: z.preprocess(
+    normalizeOptionalContactValue,
+    z.string().email().optional(),
+  ),
+  contactPhone: z.preprocess(
+    normalizeOptionalContactValue,
+    z.string().optional(),
+  ),
+  contactName: z.preprocess(
+    normalizeOptionalContactValue,
+    z.string().optional(),
+  ),
 });
 
 export const escalateToHuman: AgentTool<
@@ -1190,9 +1380,18 @@ export const escalateToHuman: AgentTool<
         type: "string",
         description: "One-sentence summary of why escalation is needed",
       },
-      contactEmail: { type: "string", format: "email" },
-      contactPhone: { type: "string" },
-      contactName: { type: "string" },
+      contactEmail: {
+        type: "string",
+        description: "Optional. Omit or leave blank when unknown.",
+      },
+      contactPhone: {
+        type: "string",
+        description: "Optional. Omit or leave blank when unknown.",
+      },
+      contactName: {
+        type: "string",
+        description: "Optional. Omit or leave blank when unknown.",
+      },
     },
     required: ["reason"],
   },

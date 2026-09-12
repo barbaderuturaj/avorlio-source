@@ -229,6 +229,24 @@ describe("STARTER_TEMPLATES — coverage", () => {
       /lead/i,
       "speed-to-lead persona must describe instant new-lead outreach",
     );
+    const copy = [
+      (speed as StarterTemplate).blueprint.greeting ?? "",
+      (speed as StarterTemplate).blueprint.customSkillMd ?? "",
+      ...((speed as StarterTemplate).blueprint.faq ?? []).flatMap((entry) => [entry.q, entry.a]),
+    ].join("\n");
+    assert.doesNotMatch(copy, /\b(?:shortly|soon|hear back in seconds)\b/i);
+    assert.match(copy, /passed (?:it|the inquiry) to the team/i);
+  });
+
+  test("quote and social starters retain factual grounding boundaries", () => {
+    const quote = STARTER_TEMPLATES.find((template) => template.id === "quote-estimate-assistant");
+    const social = STARTER_TEMPLATES.find((template) => template.id === "social-content-assistant");
+    assert.ok(quote && social);
+    assert.match(quote.blueprint.customSkillMd ?? "", /configured pricing facts or a successful pricing tool result/i);
+    assert.match(quote.blueprint.customSkillMd ?? "", /never state a price, range, fee, discount/i);
+    assert.match(social.blueprint.customSkillMd ?? "", /never invent staff identities, credentials, certifications/i);
+    assert.match(social.blueprint.customSkillMd ?? "", /turnaround or speed/i);
+    assert.match(social.blueprint.customSkillMd ?? "", /efficiency claims/i);
   });
 });
 

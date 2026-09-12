@@ -94,18 +94,16 @@ export function MarketingModules() {
             <span className="h-px w-4 bg-[#1F2B24] opacity-50" aria-hidden />
           </div>
           <h2 className="mx-auto mt-3.5 max-w-[20ch] text-[clamp(27px,4.2vw,42px)] font-[500] leading-[1.08] tracking-[-0.025em] text-[#221D17]">
-            Every client gets the whole{" "}
+            Your business gets the whole{" "}
             <em className="font-[Newsreader,Georgia,serif] font-normal not-italic">
               front office.
             </em>
           </h2>
           <p className="mx-auto mt-4 max-w-[56ch] text-[clamp(15.5px,1.9vw,18px)] leading-[1.55] text-[#6E665A]">
             <AnimatedShinyText base="rgba(110,102,90,1)" shine="#221D17">
-              A multi-page website, booking page, intake form, CRM, payments, and a 24/7
-              receptionist that books the job
+              Lead capture, answers, booking, and follow-up in one connected front office
             </AnimatedShinyText>{" "}
-            — one connected system per client, delivered in minutes, not weeks. Change a
-            phone number once and everything updates, instantly.
+            — one connected system for your service business, so every lead has a clear next step.
           </p>
         </div>
 
@@ -244,10 +242,10 @@ function CrmMock() {
   const [ref, inView] = useInViewRef<HTMLDivElement>();
 
   const rows: { name: string; tone: CrmTone; amount: string }[] = [
-    { name: "Diane M.", tone: "new", amount: "$1,840" },
-    { name: "Marcus V.", tone: "warm", amount: "$4,200" },
-    { name: "Hartmann Fmly.", tone: "book", amount: "$2,650" },
-    { name: "Reyes Co.", tone: "new", amount: "$980" },
+    { name: "Diane M.", tone: "new", amount: "LEAD" },
+    { name: "Marcus V.", tone: "warm", amount: "FOLLOW-UP" },
+    { name: "Hartmann Fmly.", tone: "book", amount: "BOOKED" },
+    { name: "Reyes Co.", tone: "new", amount: "LEAD" },
   ];
 
   // Phased loop: land 4 rows (steps 0–3), then a beat, then the last "NEW" row

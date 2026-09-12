@@ -286,8 +286,8 @@ export async function createAnonymousWorkspace(
   > = {
     hvac: {
       durationMinutes: 60,
-      title: "Service Call / Free Estimate",
-      description: "Pick a time that works for you. We'll confirm by email.",
+      title: "HVAC service appointment",
+      description: "Schedule a time to discuss your heating or cooling service needs.",
     },
     legal: {
       durationMinutes: 30,
@@ -674,13 +674,43 @@ function buildSeedSoul(
 
 const APP_HOST = "app.seldonframe.com";
 
+function resolveSelfHostedAppOrigin(): string | null {
+  if (process.env.STRIPE_SECRET_KEY) return null;
+
+  const origin =
+    process.env.NEXTAUTH_URL?.trim() ||
+    process.env.NEXT_PUBLIC_APP_URL?.trim();
+
+  if (!origin) return null;
+
+  return origin.replace(/\/+$/, "");
+}
+
+function resolveWorkspaceOrigins(slug: string, baseDomain: string) {
+  const selfHostedOrigin = resolveSelfHostedAppOrigin();
+
+  if (selfHostedOrigin) {
+    return {
+      publicOrigin: `${selfHostedOrigin}/w/${encodeURIComponent(slug)}`,
+      adminOrigin: selfHostedOrigin,
+      selfHosted: true,
+    };
+  }
+
+  return {
+    publicOrigin: `https://${slug}.${baseDomain}`,
+    adminOrigin: `https://${APP_HOST}`,
+    selfHosted: false,
+  };
+}
+
 export function buildWorkspaceUrls(
   slug: string,
   baseDomain: string,
   orgId: string
 ) {
-  const publicOrigin = `https://${slug}.${baseDomain}`;
-  const adminOrigin = `https://${APP_HOST}`;
+  const { publicOrigin, adminOrigin } =
+    resolveWorkspaceOrigins(slug, baseDomain);
   const sw = (next: string) =>
     `${adminOrigin}/switch-workspace?to=${encodeURIComponent(orgId)}&next=${encodeURIComponent(next)}`;
   return {
@@ -712,8 +742,8 @@ export function buildStructuredWorkspaceUrls(
   orgId: string,
   opts?: { bearerToken?: string }
 ) {
-  const publicOrigin = `https://${slug}.${baseDomain}`;
-  const adminOrigin = `https://${APP_HOST}`;
+  const { publicOrigin, adminOrigin } =
+    resolveWorkspaceOrigins(slug, baseDomain);
   const sw = (next: string) =>
     `${adminOrigin}/switch-workspace?to=${encodeURIComponent(orgId)}&next=${encodeURIComponent(next)}`;
 

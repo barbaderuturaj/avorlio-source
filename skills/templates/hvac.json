@@ -4,7 +4,7 @@
   "workspace": {
     "name": "[Your HVAC Business]",
     "industry": "hvac",
-    "tagline": "Cool homes, warm welcomes.",
+    "tagline": "HVAC service for your home.",
     "theme": {
       "mode": "light",
       "accent": "#1E40AF",
@@ -16,7 +16,7 @@
     },
     "contact": {
       "phone": "",
-      "emergencyPhone": "",
+      "emergencyPhone": null,
       "email": null,
       "address": {
         "street": "[Street address]",
@@ -26,178 +26,130 @@
         "country": "US"
       },
       "hours": {
-        "mon": [7, 19],
-        "tue": [7, 19],
-        "wed": [7, 19],
-        "thu": [7, 19],
-        "fri": [7, 19],
-        "sat": [7, 19],
+        "mon": null,
+        "tue": null,
+        "wed": null,
+        "thu": null,
+        "fri": null,
+        "sat": null,
         "sun": null
       },
       "timezone": "America/Chicago",
-      "serviceArea": "[County] and surrounding counties — within roughly 40 miles"
+      "serviceArea": "[Service area]"
     }
   },
   "landing": {
     "renderer": "general-service-v1",
     "sections": [
       {
-        "type": "emergency-strip",
-        "label": "24/7 Emergency Service"
-      },
-      {
         "type": "hero",
-        "eyebrow": "[City] · HVAC repair, install, maintenance",
-        "headline": "A cool home in 24 hours",
-        "subhead": "Family-owned HVAC for [City] homeowners. Same-day repairs, honest quotes, no pressure to upsell.",
-        "ctaPrimary":   { "label": "Book a free estimate", "href": "/book", "kind": "primary" },
-        "ctaSecondary": { "label": "Get a free quote",     "href": "/intake",     "kind": "secondary" },
+        "eyebrow": "Heating, cooling, installation, and maintenance",
+        "headline": "HVAC service for your home",
+        "subhead": "Get help with heating, cooling, installation, and maintenance.",
+        "ctaPrimary":   { "label": "Book service", "href": "/book", "kind": "primary" },
+        "ctaSecondary": { "label": "Request service", "href": "/intake", "kind": "secondary" },
         "imageUrl": null,
         "variant": "split-image-right"
       },
       {
-        "type": "trust-strip",
-        "items": [
-          { "icon": "Star",        "label": "4.9 stars · 1,200+ Google reviews" },
-          { "icon": "ShieldCheck", "label": "Licensed and insured in [State]" },
-          { "icon": "Award",       "label": "20+ years in [City]" },
-          { "icon": "BadgeCheck",  "label": "BBB A+ rated" }
-        ]
-      },
-      {
         "type": "services-grid",
-        "headline": "What we fix and install",
-        "subhead": "Residential and light-commercial. Honest scope, no upsell.",
+        "headline": "HVAC services",
+        "subhead": "Heating, cooling, installation, maintenance, and indoor air quality service categories.",
         "layout": "grid-3",
         "items": [
           {
             "icon": "Wind",
             "title": "AC repair",
-            "description": "Same-day diagnosis and repair for any AC system. We carry common parts on the truck so most fixes are one-visit.",
+            "description": "Service for cooling issues, airflow problems, thermostat concerns, and AC system troubleshooting.",
             "category": "Cooling"
           },
           {
             "icon": "Flame",
-            "title": "Heating & furnace",
-            "description": "Furnace repair, heat pump tune-ups, and full replacements. Pre-season check to catch issues before winter.",
+            "title": "Heating repair",
+            "description": "Service for heating systems, furnaces, heat pumps, and related comfort concerns.",
             "category": "Heating"
           },
           {
             "icon": "Settings2",
-            "title": "Full system install",
-            "description": "New HVAC system sized correctly for your home. We install Trane, Lennox, Goodman, and Mitsubishi mini-splits.",
+            "title": "HVAC installation",
+            "description": "Installation support for heating and cooling equipment. Contact the team to ask about equipment and brand options.",
             "category": "Install"
           },
           {
             "icon": "CalendarCheck",
-            "title": "Seasonal maintenance",
-            "description": "Twice-a-year tune-ups that keep your system running efficiently and catch small issues before they become emergencies.",
+            "title": "Maintenance",
+            "description": "Maintenance visits for heating and cooling systems. Contact the team to confirm available service options.",
             "category": "Maintenance"
           },
           {
             "icon": "Wind",
             "title": "Indoor air quality",
-            "description": "Whole-home filtration, humidity control, UV purifiers, and duct cleaning. Especially important if anyone in the house has allergies.",
+            "description": "Support for indoor air quality questions, including filtration, humidity, ventilation, and related equipment options.",
             "category": "IAQ"
-          },
-          {
-            "icon": "PhoneCall",
-            "title": "24/7 emergency dispatch",
-            "description": "Furnace dies on the coldest night of the year? AC dies in August? Call any time — we have an on-call tech every night.",
-            "category": "Emergency"
           }
         ]
       },
       {
         "type": "about",
-        "headline": "Why neighbors call us first",
-        "body": "We're a family-owned HVAC company that's been serving [City] for over 20 years. We hire local techs, train them properly, and pay them well — which is why our team stays. When you call us, you get someone who's been doing this for years, not someone reading a script. We won't sell you a system you don't need, and we'll always quote a repair before recommending a replacement.",
+        "headline": "HVAC support",
+        "body": "Use this page to request help with heating, cooling, installation, maintenance, or indoor air quality needs.",
         "photoUrl": null,
         "ownerName": "[Owner Name]",
         "ownerTitle": "Owner & Lead Technician"
       },
       {
         "type": "mid-cta",
-        "headline": "Get a free estimate today",
-        "subhead": "We'll come out, take a look, and give you an honest quote. No pressure, no obligation.",
-        "ctaPrimary":   { "label": "Book online",  "href": "/book", "kind": "primary" },
-        "ctaSecondary": { "label": "Get a free quote", "href": "/intake",     "kind": "secondary" },
+        "headline": "Need HVAC help?",
+        "subhead": "Book a service appointment or send a request with the details of your heating or cooling need.",
+        "ctaPrimary":   { "label": "Book service", "href": "/book", "kind": "primary" },
+        "ctaSecondary": { "label": "Request service", "href": "/intake", "kind": "secondary" },
         "embedQuoteForm": true
       },
       {
         "type": "testimonials",
-        "headline": "What [City] homeowners say",
-        "featured": {
-          "quote": "Our AC died on the hottest day of the summer with two kids and a dog at home. They had a tech at the door in under three hours and had the system running again before dinner. Fair price, no upsell. We've been customers ever since.",
-          "authorName": "[Customer Name]",
-          "authorRole": "Homeowner in [Neighborhood]",
-          "rating": 5,
-          "source": "google"
-        },
-        "items": [
-          {
-            "quote": "Replaced our 22-year-old furnace last fall. They quoted three options at three price points and explained the tradeoffs honestly. Install took one day. Bills are noticeably lower.",
-            "authorName": "[Customer Name]",
-            "authorRole": "Homeowner",
-            "rating": 5,
-            "source": "google"
-          },
-          {
-            "quote": "I've used them for both repairs and yearly tune-ups for five years. Every tech who's come out has been on time, polite, and quick. They tell me when something doesn't need fixing yet — which is rare.",
-            "authorName": "[Customer Name]",
-            "authorRole": "Homeowner",
-            "rating": 5,
-            "source": "google"
-          },
-          {
-            "quote": "Called at 11pm during a January cold snap. Tech was at the house by 12:30am, had heat back on by 1:15am. Charged the standard service rate, not a 'middle of the night' premium.",
-            "authorName": "[Customer Name]",
-            "authorRole": "Homeowner",
-            "rating": 5,
-            "source": "google"
-          }
-        ]
+        "headline": "[Verified customer reviews]",
+        "items": []
       },
       {
         "type": "service-area",
         "headline": "Service area",
-        "description": "We serve [County] and surrounding counties — typically within 40 miles of [City]. Outside that radius? Call us anyway; we'll often go the extra mile for an existing customer."
+        "description": "[Service area]"
       },
       {
         "type": "faq",
         "headline": "Frequently asked questions",
         "items": [
           {
-            "question": "How soon can a technician come out?",
-            "answer": "For non-emergencies, usually within 24-48 hours. For emergencies (no heat in winter, no AC during a heat advisory), we aim for same-day and we'll let you know an honest ETA when you call."
+            "question": "How do I check availability?",
+            "answer": "Contact the team to confirm current availability."
           },
           {
-            "question": "Do you charge for estimates?",
-            "answer": "Quotes for new system installs are always free. Diagnostic visits for repair start at a flat rate — if you book the repair, we waive the diagnostic fee."
+            "question": "How does pricing work?",
+            "answer": "Pricing depends on the work required. Contact the team for current pricing."
           },
           {
-            "question": "What brands do you install?",
-            "answer": "We're licensed dealers for Trane, Lennox, Goodman, and Mitsubishi (mini-splits). We'll match the brand to your home and budget — we don't get bigger commissions for one over the other."
+            "question": "What equipment brands are available?",
+            "answer": "Contact the team to ask about equipment and brand options."
           },
           {
-            "question": "How often should I get my system serviced?",
-            "answer": "Twice a year — once before summer, once before winter. Catching small issues during a 30-minute tune-up is dramatically cheaper than emergency repairs in July."
+            "question": "What HVAC services can I request?",
+            "answer": "You can request help with AC repair, heating repair, HVAC installation, maintenance, indoor air quality, or another heating and cooling need."
           },
           {
-            "question": "Is financing available for a new system?",
-            "answer": "Yes. We offer 0% financing for 12-18 months on qualifying installs, plus longer-term plans through a third-party lender. We'll walk you through the options before you decide."
+            "question": "Are payment or financing options available?",
+            "answer": "Contact the team to ask about available payment or financing options."
           },
           {
-            "question": "Are you licensed and insured?",
-            "answer": "Yes — fully licensed in [State] (license #[Number]) and we carry $2M general liability + workers' comp on every tech."
+            "question": "Where can I find licensing and insurance information?",
+            "answer": "Contact the team for current licensing and insurance information."
           }
         ]
       },
       {
         "type": "footer",
-        "showHours": true,
-        "showAddress": true,
-        "showServiceArea": true,
+        "showHours": false,
+        "showAddress": false,
+        "showServiceArea": false,
         "social": [],
         "legal": [
           { "label": "Privacy", "href": "/privacy" },
@@ -209,8 +161,8 @@
   "booking": {
     "renderer": "calcom-month-v1",
     "eventType": {
-      "title": "Free in-home estimate",
-      "description": "45-minute on-site visit. We'll diagnose the issue (or assess your home for a new system) and give you a written quote. No obligation.",
+      "title": "HVAC service appointment",
+      "description": "Schedule a time to discuss your heating or cooling service needs.",
       "durationMinutes": 45,
       "location": { "kind": "on-site-customer" },
       "bufferMinutes": 30
@@ -232,7 +184,7 @@
     "formFields": [
       { "id": "name",    "label": "Full name",       "type": "text",  "required": true,  "placeholder": "Jane Smith" },
       { "id": "email",   "label": "Email",           "type": "email", "required": true,  "placeholder": "you@example.com" },
-      { "id": "phone",   "label": "Best phone",      "type": "phone", "required": true,  "placeholder": "(555) 555-0100" },
+      { "id": "phone",   "label": "Best phone",      "type": "phone", "required": true,  "placeholder": "Your phone number" },
       { "id": "address", "label": "Service address", "type": "text",  "required": true,  "placeholder": "123 Main St, [City]" },
       {
         "id": "service",
@@ -250,19 +202,19 @@
       }
     ],
     "confirmation": {
-      "headline": "Your estimate is booked",
-      "message": "We'll send a confirmation email and call about an hour before the visit. If anything changes, just call us at (555) 555-0100.",
+      "headline": "Your appointment request was received",
+      "message": "Thanks - we received your appointment request. Contact the team for current availability.",
       "successRedirectUrl": null
     }
   },
   "intake": {
     "renderer": "formbricks-stack-v1",
     "title": "Tell us about the job",
-    "description": "Quick form. Takes about a minute. We'll call back within an hour during business hours.",
+    "description": "Share your heating or cooling service request.",
     "questions": [
       { "id": "fullName", "type": "text",  "label": "What's your name?",         "required": true },
       { "id": "phone",    "type": "phone", "label": "Best phone to reach you?",  "required": true,
-        "helper": "We'll call back within an hour during business hours." },
+        "helper": "Share the best number for follow-up." },
       { "id": "email",    "type": "email", "label": "Email",                     "required": false },
       { "id": "address",  "type": "text",  "label": "Service address",           "required": true,
         "helper": "Just the street and city is fine." },
@@ -289,23 +241,28 @@
         "label": "How urgent is this?",
         "required": true,
         "options": [
-          "Emergency — today if possible",
-          "Urgent — this week",
-          "Routine — within the next few weeks"
+          "Needs attention soon",
+          "Flexible timing",
+          "Planning ahead"
         ]
       },
       {
         "id": "details",
         "type": "textarea",
-        "label": "Anything else we should know before we arrive?",
-        "helper": "System age, recent repairs, pets at home, accessibility — anything that helps us prepare.",
+        "label": "Anything else the team should know?",
+        "helper": "System age, recent repairs, access notes, or other details that may help with your request.",
         "required": false,
         "validation": { "maxLength": 1000 }
       }
     ],
     "completion": {
-      "headline": "Thanks — we'll be in touch shortly",
-      "message": "If your issue is an emergency, call us right now at (555) 555-0100. Otherwise we'll reach out within one business hour."
+      "headline": "Thanks - we received your service request",
+      "message": "Thanks - we received your service request. You can book an appointment online or contact the team for current availability.",
+      "cta": {
+        "label": "Book service",
+        "href": "/book",
+        "kind": "primary"
+      }
     }
   },
   "admin": {

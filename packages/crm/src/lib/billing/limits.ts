@@ -43,10 +43,19 @@ export type WorkspaceLimitDeps = {
   /** Resolve the effective tier for an org. Injected in tests; the
    *  production default walks the agency chain via tier-resolver. */
   resolveTier: (orgId: string | null | undefined) => Promise<BillingTier>;
+
+  /**
+   * Self-hosted deployments do not use SeldonFrame subscription billing.
+   * Optional on purpose: injected unit-test deps that only provide
+   * resolveTier keep the existing hosted billing semantics.
+   */
+  isSelfHosted?: () => boolean;
 };
 
 const defaultDeps: WorkspaceLimitDeps = {
   resolveTier: async (orgId) => normalizeTierId(await resolveTierForWorkspace(orgId)),
+  // Keep this aligned with middleware/plan-gate.ts.
+  isSelfHosted: () => !process.env.STRIPE_SECRET_KEY,
 };
 
 /** Full-workspace allowance per tier. `inactive` (no plan) gets the
@@ -107,6 +116,16 @@ export async function enforceWorkspaceLimit(
   const tier = params.primaryOrgId
     ? await deps.resolveTier(params.primaryOrgId)
     : "inactive";
+
+  // Self-hosted installations supply their own infrastructure and do not
+  // participate in SeldonFrame's hosted subscription billing. The plan gate
+  // already treats a deployment without STRIPE_SECRET_KEY as self-hosted;
+  // workspace creation must use the same contract.
+  //
+  // When deps are injected in tests, an omitted isSelfHosted intentionally
+  // means "hosted" so existing tier-limit tests remain deterministic.
+  const selfHosted = deps.isSelfHosted?.() ?? false;
+  if (selfHosted) return { allowed: true, tier };
 
   const cap = maxFullWorkspacesForTier(tier);
 

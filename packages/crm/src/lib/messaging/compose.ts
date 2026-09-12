@@ -16,6 +16,7 @@
 
 import type Anthropic from "@anthropic-ai/sdk";
 import { getAIClient } from "@/lib/ai/client";
+import { DEFAULT_SONNET_MODEL } from "@/lib/ai/models";
 import {
   getMessageSkill,
   renderSkillPrompt,
@@ -121,7 +122,7 @@ export async function composeOutboundMessage(
   let response: Anthropic.Messages.Message;
   try {
     response = await ai.client.messages.create({
-      model: "claude-sonnet-4-5",
+      model: DEFAULT_SONNET_MODEL,
       max_tokens: input.channel === "sms" ? 400 : 1200,
       system:
         "You are composing a single transactional message for a customer of a small business. " +

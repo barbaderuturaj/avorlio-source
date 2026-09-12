@@ -8,7 +8,7 @@ export function defaultLandingSections(): LandingSection[] {
       type: "hero",
       order: 1,
       content: {
-        kicker: "Built with SeldonFrame",
+        kicker: "Built for your business",
         headline: "Launch your next landing page in minutes",
         subheadline: "Start from a high-converting structure, then customize everything visually.",
         ctaText: "Get Started",
@@ -42,7 +42,7 @@ export function defaultLandingSections(): LandingSection[] {
       order: 4,
       content: {
         businessName: "Your Business",
-        description: "Powered by SeldonFrame",
+        description: "Online service portal",
       },
     },
   ];

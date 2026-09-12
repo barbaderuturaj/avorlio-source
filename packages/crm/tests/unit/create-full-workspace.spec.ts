@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 
 import { classifyBusinessTypeFromSoul } from "@/lib/page-schema/classify-business";
 import { selectCRMPersonality } from "@/lib/crm/personality";
+import { pickTemplate } from "@/lib/blueprint/templates";
 import { inferTimezone } from "@/lib/workspace/infer-timezone";
 
 /**
@@ -54,12 +55,12 @@ describe("createFullWorkspace classification", () => {
     assert.equal(vertical, "hvac");
   });
 
-  test("Plumbing → hvac personality (shared local-service bucket)", () => {
+  test("Plumbing → general personality (safe local-service fallback)", () => {
     const vertical = classifyFromInput(
       ["Drain cleaning", "Water heater repair"],
       "Family-owned residential plumbing in Austin"
     );
-    assert.equal(vertical, "hvac");
+    assert.equal(vertical, "general");
   });
 
   test("Pacific Coast Heating → hvac (regression: 'heating' alone)", () => {
@@ -117,6 +118,15 @@ describe("createFullWorkspace classification", () => {
     // (Note: avoid the word "studio" — that triggers the agency bucket
     // via "design studio" / "production studio" patterns.)
     assert.equal(vertical, "general");
+  });
+});
+
+describe("general template fallback", () => {
+  test("unknown service industry uses general template without unsafe generic claims", () => {
+    const template = pickTemplate("plumbing");
+    const text = JSON.stringify(template);
+    assert.equal(template.workspace.industry, "general");
+    assert.doesNotMatch(text, /5-star rated|Licensed and insured|Same-day service|free consultation|free quote|free estimate|financing|within 24 hours|calendar invite shortly/i);
   });
 });
 

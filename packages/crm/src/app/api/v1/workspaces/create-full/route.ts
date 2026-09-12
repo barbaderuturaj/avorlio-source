@@ -30,6 +30,8 @@ import { runR1LandingStep } from "@/lib/landing/r1-landing-step";
 import { mapLandingContentToChatbot } from "@/lib/landing/map-landing-to-chatbot";
 import { publishAgent } from "@/lib/agents/store";
 import type { R1LandingPayload } from "@/lib/landing/r1-payload-prompt";
+import { setPublicChatbotEmbed } from "@/lib/agents/public-embed";
+import { registerHvacCreateFullChatbotEmbed } from "@/lib/agents/public-chatbot-registration";
 
 // The atomic create already makes several sequential LLM calls; the R1 parity
 // step adds two more (payload + ONE batched service-pages call). Same guard
@@ -327,8 +329,11 @@ export async function POST(request: Request) {
   // this block leaves the (now-populated) chatbot in draft/test and
   // NEVER blocks workspace creation — the workspace is already persisted.
   let chatbotEmbedSnippet: string | null = null;
+  let chatbotEmbedUrl: string | null = null;
   let chatbotAgentId: string | null = null;
   let chatbotStatus: "draft" | "test" | "live" = "draft";
+  let hvacPublicChatbotRegistered = false;
+  let hvacPublicChatbotRegistrationFailed = false;
   try {
     const mapped = mapLandingContentToChatbot(
       landingPayloadForChatbot,
@@ -345,6 +350,7 @@ export async function POST(request: Request) {
     });
     if (agentResult.ok) {
       chatbotAgentId = agentResult.agent.id;
+      chatbotEmbedUrl = agentResult.embedUrl;
       chatbotEmbedSnippet = `<script src="${agentResult.embedUrl}" async></script>`;
 
       // Only worth attempting a live publish when we actually seeded real
@@ -384,6 +390,28 @@ export async function POST(request: Request) {
     );
   }
 
+  const chatbotRegistration = await registerHvacCreateFullChatbotEmbed({
+    workspaceId,
+    personality: result.configured?.personality,
+    chatbotStatus,
+    chatbotAgentId,
+    chatbotEmbedUrl,
+    register: setPublicChatbotEmbed,
+    onRegistrationError: (err) => {
+      hvacPublicChatbotRegistrationFailed = true;
+      logEvent(
+        "create_full_hvac_chatbot_embed_register_failed",
+        {
+          workspace_id: workspaceId,
+          agent_id: chatbotAgentId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+        { request, orgId: workspaceId, status: 200, severity: "warn" }
+      );
+    },
+  });
+  hvacPublicChatbotRegistered = chatbotRegistration.registered;
+
   // v1.51 — surface client portal URL + tier upsell so Claude Code's
   // delivery output tells the operator about the end-client CRM
   // feature (gated to Growth/Scale tiers).
@@ -396,7 +424,11 @@ export async function POST(request: Request) {
       chatbot_status: chatbotEmbedSnippet ? chatbotStatus : null,
       chatbot_instructions: chatbotEmbedSnippet
         ? chatbotStatus === "live"
-          ? "Your AI receptionist is live and answering on your site. Paste this <script> onto the client's existing website (anywhere before </body>) to embed it elsewhere too. Refine its FAQ anytime via update_website_chatbot."
+          ? result.configured?.personality === "hvac" && !hvacPublicChatbotRegistered
+            ? hvacPublicChatbotRegistrationFailed
+              ? "Your AI receptionist is live, but automatic public site registration did not complete. Paste this <script> onto the client's existing website (anywhere before </body>) to embed it manually, then retry public embed registration."
+              : "Your AI receptionist is live. Paste this <script> onto the client's existing website (anywhere before </body>) to embed it manually."
+            : "Your AI receptionist is live and answering on your site. Paste this <script> onto the client's existing website (anywhere before </body>) to embed it elsewhere too. Refine its FAQ anytime via update_website_chatbot."
           : "Paste this <script> onto the client's existing website (anywhere before </body>). The chatbot is in DRAFT/TEST mode — review/edit its FAQ via update_website_chatbot, then call publish_agent({ agent_id, status: 'live' }) to go live."
         : null,
       chatbot_agent_id: chatbotAgentId,

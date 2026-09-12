@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 
 import { parseExtraction } from "../../../src/lib/web-onboarding/extraction-parser";
+import { EXTRACTION_INSTRUCTIONS, EXTRACTION_INSTRUCTIONS_MD } from "../../../src/lib/web-onboarding/extraction-prompt";
 
 const validJson = JSON.stringify({
   business_name: "Acme Plumbing",
@@ -72,5 +73,15 @@ describe("parseExtraction", () => {
   test("returns extraction_failed when the model emitted _error", () => {
     const result = parseExtraction(JSON.stringify({ _error: "fetch_failed" }));
     assert.equal(result.ok, false);
+  });
+});
+
+describe("emergency-service extraction instructions", () => {
+  test("service names containing emergency do not automatically imply 24/7 availability", () => {
+    for (const prompt of [EXTRACTION_INSTRUCTIONS, EXTRACTION_INSTRUCTIONS_MD]) {
+      assert.match(prompt, /Emergency plumbing/i);
+      assert.match(prompt, /service category/i);
+      assert.match(prompt, /does NOT prove 24\/7\/on-call\/immediate availability/i);
+    }
   });
 });

@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import { renderCalcomMonthV1 } from "@/lib/blueprint/renderers/calcom-month-v1";
+import { renderFormbricksStackV1 } from "@/lib/blueprint/renderers/formbricks-stack-v1";
 import { renderGeneralServiceV1 } from "@/lib/blueprint/renderers/general-service-v1";
+import { buildBlueprintForWorkspace, renderBlueprint } from "@/lib/blueprint/persist";
 import { pickTemplate } from "@/lib/blueprint/templates";
 
 test("pickTemplate — returns hvac for industry='hvac'", () => {
@@ -64,10 +67,10 @@ test("renderGeneralServiceV1 — landing background is warm off-white #FAFAF7 fo
   assert.ok(out.css.includes("--sf-bg-primary: #FAFAF7;"), "landing surface should use warm off-white");
 });
 
-test("renderGeneralServiceV1 — HVAC blueprint includes emergency-strip in output", () => {
+test("renderGeneralServiceV1 — HVAC fallback does NOT include emergency-strip", () => {
   const blueprint = pickTemplate("hvac");
   const out = renderGeneralServiceV1(blueprint);
-  assert.ok(out.html.includes("sf-emergency"), "HVAC includes the emergency strip");
+  assert.ok(!out.html.includes("sf-emergency"), "HVAC fallback skips the emergency strip");
 });
 
 test("renderGeneralServiceV1 — general blueprint does NOT include emergency-strip", () => {
@@ -85,12 +88,62 @@ test("renderGeneralServiceV1 — output is byte-stable for the same blueprint (d
 
 test("renderGeneralServiceV1 — services-grid renders all items from blueprint", () => {
   const blueprint = pickTemplate("hvac");
-  // hvac.json's services grid has 6 items. C3.1 cards carry multiple classes
+  // hvac.json's fallback services grid keeps the core 5 HVAC categories.
+  // C3.1 cards carry multiple classes
   // (`sf-service sf-animate sf-delay-N`) so we count by the unique title slot
   // instead of the whole-attribute equality match.
   const out = renderGeneralServiceV1(blueprint);
   const serviceCardCount = (out.html.match(/class="sf-service__title"/g) ?? []).length;
-  assert.equal(serviceCardCount, 6, "HVAC has 6 services");
+  assert.equal(serviceCardCount, 5, "HVAC fallback has 5 neutral service categories");
+});
+
+test("HVAC public fallback blueprint is fact-neutral and keeps booking/intake CTAs", () => {
+  const blueprint = buildBlueprintForWorkspace("Lone Star Comfort HVAC", "hvac");
+  const landing = renderBlueprint(blueprint);
+  const booking = renderCalcomMonthV1(blueprint);
+  const intake = renderFormbricksStackV1(blueprint);
+  const publicSurface = [
+    JSON.stringify(blueprint),
+    landing.contentHtml,
+    landing.contentCss,
+    booking.html,
+    booking.css,
+    intake.html,
+    intake.css,
+  ].join("\n");
+
+  const unsafeMarkers = [
+    "24/7 Emergency Service",
+    "A cool home in 24 hours",
+    "Same-day",
+    "1,200",
+    "Google reviews",
+    "20 years",
+    "Trane",
+    "Lennox",
+    "Goodman",
+    "Mitsubishi",
+    "0% financing",
+    "$2M",
+    "(555) 555-0100",
+    "one business hour",
+    "free estimate",
+    "diagnostic fee",
+  ];
+
+  for (const marker of unsafeMarkers) {
+    assert.ok(
+      !publicSurface.toLowerCase().includes(marker.toLowerCase()),
+      `HVAC fallback must not contain unsafe marker: ${marker}`,
+    );
+  }
+
+  assert.match(publicSurface, /HVAC service for your home/i);
+  assert.match(publicSurface, /AC repair/i);
+  assert.match(publicSurface, /Heating repair/i);
+  assert.match(publicSurface, /HVAC installation/i);
+  assert.match(publicSurface, /href="\/book"/);
+  assert.match(publicSurface, /href="\/intake"/);
 });
 
 test("renderGeneralServiceV1 — testimonials have a featured quote + grid items", () => {

@@ -296,6 +296,26 @@ describe("defaultGuardrailsForSkill", () => {
     assert.equal(d.reason, "quiet hours");
   });
 
+  test("review-requester default quiet hours use the workspace IANA timezone", () => {
+    const g = defaultGuardrailsForSkill("review-requester", "America/Chicago");
+    assert.deepEqual(g?.quietHours, {
+      startHour: 21,
+      endHour: 8,
+      tz: "America/Chicago",
+    });
+    const d = evaluateGuardrails(g, at("2026-06-26T12:00:00Z")); // 07:00 CDT
+    assert.equal(d.allow, false);
+    assert.equal(d.reason, "quiet hours");
+  });
+
+  test("review-requester invalid or missing workspace timezone safely falls back to UTC", () => {
+    assert.equal(
+      defaultGuardrailsForSkill("review-requester", "not/a-timezone")?.quietHours?.tz,
+      "UTC",
+    );
+    assert.equal(defaultGuardrailsForSkill("review-requester", null)?.quietHours?.tz, "UTC");
+  });
+
   test("speed-to-lead → time-critical: enabled, daily cap 500, NO quiet hours, NO per-contact gap", () => {
     const g = defaultGuardrailsForSkill("speed-to-lead");
     assert.ok(g, "expected non-null guardrails");

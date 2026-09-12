@@ -20,8 +20,11 @@
 // load it.
 
 import { eq } from "drizzle-orm";
+import { headers } from "next/headers";
 import { db } from "@/db";
 import { organizations } from "@/db/schema/organizations";
+import { sanitizeChatbotEmbedUrl } from "@/lib/landing/factual-grounding";
+import { requestOriginFromHeaders } from "@/lib/bookings/public-booking-url";
 
 interface ChatbotEmbedRecord {
   embedUrl: string;
@@ -42,7 +45,7 @@ function readChatbotRecord(
   // / spoofed value that injects arbitrary script. The MCP tool only
   // ever writes URLs derived from `process.env.WORKSPACE_BASE_DOMAIN`,
   // so this is belt + suspenders.
-  if (!/^https:\/\//i.test(embedUrl)) return null;
+  if (!/^https:\/\//i.test(embedUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//i.test(embedUrl)) return null;
   return { embedUrl, agentId };
 }
 
@@ -66,7 +69,16 @@ export async function getPublicChatbotEmbed(
   } catch {
     return null;
   }
-  return readChatbotRecord(row?.settings ?? null);
+  const record = readChatbotRecord(row?.settings ?? null);
+  if (!record) return null;
+  try {
+    const requestOrigin = requestOriginFromHeaders(await headers());
+    if (!requestOrigin) return null;
+    const safeUrl = sanitizeChatbotEmbedUrl(record.embedUrl, requestOrigin);
+    return safeUrl ? { ...record, embedUrl: safeUrl } : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

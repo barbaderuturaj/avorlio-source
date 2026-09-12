@@ -31,6 +31,15 @@ const DEFAULT_ICONS: PwaIcon[] = [
   { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
 ];
 
+const AVORLIO_OPERATOR_PWA_ICONS: PwaIcon[] = [
+  {
+    src: "/brand/avorlio-favicon-v1.svg",
+    sizes: "any",
+    type: "image/svg+xml",
+    purpose: "any",
+  },
+];
+
 export function generatePwaManifest(options: PwaManifestOptions) {
   return {
     name: options.name,
@@ -59,31 +68,39 @@ export type ManifestBrandingInput = {
 
 /** Pure: map effective branding + an org slug into PwaManifestOptions
  *  for the per-agency installable app. The installed app's identity
- *  (name, theme color) comes from the active agency; SeldonFrame
- *  defaults apply when there's no active white-label agency. Icons
- *  are always the default PNG set in v1 (per-agency generated icons
- *  are a fast-follow). */
+ *  (name, theme color) comes from the active agency; Avorlio
+ *  defaults apply when there's no active white-label agency. The
+ *  operator fallback uses the existing Avorlio brand asset; customer
+ *  logos are not rewritten here. */
 export function brandingToManifestOptions(input: {
   orgSlug: string;
+  workspaceName: string;
   branding: ManifestBrandingInput;
 }): PwaManifestOptions {
   const scope = `/portal/${input.orgSlug}/`;
-  const name = input.branding.is_white_label
-    ? input.branding.brand_name
-    : "SeldonFrame";
+  const workspaceName = input.workspaceName.trim() || input.orgSlug;
+  const configuredBrandName = input.branding.brand_name.trim();
+  const isLegacyPlatformBrand = /^(?:seldonframe|seldon\s*frame)$/i.test(
+    configuredBrandName,
+  );
+  const platformBrandName =
+    !input.branding.is_white_label || isLegacyPlatformBrand
+      ? "Avorlio"
+      : configuredBrandName || "Avorlio";
+  const name = `${workspaceName} — ${platformBrandName}`;
   const themeColor =
     input.branding.is_white_label && input.branding.primary_color
       ? input.branding.primary_color
       : DEFAULT_THEME_COLOR;
   return {
     name,
-    shortName: name,
+    shortName: workspaceName,
     description: `${name} — your business in your pocket.`,
     startUrl: scope,
     scope,
     display: "standalone",
     themeColor,
     backgroundColor: DEFAULT_BACKGROUND_COLOR,
-    icons: DEFAULT_ICONS,
+    icons: AVORLIO_OPERATOR_PWA_ICONS,
   };
 }

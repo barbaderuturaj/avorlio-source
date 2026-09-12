@@ -22,9 +22,9 @@ import { toInternalRedirectPath } from "@/lib/auth/signup-redirect";
 
 const protectedPrefixes = ["/hub", "/dashboard", "/welcome", "/orgs", "/contacts", "/deals", "/activities", "/forms", "/settings", "/api/v1"];
 const publicPrefixes = ["/api/v1", "/api/auth"];
-const defaultAppHosts = new Set(["app.seldonframe.com", "localhost", "127.0.0.1"]);
-const marketingHosts = new Set(["seldonframe.com", "www.seldonframe.com"]);
-const appHostFallback = "app.seldonframe.com";
+const defaultAppHosts = new Set(["app.avorlio.com", "app.seldonframe.com", "localhost", "127.0.0.1"]);
+const marketingHosts = new Set(["avorlio.com", "www.avorlio.com", "seldonframe.com", "www.seldonframe.com"]);
+const appHostFallback = "app.avorlio.com";
 // The builder MCP host the /build page's connect snippet + SKILL.md advertise
 // (mirrors SKILL_MD_MCP_URL / MCP_URL — src/lib/build/skill-md.ts,
 // src/components/settings/api-key-manager.tsx). Hardcoded like those two, for
@@ -163,7 +163,22 @@ function resolveWorkspaceRewritePath(
 }
 
 function isAppHost(host: string) {
-  return defaultAppHosts.has(host) || host.endsWith(".vercel.app");
+  let configuredAppHost = "";
+
+  try {
+    const configuredAppUrl = process.env.NEXT_PUBLIC_APP_URL?.trim();
+    if (configuredAppUrl) {
+      configuredAppHost = normalizeHost(new URL(configuredAppUrl).host);
+    }
+  } catch {
+    // Invalid/missing configured URL falls back to the built-in app hosts.
+  }
+
+  return (
+    defaultAppHosts.has(host) ||
+    Boolean(configuredAppHost && host === configuredAppHost) ||
+    host.endsWith(".vercel.app")
+  );
 }
 
 function isAuthPath(pathname: string) {

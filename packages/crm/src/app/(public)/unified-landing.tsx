@@ -13,11 +13,8 @@ import { MarketingNav } from "@/components/landing/marketing-nav";
 import { MarketingHero } from "@/components/landing/marketing-hero";
 import { MarketingProofStrip } from "@/components/landing/marketing-proof-strip";
 import { MarketingBuildSteps } from "@/components/landing/marketing-build-steps";
-import { MarketingAgencyOwnership } from "@/components/landing/marketing-agency-ownership";
-import { MarketingIdeStrip } from "@/components/landing/marketing-ide-strip";
 import { MarketingAgentOrbit } from "@/components/landing/marketing-agent-orbit";
-import { MarketingModules, MarketingAgents } from "@/components/landing/marketing-modules";
-import { LandingMarketingPricingSection } from "@/components/landing/marketing-pricing-section";
+import { MarketingModules } from "@/components/landing/marketing-modules";
 import { LandingMarketingFaqSection } from "@/components/landing/marketing-faq-section";
 import { MarketingFinalCta } from "@/components/landing/marketing-final-cta";
 import { MarketingFooter } from "@/components/landing/marketing-footer";
@@ -42,7 +39,7 @@ export function UnifiedLanding({
   initialMode,
   recordEnabled,
   urlStrategy,
-  tierLadderOn,
+  tierLadderOn: _tierLadderOn,
   ungatedBuildEnabled,
   recordProps,
   recordFaqWithSchema = false,
@@ -50,7 +47,7 @@ export function UnifiedLanding({
   initialMode: LandingMode;
   recordEnabled: boolean;
   urlStrategy: "replace-state" | "navigate-home";
-  tierLadderOn: boolean;
+  tierLadderOn?: boolean;
   ungatedBuildEnabled: boolean;
   recordProps: RecordSurfaceProps;
   /** true only on /record — FAQPage JSON-LD must not duplicate on / */
@@ -66,21 +63,12 @@ export function UnifiedLanding({
       buildStack={
         <>
           <MarketingHero ungatedBuildEnabled={ungatedBuildEnabled} />
-          {/* IDE strip sits right above the orbit — "build it with one command"
-              then "one agent, your whole stack". */}
-          <MarketingIdeStrip />
           <MarketingAgentOrbit />
           {/* How it works → the payoff ("Either way, you get the whole front
               office") → the agent catalog, kept adjacent so the two-ways idea
               pays off immediately. */}
           <MarketingBuildSteps />
-          <MarketingAgencyOwnership />
           <MarketingModules />
-          <MarketingAgents />
-          {/* "Get paid" (2% GMV) section REMOVED 2026-07-16 (Max's call) —
-              agency plans pay 0% GMV, so the 2% story is /pricing + FAQ
-              material, not a homepage section. */}
-          <LandingMarketingPricingSection tierLadderOn={tierLadderOn} />
           <MarketingProofStrip />
           <LandingMarketingFaqSection />
           <MarketingFinalCta />
@@ -92,7 +80,6 @@ export function UnifiedLanding({
           <RecordSteps />
           <RecordWhatYouGet />
           <RecordProof />
-          <LandingMarketingPricingSection tierLadderOn={tierLadderOn} />
           <RecordFaq withSchema={recordFaqWithSchema} />
           <MarketingFinalCta variant="record" />
         </>

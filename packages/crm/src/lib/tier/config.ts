@@ -9,7 +9,7 @@ export const CLOUD_TIERS = {
       portalEnabled: false,
       aiCustomizationEnabled: false,
       customDomain: false,
-      removeBranding: false,
+      removeBranding: true,
     },
   },
   growth: {

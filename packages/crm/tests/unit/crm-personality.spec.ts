@@ -136,6 +136,16 @@ describe("selectCRMPersonality", () => {
     const p = selectCRMPersonality(null, "Mountainside HVAC & Plumbing of Boulder");
     assert.equal(p.vertical, "hvac");
   });
+
+  test("plumbing does not inherit HVAC-specific personality defaults", () => {
+    const p = selectCRMPersonality("local_service", "Dallas plumbing, drain cleaning, leak repair");
+    assert.equal(p.vertical, "general");
+  });
+
+  test("unknown service trade gets safe generic behavior", () => {
+    const p = selectCRMPersonality("local_service", "garage door repair and maintenance");
+    assert.equal(p.vertical, "general");
+  });
 });
 
 // ─── Per-vertical adaptation ─────────────────────────────────────────────────

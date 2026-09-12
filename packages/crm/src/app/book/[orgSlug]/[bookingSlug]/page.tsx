@@ -8,7 +8,9 @@ import { TestModePublicBadge } from "@/components/layout/test-mode-public-badge"
 import { PublicThemeProvider } from "@/components/theme/public-theme-provider";
 import { shouldShowPoweredByBadgeForOrg } from "@/lib/billing/public";
 import { getPublicBookingContext } from "@/lib/bookings/actions";
+import { sanitizePublicBookingTestimonials, shouldExposePublicBookingTestimonials } from "@/lib/bookings/public-booking-url";
 import { getPublicOrgThemeBySlug } from "@/lib/theme/actions";
+import { buildVerifiedBusinessFacts, type VerifiedBusinessFacts } from "@/lib/landing/factual-grounding";
 import type { R1TestimonialsSection } from "@/lib/landing/r1-payload-prompt";
 // 2026-05-18 (later) — agency-wide white-label REMOVED from public
 // booking page. The end customer (the homeowner clicking the booking
@@ -31,8 +33,11 @@ export type BookingTestimonialsData = {
   reviewSummary?: R1TestimonialsSection["reviewSummary"];
 };
 
-async function fetchBookingTestimonials(orgId: string): Promise<BookingTestimonialsData> {
+async function fetchBookingTestimonials(orgId: string, facts: VerifiedBusinessFacts): Promise<BookingTestimonialsData> {
   const empty: BookingTestimonialsData = { testimonials: [] };
+  if (!shouldExposePublicBookingTestimonials(facts)) {
+    return empty;
+  }
   try {
     // Query the r1 landing row: prefer slug='r1', also accept source='r1-generator'
     // (both conditions should match the same row; OR covers any naming variation).
@@ -57,7 +62,7 @@ async function fetchBookingTestimonials(orgId: string): Promise<BookingTestimoni
     }
 
     return {
-      testimonials: payload.testimonials,
+      testimonials: sanitizePublicBookingTestimonials(payload.testimonials, facts),
       eyebrow: payload.eyebrow,
       heading: payload.heading,
       reviewSummary: payload.reviewSummary,
@@ -104,10 +109,20 @@ export default async function PublicBookingPage({
     notFound();
   }
 
-  const [showBadge, theme, testimonialsData] = await Promise.all([
+  const [showBadge, theme, orgRow] = await Promise.all([
     shouldShowPoweredByBadgeForOrg(bookingContext.orgId),
     getPublicOrgThemeBySlug(orgSlug),
-    fetchBookingTestimonials(bookingContext.orgId),
+    db
+      .select({
+        name: organizations.name,
+        soul: organizations.soul,
+        settings: organizations.settings,
+        testMode: organizations.testMode,
+      })
+      .from(organizations)
+      .where(eq(organizations.id, bookingContext.orgId))
+      .limit(1)
+      .then((rows) => rows[0]),
   ]);
   // 2026-05-18 (later) — SMB identity only on public booking page.
   // No agency override (see import comment above).
@@ -116,18 +131,11 @@ export default async function PublicBookingPage({
   // v1.36.1 — fetch org name + soul + testMode in one query. Replaces
   // the separate testMode lookup. Soul is parsed for business phone
   // via extractBusinessPhone() above.
-  const [orgRow] = await db
-    .select({
-      name: organizations.name,
-      soul: organizations.soul,
-      testMode: organizations.testMode,
-    })
-    .from(organizations)
-    .where(eq(organizations.id, bookingContext.orgId))
-    .limit(1);
   const businessName = orgRow?.name ?? "Schedule";
   const businessPhone = extractBusinessPhone(orgRow?.soul);
   const isTestMode = orgRow?.testMode ?? false;
+  const facts = buildVerifiedBusinessFacts(orgRow?.soul, orgRow?.settings);
+  const testimonialsData = await fetchBookingTestimonials(bookingContext.orgId, facts);
 
   // v1.36.1 — the React PublicBookingForm is now the source of
   // truth. Pre-v1.36.1 we preferred a blueprint-rendered HTML/CSS

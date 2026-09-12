@@ -19,7 +19,7 @@ export function BrandMark({
     <span className="inline-flex items-center gap-2.5 leading-none">
       <Image src="/brand/seldon-mark.svg" alt="" width={size} height={size} className="rounded-[7px]" priority />
       <span className="text-[15.5px] font-medium tracking-[-0.01em] text-[var(--lp-ink)]">
-        SeldonFrame
+        Avorlio
       </span>
       {withPathChip ? (
         <span className="lp-record-only font-mono text-[13.5px] text-[var(--lp-muted)]">/record</span>

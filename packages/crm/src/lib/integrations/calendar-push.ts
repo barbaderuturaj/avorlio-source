@@ -36,7 +36,7 @@
 // (orgId) and the org-level connectedAccountId from listConnections — the
 // /integrations surface's connection model, NOT a deployment entity.
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { bookings } from "@/db/schema";
 import { composioForOrg, listConnections } from "@/lib/integrations/composio/client";
@@ -50,6 +50,16 @@ export type CalendarProvider = "googlecalendar" | "outlook";
 const CREATE_EVENT_SLUG: Record<CalendarProvider, string> = {
   googlecalendar: "GOOGLECALENDAR_CREATE_EVENT",
   outlook: "OUTLOOK_CALENDAR_CREATE_EVENT",
+};
+
+const FIND_FREE_SLOTS_SLUG: Record<CalendarProvider, string> = {
+  googlecalendar: "GOOGLECALENDAR_FIND_FREE_SLOTS",
+  outlook: "OUTLOOK_CALENDAR_GET_SCHEDULE",
+};
+
+export type CalendarFreeWindow = {
+  start: string;
+  end: string;
 };
 
 export type CalendarConnection = {
@@ -83,6 +93,13 @@ export type PushBookingToConnectedCalendarInput = {
   bookingId: string;
 };
 
+export type CalendarPushDiagnostic = {
+  status: "succeeded" | "failed" | "no_connection";
+  provider?: CalendarProvider;
+  reason?: "push_failed" | "no_connection";
+  attemptedAt: string;
+};
+
 export type PushBookingToConnectedCalendarResult =
   | { pushed: true }
   | { pushed: false; reason: "no_connection" | "no_booking" | "push_failed" };
@@ -97,6 +114,12 @@ export type CalendarPushDeps = {
   /** Load the booking row needed to build the event payload, or null if the
    *  booking can't be found (e.g. deleted between event emit and this call). */
   loadBooking: (orgId: string, bookingId: string) => Promise<BookingForPush | null>;
+  /** Persist latest non-PII connected-calendar sync diagnostic. */
+  persistStatus?: (
+    orgId: string,
+    bookingId: string,
+    diagnostic: CalendarPushDiagnostic,
+  ) => Promise<void>;
   /** Injectable for tests; defaults to the shared logEvent helper. */
   logEvent: (event: string, data?: Record<string, unknown>) => void;
 };
@@ -187,6 +210,113 @@ async function defaultExecuteCreateEvent(args: CreateEventArgs): Promise<unknown
   });
 }
 
+function extractFreeWindows(res: any): CalendarFreeWindow[] {
+  const calendars = res?.data?.calendars;
+
+  if (calendars && typeof calendars === "object") {
+    const out: CalendarFreeWindow[] = [];
+
+    for (const calendar of Object.values(calendars)) {
+      const free = (calendar as any)?.free;
+      if (!Array.isArray(free)) continue;
+
+      for (const window of free) {
+        const start = (window as any)?.start;
+        const end = (window as any)?.end;
+
+        if (typeof start === "string" && typeof end === "string") {
+          out.push({ start, end });
+        }
+      }
+    }
+
+    if (out.length > 0) return out;
+  }
+
+  const candidates: unknown[] = [
+    res?.data?.free_slots,
+    res?.data?.freeSlots,
+    res?.data?.free,
+    res?.data?.slots,
+    res?.data?.windows,
+  ];
+
+  const raw = candidates.find(Array.isArray) as unknown[] | undefined;
+  if (!raw) return [];
+
+  const out: CalendarFreeWindow[] = [];
+
+  for (const window of raw) {
+    if (!window || typeof window !== "object") continue;
+
+    const start =
+      (window as any).start ??
+      (window as any).start_time ??
+      (window as any).startTime;
+
+    const end =
+      (window as any).end ??
+      (window as any).end_time ??
+      (window as any).endTime;
+
+    if (typeof start === "string" && typeof end === "string") {
+      out.push({ start, end });
+    }
+  }
+
+  return out;
+}
+
+export async function getConnectedCalendarFreeWindows(input: {
+  orgId: string;
+  date: string;
+  timezone: string;
+}): Promise<{
+  connected: boolean;
+  windows: CalendarFreeWindow[];
+}> {
+  try {
+    const connection = await defaultDeps.getConnection(input.orgId);
+
+    if (!connection) {
+      return { connected: false, windows: [] };
+    }
+
+    const composio = await composioForOrg(input.orgId);
+
+    if (!composio) {
+      return { connected: false, windows: [] };
+    }
+
+    const slug = FIND_FREE_SLOTS_SLUG[connection.provider];
+
+    const res = await composio.tools.execute(slug, {
+      userId: input.orgId,
+      connectedAccountId: connection.connectedAccountId,
+      dangerouslySkipVersionCheck: true,
+      arguments: {
+        calendar_id: "primary",
+        time_min: `${input.date}T00:00:00`,
+        time_max: `${input.date}T23:59:59`,
+        timezone: input.timezone,
+      },
+    });
+
+    return {
+      connected: true,
+      windows: extractFreeWindows(res),
+    };
+  } catch (err) {
+    logEvent("calendar_freebusy_lookup_failed", {
+      orgId: input.orgId,
+      date: input.date,
+      error: err instanceof Error ? err.message.slice(0, 200) : "unknown_error",
+    });
+
+    return { connected: true, windows: [] };
+  }
+}
+
 /** Default booking loader: pulls just the fields needed for the event
  *  payload. Never includes phone/email in the returned object's use beyond
  *  passing them along — the CALLER is responsible for excluding them from
@@ -217,17 +347,57 @@ async function defaultLoadBooking(orgId: string, bookingId: string): Promise<Boo
   };
 }
 
+async function defaultPersistStatus(
+  orgId: string,
+  bookingId: string,
+  diagnostic: CalendarPushDiagnostic,
+): Promise<void> {
+  const diagnosticJson = JSON.stringify(diagnostic);
+
+  await db
+    .update(bookings)
+    .set({
+      metadata: sql`COALESCE(${bookings.metadata}, '{}'::jsonb) || jsonb_build_object('calendarPush', ${diagnosticJson}::jsonb)`,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(bookings.id, bookingId), eq(bookings.orgId, orgId)));
+}
+
 export const defaultDeps: CalendarPushDeps = {
   getConnection: defaultGetConnection,
   executeCreateEvent: defaultExecuteCreateEvent,
   loadBooking: defaultLoadBooking,
+  persistStatus: defaultPersistStatus,
   logEvent,
 };
 
 /** Build the workspace admin URL referenced in the event description. Never
  *  includes any customer PII — just the org-scoped dashboard deep link. */
 function adminUrlFor(orgId: string): string {
-  return `https://app.seldonframe.com/dashboard?workspace=${orgId}`;
+  const appOrigin =
+    process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/+$/, "") ||
+    process.env.NEXTAUTH_URL?.trim().replace(/\/+$/, "") ||
+    "http://localhost:3000";
+  return `${appOrigin}/dashboard?workspace=${encodeURIComponent(orgId)}`;
+}
+
+async function persistPushStatusSafely(
+  input: PushBookingToConnectedCalendarInput,
+  diagnostic: CalendarPushDiagnostic,
+  deps: CalendarPushDeps,
+): Promise<void> {
+  if (!deps.persistStatus) return;
+
+  try {
+    await deps.persistStatus(input.orgId, input.bookingId, diagnostic);
+  } catch (err) {
+    deps.logEvent("calendar_push_status_persist_failed", {
+      orgId: input.orgId,
+      bookingId: input.bookingId,
+      status: diagnostic.status,
+      error: err instanceof Error ? err.message.slice(0, 200) : "unknown_error",
+    });
+  }
 }
 
 /**
@@ -243,6 +413,15 @@ export async function pushBookingToConnectedCalendar(
     const connection = await deps.getConnection(input.orgId);
     if (!connection) {
       // Common case — no org-level calendar connected yet. Silent: no log.
+      await persistPushStatusSafely(
+        input,
+        {
+          status: "no_connection",
+          reason: "no_connection",
+          attemptedAt: new Date().toISOString(),
+        },
+        deps,
+      );
       return { pushed: false, reason: "no_connection" };
     }
 
@@ -259,7 +438,7 @@ export async function pushBookingToConnectedCalendar(
     // NEVER include booking.email / booking.phone here — calendar events
     // sync widely across the operator's devices/shares (privacy).
     const description = [
-      "Booked via SeldonFrame.",
+      "Booked via online scheduling.",
       `View in your workspace: ${adminUrlFor(input.orgId)}`,
     ].join("\n");
 
@@ -273,6 +452,16 @@ export async function pushBookingToConnectedCalendar(
       endIso: booking.endsAt.toISOString(),
     });
 
+    await persistPushStatusSafely(
+      input,
+      {
+        status: "succeeded",
+        provider: connection.provider,
+        attemptedAt: new Date().toISOString(),
+      },
+      deps,
+    );
+
     return { pushed: true };
   } catch (err) {
     // Any failure (connection lookup, Composio execute, unexpected shape)
@@ -282,6 +471,16 @@ export async function pushBookingToConnectedCalendar(
       bookingId: input.bookingId,
       error: err instanceof Error ? err.message.slice(0, 200) : "unknown_error",
     });
+    await persistPushStatusSafely(
+      input,
+      {
+        status: "failed",
+        reason: "push_failed",
+        attemptedAt: new Date().toISOString(),
+      },
+      deps,
+    );
+
     return { pushed: false, reason: "push_failed" };
   }
 }

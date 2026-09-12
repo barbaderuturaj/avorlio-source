@@ -2,16 +2,21 @@
 
 import { and, asc, eq, gte, inArray, lt, ne, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
-import { db } from "@/db";
-import { activities, bookings, contacts, deals, organizations, users } from "@/db/schema";
+import { db, rawSql } from "@/db";
+import { activities, bookings, contacts, deals, organizations } from "@/db/schema";
 import { getCurrentUser, getOrgId } from "@/lib/auth/helpers";
 import { ensureDefaultPipelineForOrg } from "@/lib/deals/pipeline-defaults";
 import { assertWritable } from "@/lib/demo/server";
 import { emitSeldonEvent } from "@/lib/events/bus";
 import { createBookingCheckoutSession } from "@/lib/payments/actions";
-import { createBookingForCustomer } from "./create-for-customer";
+import { slotFitsFreeWindows } from "@/lib/agents/booking/booking-policy";
+import { getConnectedCalendarFreeWindows } from "@/lib/integrations/calendar-push";
 import { resolveBookingContactIdentity } from "./contact-identity";
 import { recordBookingOutcomeLearning } from "@/lib/soul/learning";
+import { buildVerifiedBusinessFacts } from "@/lib/landing/factual-grounding";
+import { sanitizePublicBookingDescription, sanitizePublicBookingIntakeFields, sanitizePublicBookingTitle } from "@/lib/bookings/public-booking-url";
+import { makeDefaultActivityUserResolverDeps, resolveOrgActivityUserId } from "@/lib/crm/activity-user";
+import { createPublicBookingActivityProjection, selectPublicBookingDealStage } from "@/lib/bookings/public-booking-crm";
 import { computeRescheduledEnd, intervalsOverlap, shouldSendRescheduleEmail as shouldSendRescheduleEmailPure } from "./calendar-math";
 import { sendBookingRescheduleEmail } from "@/lib/messaging/skills/booking-reschedule";
 import {
@@ -33,6 +38,7 @@ import { buildMeetingUrl, resolveBookingProvider } from "./providers";
 // say what the business does.
 import { resolveIntakeFieldsFromSoul } from "./resolve-intake-fields";
 import { PUBLIC_BOOKING_WINDOW_DAYS } from "./booking-window";
+import { PUBLIC_BOOKING_BLOCKING_STATUSES } from "./conflict-policy";
 // Workspace-level booking availability + rules. Types + pure helpers live
 // in a NON-"use server" module so they can be imported anywhere. The public
 // slot generator + submit validation resolve availability/timezone/min-notice
@@ -59,6 +65,94 @@ import {
 
 function deriveEndsAt(startsAt: Date, durationMinutes: number) {
   return new Date(startsAt.getTime() + durationMinutes * 60_000);
+}
+
+type AtomicPublicBookingReservationInput = {
+  orgId: string;
+  bookingSlug: string;
+  localBookingDate: string;
+  contactId: string | null;
+  title: string;
+  fullName: string | null;
+  email: string | null;
+  notes: string | null;
+  provider: string;
+  status: "scheduled" | "pending_payment";
+  startsAt: Date;
+  endsAt: Date;
+  metadata: Record<string, unknown>;
+};
+
+async function reservePublicBookingSlotAtomically(
+  input: AtomicPublicBookingReservationInput,
+): Promise<{ bookingId: string } | null> {
+  // Neon HTTP has no interactive `db.transaction()`. The raw Neon
+  // client's `transaction([...])` is the atomic multi-statement
+  // primitive: the advisory lock is acquired in statement 1, then the
+  // final conflict recheck + insert happen in statement 2 while the
+  // transaction-scoped lock is held.
+  //
+  // Lock by workspace + workspace-local booking date, not exact start
+  // timestamp. That serializes overlapping slots with different starts
+  // for the same operator day, which is the production-safe HVAC V1
+  // tradeoff: correctness over same-day booking throughput.
+  const lockResource = `${input.orgId}:public-booking:${input.localBookingDate}`;
+  const metadataJson = JSON.stringify(input.metadata);
+
+  const lockQuery = rawSql`
+    SELECT pg_advisory_xact_lock(hashtextextended(${lockResource}, 0))
+  `;
+  const insertQuery = rawSql`
+    WITH conflicts AS MATERIALIZED (
+      SELECT 1
+      FROM bookings
+      WHERE org_id = ${input.orgId}::uuid
+        AND status <> 'template'
+        AND status = ANY(${PUBLIC_BOOKING_BLOCKING_STATUSES}::text[])
+        AND starts_at < ${input.endsAt}::timestamptz
+        AND ends_at > ${input.startsAt}::timestamptz
+      LIMIT 1
+    ),
+    inserted AS (
+      INSERT INTO bookings (
+        org_id,
+        contact_id,
+        title,
+        booking_slug,
+        full_name,
+        email,
+        notes,
+        provider,
+        status,
+        starts_at,
+        ends_at,
+        metadata
+      )
+      SELECT
+        ${input.orgId}::uuid,
+        ${input.contactId}::uuid,
+        ${input.title},
+        ${input.bookingSlug},
+        ${input.fullName},
+        ${input.email},
+        ${input.notes},
+        ${input.provider},
+        ${input.status},
+        ${input.startsAt}::timestamptz,
+        ${input.endsAt}::timestamptz,
+        ${metadataJson}::jsonb
+      WHERE NOT EXISTS (SELECT 1 FROM conflicts)
+      RETURNING id
+    )
+    SELECT id FROM inserted
+  `;
+
+  const [, insertResult] = await rawSql.transaction([lockQuery, insertQuery]);
+  const rows =
+    (insertResult as unknown as { rows?: Array<{ id: string }> }).rows ??
+    (insertResult as unknown as Array<{ id: string }>);
+  const bookingId = Array.isArray(rows) ? rows[0]?.id : null;
+  return bookingId ? { bookingId } : null;
 }
 
 function toBookingSlug(value: string) {
@@ -270,7 +364,16 @@ function resolveDuration(duration: number | undefined) {
 
 function normalizeVoiceConfirmation(rawSoul: unknown) {
   const soul = (rawSoul as { voice?: { samplePhrases?: string[] } } | null) ?? null;
-  return soul?.voice?.samplePhrases?.[0] || "Booking confirmed. We will contact you shortly.";
+  return soul?.voice?.samplePhrases?.[0] || "Your booking is confirmed.";
+}
+
+function sanitizePublicConfirmationMessage(message: string | null | undefined): string {
+  const trimmed = message?.trim();
+  if (!trimmed) return "Your booking is confirmed.";
+  if (/\b(calendar invite|reply to (?:that|the) email|email (?:will|should|is)|we'?ll send)\b/i.test(trimmed)) {
+    return "Your booking is confirmed.";
+  }
+  return trimmed;
 }
 
 async function resolvePublicBookingContext(orgSlug: string, bookingSlug: string): Promise<PublicBookingContext | null> {
@@ -317,7 +420,9 @@ async function resolvePublicBookingContext(orgSlug: string, bookingSlug: string)
   }
 
   const metadata = (template?.metadata as AppointmentTypeMeta | null) ?? null;
-  const confirmationMessage = metadata?.confirmationMessage || normalizeVoiceConfirmation(org.soul);
+  const confirmationMessage = sanitizePublicConfirmationMessage(
+    metadata?.confirmationMessage || normalizeVoiceConfirmation(org.soul),
+  );
   // Per-type duration is preserved; availability + buffers + cap + min-notice
   // come from the workspace rules, falling back to the type's metadata when
   // organizations.settings.booking is unset.
@@ -363,12 +468,17 @@ async function resolvePublicBookingContext(orgSlug: string, bookingSlug: string)
           template?.title ?? null,
         );
 
+  const facts = buildVerifiedBusinessFacts(org.soul, org.settings);
+  const appointmentName = sanitizePublicBookingTitle(template?.title || "Consultation", facts);
+  const appointmentDescription = sanitizePublicBookingDescription(metadata?.description, facts);
+  const publicIntakeFields = sanitizePublicBookingIntakeFields(resolvedIntakeFields, facts);
+
   return {
     orgId: org.id,
     bookingSlug,
     bookingTemplateId: template?.id ?? null,
-    appointmentName: template?.title || "Consultation",
-    appointmentDescription: metadata?.description || "Choose a time that works for you and we will confirm with meeting details.",
+    appointmentName,
+    appointmentDescription,
     durationMinutes,
     confirmationMessage,
     price: Number.isFinite(metadata?.price) ? Number(metadata?.price) : 0,
@@ -382,7 +492,7 @@ async function resolvePublicBookingContext(orgSlug: string, bookingSlug: string)
     // array for legacy templates (renders the default name+email+notes).
     // 2026-05-18 — now falls back to archetype-driven lazy resolve so
     // pre-v1.40 / lean-URL-flow workspaces also get the right fields.
-    intakeFields: resolvedIntakeFields,
+    intakeFields: publicIntakeFields,
     // v1.40.2 — workspace IANA TZ. Falls back to UTC if unset.
     workspaceTimezone: org.timezone || "UTC",
   };
@@ -466,9 +576,8 @@ export async function listPublicBookingSlotsAction({
     .where(
       and(
         eq(bookings.orgId, context.orgId),
-        eq(bookings.bookingSlug, context.bookingSlug),
         ne(bookings.status, "template"),
-        inArray(bookings.status, ["scheduled", "completed", "no_show", "blocked"]),
+        inArray(bookings.status, [...PUBLIC_BOOKING_BLOCKING_STATUSES]),
         gte(bookings.startsAt, dayStartUtc),
         lt(bookings.startsAt, dayEndUtc),
       ),
@@ -489,8 +598,28 @@ export async function listPublicBookingSlotsAction({
     now: today,
   });
 
+  // If the workspace has an org-level Google/Outlook calendar connected,
+  // public availability must also respect that calendar's real free/busy.
+  // No external connection => preserve native SeldonFrame availability.
+  // Connected calendar + no free windows => fail closed and offer no slots.
+  const externalAvailability = await getConnectedCalendarFreeWindows({
+    orgId: context.orgId,
+    date,
+    timezone: tz,
+  });
+
+  const publicSlots = externalAvailability.connected
+    ? slots.filter((iso) =>
+        slotFitsFreeWindows(
+          iso,
+          context.durationMinutes,
+          externalAvailability.windows,
+        ),
+      )
+    : slots;
+
   return {
-    slots,
+    slots: publicSlots,
     durationMinutes: context.durationMinutes,
     // v1.40.2 — surface workspace TZ so the form can format slots
     // and label the time zone clearly.
@@ -1549,7 +1678,7 @@ export async function submitPublicBookingAction({
       and(
         eq(bookings.orgId, bookingContext.orgId),
         ne(bookings.status, "template"),
-        inArray(bookings.status, ["scheduled", "completed", "pending_payment", "blocked"]),
+        inArray(bookings.status, [...PUBLIC_BOOKING_BLOCKING_STATUSES]),
         gte(bookings.startsAt, dayStartUtc),
         lt(bookings.startsAt, dayEndUtc),
       ),
@@ -1568,85 +1697,104 @@ export async function submitPublicBookingAction({
     });
   }
 
-  const provider = await resolveBookingProvider(null);
-
-  // 2026-05-19 (Phase 3 Task 3.3) — when we have a contactId (the
-  // normal case), delegate the booking insert + booking.created emit
-  // to the shared `createBookingForCustomer` helper that the agent's
-  // create_booking tool ALSO calls. This is the spec's parity
-  // guarantee: agent-created bookings are structurally identical to
-  // public-page bookings. We pass titleOverride="Booked consultation"
-  // and metadataExtra.price + metadata.source="public_page" to
-  // preserve the public path's historical behavior. The post-insert
-  // side effects (Stripe checkout, Google Calendar sync, deal create,
-  // brain note) stay inline below because they need the created row.
+  // External-calendar race-condition guard.
   //
-  // Edge case: when contactId is null (contact upsert failed silently
-  // upstream), we fall back to the inline insert so the booking still
-  // lands as an orphan row. The helper requires a contactId for clean
-  // contact-refresh semantics; we don't want to weaken its contract
-  // for this rare path.
-  let createdBookingId: string | null = null;
-  // Tracks whether the helper already emitted booking.created so the
-  // downstream block below skips its own emit to avoid double-firing
-  // (which would send two confirmation emails).
-  let helperEmittedBookingCreated = false;
-  if (contactId && bookingContext.bookingTemplateId) {
-    const helperResult = await createBookingForCustomer({
-      orgId: bookingContext.orgId,
-      customer: {
-        contactId,
-        firstName,
-        lastName,
-        email: effectiveEmail,
-        phone: intakePhone ?? "",
-      },
-      appointmentTypeId: bookingContext.bookingTemplateId,
-      startsAt: bookingStart,
-      durationMinutes: bookingContext.durationMinutes,
-      status: bookingContext.price > 0 ? "pending_payment" : "scheduled",
-      provider,
-      notes: notes ?? null,
-      intakeAnswers: intakeResponses ?? {},
-      source: "public_page",
-      // Public action upserts contacts upstream with a richer merge —
-      // ask the helper to skip the redundant contact write.
-      skipContactRefresh: true,
-      titleOverride: "Booked consultation",
-      metadataExtra: { price: bookingContext.price },
+  // The public slot picker already filters against Google/Outlook, but the
+  // calendar can change between page load and submit. Re-check the exact
+  // requested interval immediately before creating the booking so a stale
+  // browser or crafted request cannot double-book an externally busy time.
+  const externalDate = [
+    String(localParts.year).padStart(4, "0"),
+    String(localParts.month).padStart(2, "0"),
+    String(localParts.day).padStart(2, "0"),
+  ].join("-");
+
+  const externalAvailability = await getConnectedCalendarFreeWindows({
+    orgId: bookingContext.orgId,
+    date: externalDate,
+    timezone: workspaceTz,
+  });
+
+  if (
+    externalAvailability.connected &&
+    !slotFitsFreeWindows(
+      bookingStart.toISOString(),
+      bookingContext.durationMinutes,
+      externalAvailability.windows,
+    )
+  ) {
+    return rejectAndThrow("external_calendar_conflict", {
+      requested_start: bookingStart.toISOString(),
+      requested_end: slotEnd.toISOString(),
+      workspace_timezone: workspaceTz,
     });
-    createdBookingId = helperResult.bookingId;
-    // Helper emits booking.created internally for non-pending_payment
-    // bookings. For paid bookings (status='pending_payment') the
-    // Stripe webhook will fire the event after checkout completes.
-    helperEmittedBookingCreated = bookingContext.price <= 0;
-  } else {
-    const [orphanBooking] = await db
-      .insert(bookings)
-      .values({
-        orgId: bookingContext.orgId,
-        contactId: null,
-        title: "Booked consultation",
-        bookingSlug,
-        fullName,
-        email: effectiveEmail,
-        notes: notes ?? null,
-        provider,
-        status: bookingContext.price > 0 ? "pending_payment" : "scheduled",
-        startsAt: bookingStart,
-        endsAt: deriveEndsAt(bookingStart, bookingContext.durationMinutes),
-        metadata: {
-          source: "public_page",
-          appointmentType: bookingContext.appointmentName,
-          durationMinutes: bookingContext.durationMinutes,
-          price: bookingContext.price,
-          intakeResponses: intakeResponses ?? {},
-        },
-      })
-      .returning({ id: bookings.id });
-    createdBookingId = orphanBooking?.id ?? null;
   }
 
+  const provider = await resolveBookingProvider(null);
+
+  // Final reservation gate: acquire a transaction-scoped advisory lock,
+  // re-check SeldonFrame overlaps, then insert the booking in the same
+  // Neon raw transaction. This closes the concurrent public-submit race.
+  const bookingStatus = bookingContext.price > 0 ? "pending_payment" : "scheduled";
+  let createdBookingId: string | null = null;
+  // Tracks whether booking.created was already emitted so the downstream
+  // block below skips its own emit to avoid double-firing confirmations.
+  let helperEmittedBookingCreated = false;
+  const publicBookingFullName =
+    contactId
+      ? [firstName, lastName].filter((part): part is string => Boolean(part)).join(" ") || null
+      : fullName;
+  const reservation = await reservePublicBookingSlotAtomically({
+    orgId: bookingContext.orgId,
+    bookingSlug,
+    localBookingDate: externalDate,
+    contactId,
+    title: "Booked consultation",
+    fullName: publicBookingFullName,
+    email: effectiveEmail,
+    notes: notes ?? null,
+    provider,
+    status: bookingStatus,
+    startsAt: bookingStart,
+    endsAt: slotEnd,
+    metadata: {
+      source: "public_page",
+      appointmentType: bookingContext.appointmentName,
+      durationMinutes: bookingContext.durationMinutes,
+      price: bookingContext.price,
+      intakeResponses: intakeResponses ?? {},
+    },
+  });
+  if (!reservation) {
+    return rejectAndThrow("slot_already_booked", {
+      requested_start: bookingStart.toISOString(),
+      requested_end: slotEnd.toISOString(),
+      lock_scope: "org_local_booking_date",
+    });
+  }
+  createdBookingId = reservation.bookingId;
+  helperEmittedBookingCreated = bookingStatus === "scheduled";
+  if (helperEmittedBookingCreated && contactId) {
+    try {
+      await emitSeldonEvent(
+        "booking.created",
+        {
+          appointmentId: createdBookingId,
+          contactId,
+        },
+        { orgId: bookingContext.orgId },
+      );
+    } catch (err) {
+      console.error(
+        JSON.stringify({
+          event: "public_booking.booking_created_event_failed",
+          orgId: bookingContext.orgId,
+          bookingId: createdBookingId,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    }
+  }
   const createdBooking = createdBookingId ? { id: createdBookingId } : null;
 
   if (createdBooking?.id) {
@@ -1666,6 +1814,8 @@ export async function submitPublicBookingAction({
 
       return {
         success: true,
+        bookingId: createdBooking.id,
+        startsAt: bookingStart.toISOString(),
         confirmationMessage: bookingContext.confirmationMessage,
         checkoutUrl: checkout.checkoutUrl,
       };
@@ -1742,28 +1892,6 @@ export async function submitPublicBookingAction({
         );
       }
 
-      const [owner] = await db
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.orgId, bookingContext.orgId))
-        .limit(1);
-
-      if (owner?.id) {
-        await db.insert(activities).values({
-          orgId: bookingContext.orgId,
-          userId: owner.id,
-          contactId,
-          type: "meeting",
-          subject: `Booked ${bookingContext.appointmentName}`,
-          body: notes ?? null,
-          metadata: {
-            bookingId: createdBooking.id,
-            source: "public-booking",
-          },
-          scheduledAt: bookingStart,
-        });
-      }
-
       // v1.3.4 — surface the booking in the CRM pipeline kanban.
       //
       // Root-cause fix for "bookings don't appear in /deals after a
@@ -1789,6 +1917,7 @@ export async function submitPublicBookingAction({
       //   - Wrap in try/catch + structured log: a deal-insert failure
       //     must NOT roll back the booking itself. The visitor's
       //     booking is the contract; the kanban entry is operator UX.
+      let createdDealId: string | null = null;
       try {
         const pipeline = await ensureDefaultPipelineForOrg(bookingContext.orgId);
         // v1.5.1 — smart stage selection. A booking that just landed in
@@ -1804,12 +1933,9 @@ export async function submitPublicBookingAction({
         // Booked" stage automatically get the right behavior; everything
         // else lands at first stage as before.
         const stages = pipeline.stages ?? [];
-        const bookedStageRe =
-          /\b(booked|scheduled|trial|appointment|consult(ation)?|reservation|reserved)\b/i;
-        const matchedStage = stages.find((s) => bookedStageRe.test(s.name));
-        const targetStage = matchedStage ?? stages[0];
-        const stageName = targetStage?.name ?? "Lead";
-        const stageProbability = targetStage?.probability ?? 0;
+        const selectedStage = selectPublicBookingDealStage(stages);
+        const stageName = selectedStage.stage;
+        const stageProbability = selectedStage.probability;
 
         const [createdDeal] = await db
           .insert(deals)
@@ -1831,6 +1957,7 @@ export async function submitPublicBookingAction({
             },
           })
           .returning({ id: deals.id });
+        createdDealId = createdDeal?.id ?? null;
 
         console.log(
           JSON.stringify({
@@ -1840,7 +1967,7 @@ export async function submitPublicBookingAction({
             deal_id: createdDeal?.id ?? null,
             pipeline_id: pipeline.id,
             stage: stageName,
-            stage_match: matchedStage ? "smart" : "first_stage_fallback",
+            stage_match: selectedStage.matched ? "smart" : "first_stage_fallback",
             available_stages: stages.map((s) => s.name),
           }),
         );
@@ -1853,6 +1980,56 @@ export async function submitPublicBookingAction({
             event: "public_booking_deal_failed",
             ...baseLogContext,
             booking_id: createdBooking.id,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+      }
+
+      try {
+        await createPublicBookingActivityProjection(
+          {
+            orgId: bookingContext.orgId,
+            contactId,
+            dealId: createdDealId,
+            bookingId: createdBooking.id,
+            bookingSlug,
+            appointmentName: bookingContext.appointmentName,
+            startsAt: bookingStart,
+            notes: notes ?? null,
+            intakeResponses: responses,
+          },
+          {
+            resolveActivityUserId: (orgId) =>
+              resolveOrgActivityUserId(orgId, makeDefaultActivityUserResolverDeps()),
+            createActivity: async (values) => {
+              await db.insert(activities).values({
+                orgId: values.orgId,
+                userId: values.userId,
+                contactId: values.contactId,
+                dealId: values.dealId,
+                type: values.type,
+                subject: values.subject,
+                body: values.body,
+                metadata: values.metadata,
+                scheduledAt: values.scheduledAt,
+              });
+            },
+            log: (event, level) => {
+              const line = JSON.stringify({ ...event, ...baseLogContext });
+              if (level === "error") console.error(line);
+              else if (level === "warn") console.warn(line);
+              else console.log(line);
+            },
+          },
+        );
+      } catch (err) {
+        console.error(
+          JSON.stringify({
+            event: "public_booking_activity_failed",
+            ...baseLogContext,
+            booking_id: createdBooking.id,
+            contact_id: contactId,
+            deal_id: createdDealId,
             error: err instanceof Error ? err.message : String(err),
           }),
         );
@@ -1899,7 +2076,13 @@ export async function submitPublicBookingAction({
     }
   }
 
-  return { success: true, confirmationMessage: bookingContext.confirmationMessage, checkoutUrl: null as string | null };
+  return {
+    success: true,
+    bookingId: createdBooking?.id ?? null,
+    startsAt: bookingStart.toISOString(),
+    confirmationMessage: bookingContext.confirmationMessage,
+    checkoutUrl: null as string | null,
+  };
 }
 
 // ─── TASK A: the reschedule gate `shouldSendRescheduleEmail` lives in
@@ -1942,7 +2125,7 @@ export async function rescheduleBookingAction(input: {
       and(
         eq(bookings.orgId, orgId),
         ne(bookings.id, current.id),
-        inArray(bookings.status, ["scheduled", "completed", "pending_payment", "blocked"]),
+        inArray(bookings.status, [...PUBLIC_BOOKING_BLOCKING_STATUSES]),
       ),
     );
 

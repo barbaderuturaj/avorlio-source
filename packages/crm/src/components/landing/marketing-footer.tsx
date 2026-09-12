@@ -1,21 +1,8 @@
-// packages/crm/src/components/landing/marketing-footer.tsx
-//
-// Redesign 2026-06-18 — warm light aesthetic.
-// Seven-column footer on md+ (brand + 6 link columns incl. the Compare/Free-tools/
-// Pricing-guides SEO mesh, PostPlanify-style). Paper-soft background, warm ink
-// typography. Agency-first CTA strip above the columns.
-//
-// 2026-07-17: added the "Pricing guides" column (indexation-consolidation
-// Part 1c — the homepage/footer previously linked zero pricing pages despite
-// */-pricing being the best-performing SEO family). No pricing hub/index page
-// exists to headline the column (only the SF-owned /pricing page, which is a
-// different page), so there is no "All pricing breakdowns →" link here.
-
 import Link from "next/link";
 
 import { BrandMark } from "./brand-mark";
 
-type FooterLink = { label: string; href: string; soon?: boolean; external?: boolean };
+type FooterLink = { label: string; href: string };
 type Column = { heading: string; links: readonly FooterLink[] };
 
 const COLUMNS: readonly Column[] = [
@@ -23,81 +10,22 @@ const COLUMNS: readonly Column[] = [
     heading: "Product",
     links: [
       { label: "How it works", href: "#build" },
-      { label: "Features", href: "#modules" },
-      { label: "Pricing", href: "#pricing" },
-      { label: "Marketplace", href: "/marketplace" },
-      { label: "Sell AI agents", href: "/sell" },
-      { label: "For agencies", href: "/agencies" },
-      { label: "Changelog", href: "https://github.com/seldonframe/seldonframe/releases", external: true },
+      { label: "What Avorlio handles", href: "#modules" },
+      { label: "Questions", href: "#faq" },
     ],
   },
   {
-    heading: "Resources",
+    heading: "Get started",
     links: [
-      { label: "Docs", href: "/docs" },
-      { label: "Guides", href: "/guides" },
-      { label: "Blog", href: "/blog" },
-      { label: "MCP / Claude Code", href: "https://github.com/seldonframe/seldonframe#claude-code-mcp", external: true },
-      { label: "API", href: "/docs" },
-      { label: "Live demos", href: "#demos" },
-      { label: "Status", href: "https://github.com/seldonframe/seldonframe", external: true },
+      { label: "Start with your business", href: "/#hero-form" },
+      { label: "Sign in", href: "/login" },
     ],
   },
   {
-    heading: "Compare",
+    heading: "Legal",
     links: [
-      { label: "SeldonFrame vs GoHighLevel", href: "/compare/seldonframe-vs-gohighlevel" },
-      { label: "SeldonFrame vs HubSpot", href: "/compare/seldonframe-vs-hubspot" },
-      { label: "SeldonFrame vs Salesforce", href: "/compare/seldonframe-vs-salesforce" },
-      { label: "SeldonFrame vs Zoho", href: "/compare/seldonframe-vs-zoho" },
-      { label: "SeldonFrame vs ActiveCampaign", href: "/compare/seldonframe-vs-activecampaign" },
-      { label: "SeldonFrame vs ClickFunnels", href: "/compare/seldonframe-vs-clickfunnels" },
-      { label: "SeldonFrame vs Keap", href: "/compare/seldonframe-vs-keap" },
-      { label: "SeldonFrame vs Klaviyo", href: "/compare/seldonframe-vs-klaviyo" },
-      { label: "SeldonFrame vs Kartra", href: "/compare/seldonframe-vs-kartra" },
-      { label: "SeldonFrame vs Vendasta", href: "/compare/seldonframe-vs-vendasta" },
-      { label: "SeldonFrame vs Podium", href: "/compare/seldonframe-vs-podium" },
-      { label: "SeldonFrame vs Linktree", href: "/compare/seldonframe-vs-linktree" },
-      { label: "All comparisons →", href: "/alternatives" },
-    ],
-  },
-  {
-    heading: "Free tools",
-    links: [
-      { label: "CRM Pricing Index", href: "/charts/crm-pricing-index" },
-      { label: "AI Website Generator", href: "/tools/ai-website-generator" },
-      { label: "Free Booking Page", href: "/tools/free-booking-page" },
-      { label: "Missed Call Calculator", href: "/tools/missed-call-calculator" },
-      { label: "HubSpot Pricing Calculator", href: "/tools/hubspot-pricing-calculator" },
-      { label: "GoHighLevel Cost Calculator", href: "/tools/gohighlevel-cost-calculator" },
-      { label: "Voice AI Cost Calculator", href: "/tools/voice-ai-cost-calculator" },
-      { label: "AI Receptionist Cost Calculator", href: "/tools/ai-receptionist-cost-calculator" },
-      { label: "Google Review Link Generator", href: "/tools/google-review-link-generator" },
-      { label: "Review Response Generator", href: "/tools/review-response-generator" },
-      { label: "A2P 10DLC Checker", href: "/tools/a2p-10dlc-checker" },
-      { label: "Best CRM for Small Business", href: "/best/crm-for-small-business" },
-      { label: "Best-of guides →", href: "/best" },
-    ],
-  },
-  {
-    heading: "Pricing guides",
-    links: [
-      { label: "Podium Pricing", href: "/podium-pricing" },
-      { label: "Linktree Pricing", href: "/linktree-pricing" },
-      { label: "Kartra Pricing", href: "/kartra-pricing" },
-      { label: "Voiceflow Pricing", href: "/voiceflow-pricing" },
-      { label: "Durable Pricing", href: "/durable-pricing" },
-      { label: "Synthflow Pricing", href: "/synthflow-pricing" },
-    ],
-  },
-  {
-    heading: "Company",
-    links: [
-      { label: "Contact", href: "mailto:hello@seldonframe.com" },
-      { label: "Partnerships", href: "mailto:partner@seldonframe.com" },
-      { label: "GitHub", href: "https://github.com/seldonframe/seldonframe", external: true },
-      { label: "Terms", href: "https://app.seldonframe.com/terms", external: true },
-      { label: "Privacy", href: "https://app.seldonframe.com/policy", external: true },
+      { label: "Terms", href: "/terms" },
+      { label: "Privacy", href: "/privacy" },
     ],
   },
 ];
@@ -111,31 +39,22 @@ export function MarketingFooter() {
       <h2 id="footer-heading" className="sr-only">Footer</h2>
 
       <div className="mx-auto max-w-[1120px]">
-        {/* Brand block */}
-        <div className="grid grid-cols-1 gap-10 md:grid-cols-[1.4fr_repeat(6,1fr)] md:gap-8">
+        <div className="grid grid-cols-1 gap-10 md:grid-cols-[1.5fr_repeat(3,1fr)] md:gap-8">
           <div className="flex max-w-[340px] flex-col gap-5">
-            <Link href="/" aria-label="SeldonFrame — home" className="inline-flex items-center">
+            <Link href="/" aria-label="Avorlio - home" className="inline-flex items-center">
               <BrandMark size={22} />
             </Link>
             <p className="m-0 text-[13.5px] leading-[1.55] text-[var(--lp-muted)]">
-              The agency-owned front office — website, booking, AI receptionist, intake, and CRM —
-              wired together so your clients never miss a lead.
+              Avorlio is the AI front office for service businesses: capture leads, answer questions,
+              book appointments, and follow up automatically.
             </p>
-            <div className="flex flex-col gap-2.5">
-              <Link
-                href="/#hero-form"
-                className="inline-flex items-center gap-2 self-start rounded-[11px] bg-[var(--lp-cta-bg)] px-4 py-2.5 text-[13px] font-[500] text-[var(--lp-cta-ink)] shadow-[0_1px_2px_color-mix(in_oklab,var(--lp-ink)_10%,transparent),0_4px_12px_color-mix(in_oklab,var(--lp-ink)_8%,transparent),inset_0_1.5px_0_rgba(255,255,255,.10)] transition-all hover:-translate-y-px"
-              >
-                <span className="size-1.5 rounded-full bg-[var(--lp-accent)]" aria-hidden />
-                Start building
-              </Link>
-              <Link
-                href="/agencies"
-                className="inline-flex items-center gap-1.5 self-start text-[13px] font-[500] text-[var(--lp-accent)] transition-colors hover:text-[var(--lp-accent-strong)]"
-              >
-                For agencies →
-              </Link>
-            </div>
+            <Link
+              href="/#hero-form"
+              className="inline-flex items-center gap-2 self-start rounded-[11px] bg-[var(--lp-cta-bg)] px-4 py-2.5 text-[13px] font-[500] text-[var(--lp-cta-ink)] shadow-[0_1px_2px_color-mix(in_oklab,var(--lp-ink)_10%,transparent),0_4px_12px_color-mix(in_oklab,var(--lp-ink)_8%,transparent),inset_0_1.5px_0_rgba(255,255,255,.10)] transition-all hover:-translate-y-px"
+            >
+              <span className="size-1.5 rounded-full bg-[var(--lp-accent)]" aria-hidden />
+              Get started
+            </Link>
           </div>
 
           {COLUMNS.map((col) => (
@@ -148,16 +67,9 @@ export function MarketingFooter() {
                   <li key={link.label}>
                     <Link
                       href={link.href}
-                      target={link.external ? "_blank" : undefined}
-                      rel={link.external ? "noopener noreferrer" : undefined}
                       className="text-[13.5px] text-[var(--lp-muted)] transition-colors hover:text-[var(--lp-ink)]"
                     >
                       {link.label}
-                      {link.soon ? (
-                        <span className="ml-1.5 font-mono text-[9.5px] uppercase tracking-[0.08em] text-[var(--lp-faint)]">
-                          SOON
-                        </span>
-                      ) : null}
                     </Link>
                   </li>
                 ))}
@@ -166,37 +78,8 @@ export function MarketingFooter() {
           ))}
         </div>
 
-        <div className="mt-14 flex flex-wrap items-center justify-between gap-3.5 border-t border-[var(--lp-border-soft)] pt-5 font-mono text-[11.5px] text-[var(--lp-faint)]">
-          <span>© 2026 SeldonFrame, Inc. · AGPL-3.0</span>
-          <span className="lp-record-only items-center text-[13.5px] text-[var(--lp-muted)]">
-            Recordings stay private — they train your agent only.
-          </span>
-          <span className="inline-flex gap-4">
-            <Link
-              href="https://x.com/seldonframe"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[var(--lp-faint)] transition-colors hover:text-[var(--lp-ink)]"
-            >
-              X
-            </Link>
-            <Link
-              href="https://github.com/seldonframe/seldonframe"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[var(--lp-faint)] transition-colors hover:text-[var(--lp-ink)]"
-            >
-              GitHub
-            </Link>
-            <Link
-              href="https://linkedin.com/company/seldonframe"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[var(--lp-faint)] transition-colors hover:text-[var(--lp-ink)]"
-            >
-              LinkedIn
-            </Link>
-          </span>
+        <div className="mt-14 border-t border-[var(--lp-border-soft)] pt-5 font-mono text-[11.5px] text-[var(--lp-faint)]">
+          <span>© 2026 Avorlio</span>
         </div>
       </div>
     </footer>

@@ -179,7 +179,10 @@
       "additionalProperties": false,
       "required": ["phone", "address", "hours", "timezone"],
       "properties": {
-        "phone":        { "$ref": "#/$defs/PhoneE164" },
+        "phone": {
+          "anyOf": [{ "$ref": "#/$defs/PhoneE164" }, { "const": "" }],
+          "description": "Business phone in E.164 format when configured. Empty string is allowed only for an unconfigured reusable template."
+        },
         "emergencyPhone": {
           "anyOf": [{ "$ref": "#/$defs/PhoneE164" }, { "type": "null" }],
           "description": "Optional after-hours emergency line. Triggers the emergency strip on the landing page when set."

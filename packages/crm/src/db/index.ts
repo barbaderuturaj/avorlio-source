@@ -22,6 +22,7 @@ if (process.env.NEON_LOCAL_HOST) {
 
 const sql = neon(databaseUrl);
 
+export const rawSql = sql;
 export const db = drizzle(sql, { schema, casing: "snake_case" });
 
 export type DbClient = typeof db;

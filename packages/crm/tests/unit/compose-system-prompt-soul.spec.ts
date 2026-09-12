@@ -173,8 +173,8 @@ describe("composeSystemPrompt — snake-case soul enrichment", () => {
       archetype: "website-chatbot",
     });
     assert.ok(
-      prompt.includes("24/7 emergency service"),
-      "should mention 24/7 emergency service flag",
+      prompt.includes("emergency service offered"),
+      "should mention emergency service without implying 24/7 coverage",
     );
     assert.ok(
       prompt.includes("same-day appointments"),

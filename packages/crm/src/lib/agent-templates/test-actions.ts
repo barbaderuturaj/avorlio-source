@@ -51,6 +51,7 @@ import {
   type StatelessChatMessage,
   type StatelessToolCall,
 } from "@/lib/agents/stateless-turn";
+import type { PendingConfirmationAction } from "@/lib/agents/explicit-confirmation";
 import type { AgentBlueprint } from "@/db/schema/agents";
 import { getAgentTemplate } from "./store";
 import { resolveStudioBuildGate, NEEDS_BYOK_MESSAGE } from "./studio-build-gate";
@@ -61,7 +62,12 @@ const MAX_TEST_MESSAGES = 40;
 const MAX_MESSAGE_CHARS = 4000;
 
 export type TestAgentTemplateTurnResult =
-  | { ok: true; reply: string; toolCalls: StatelessToolCall[] }
+  | {
+      ok: true;
+      reply: string;
+      toolCalls: StatelessToolCall[];
+      pendingAction?: PendingConfirmationAction;
+    }
   | {
       ok: false;
       error: "unauthorized" | "template_not_found" | "no_llm_key" | "bad_input" | "runtime_error";
@@ -148,7 +154,12 @@ export async function testAgentTemplateTurn(input: {
     return { ok: false, error: "runtime_error", message: result.message };
   }
 
-  return { ok: true, reply: result.reply, toolCalls: result.toolCalls };
+  return {
+    ok: true,
+    reply: result.reply,
+    toolCalls: result.toolCalls,
+    ...(result.pendingAction ? { pendingAction: result.pendingAction } : {}),
+  };
 }
 
 /** Drop malformed entries, trim oversized content, keep only the most recent
@@ -162,7 +173,18 @@ function sanitizeMessages(
     if (!m || (m.role !== "user" && m.role !== "assistant")) continue;
     const content = typeof m.content === "string" ? m.content.trim() : "";
     if (!content) continue;
-    cleaned.push({ role: m.role, content: content.slice(0, MAX_MESSAGE_CHARS) });
+    cleaned.push({
+      role: m.role,
+      content: content.slice(0, MAX_MESSAGE_CHARS),
+      ...(m.role === "assistant" && m.pendingAction
+        ? {
+            pendingAction: {
+              toolName: m.pendingAction.toolName,
+              input: { ...m.pendingAction.input },
+            },
+          }
+        : {}),
+    });
   }
   return cleaned.slice(-MAX_TEST_MESSAGES);
 }

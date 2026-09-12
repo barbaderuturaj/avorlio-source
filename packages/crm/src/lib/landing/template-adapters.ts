@@ -44,6 +44,8 @@ export function buildTemplateCtas(
   slug: string,
   orgId: string,
   phone?: string | null,
+  bookingUrl?: string | null,
+  intakeUrl?: string | null,
 ): CTAs {
   const urls = buildWorkspaceUrls(
     slug,
@@ -52,8 +54,8 @@ export function buildTemplateCtas(
   );
   const digits = phone ? phone.replace(/[^\d+]/g, "") : "";
   return {
-    bookUrl: urls.book,
-    intakeUrl: urls.intake,
+    bookUrl: bookingUrl ?? urls.book,
+    intakeUrl: intakeUrl ?? "#contact",
     callHref: digits ? `tel:${digits}` : undefined,
   };
 }

@@ -10,8 +10,8 @@ const STEPS = [
   },
   {
     n: "2",
-    title: "Answer Seldon's questions",
-    body: "Seldon shows you what it traced — green, yellow, red — and asks only about what the recording didn't show.",
+    title: "Answer Avorlio's questions",
+    body: "Avorlio shows you what it traced - green, yellow, red - and asks only about what the recording didn't show.",
   },
   {
     n: "3",

@@ -297,8 +297,8 @@ function renderQuestionInput(q: IntakeQuestion): string {
 
   switch (q.type) {
     case "textarea":
-      return `<textarea class="sf-intake__input sf-intake__textarea" data-field-id="${escapeAttr(q.id)}" rows="5" ${placeholder}></textarea>
-      <p class="sf-intake__hint">Press <kbd>Cmd</kbd>+<kbd>Enter</kbd> to continue</p>`;
+      return `<textarea class="sf-intake__input sf-intake__textarea" data-field-id="${escapeAttr(q.id)}" data-placeholder="${escapeAttr(placeholderFor(q))}" rows="5" ${placeholder}></textarea>
+      <p class="sf-intake__hint" data-shortcut-hint>Press <kbd>Cmd</kbd>+<kbd>Enter</kbd> to continue</p>`;
 
     case "select":
       return renderOptionStack(q, "single");
@@ -856,6 +856,8 @@ const INTAKE_INTERACTIVITY_SCRIPT = `<script data-sf-intake="formbricks-stack-v1
     state.answers = {};
     state.history = ['intro'];
     state.panelKey = 'intro';
+    state.submitting = false;
+    state.idempotencyKey = null;
     document.querySelectorAll('.sf-intake__option, .sf-intake__rating-btn, .sf-intake__star').forEach(function(el){
       el.setAttribute('aria-checked', 'false');
       el.classList.remove('is-selected');
@@ -944,6 +946,11 @@ const INTAKE_INTERACTIVITY_SCRIPT = `<script data-sf-intake="formbricks-stack-v1
 
   // ─── Init ─────────────────────────────────────────────────────────
   function init(){
+    var shortcut = /Mac|iPhone|iPad/.test(navigator.platform || '') ? 'Cmd+Enter' : 'Ctrl+Enter';
+    document.querySelectorAll('.sf-intake__input').forEach(function(el){
+      if (el.tagName === 'TEXTAREA') el.setAttribute('placeholder', (el.getAttribute('data-placeholder') || 'Tell us a bit more') + ' (' + shortcut + ' to continue)');
+    });
+    document.querySelectorAll('[data-shortcut-hint]').forEach(function(el){ el.innerHTML = 'Press <kbd>' + (shortcut === 'Cmd+Enter' ? 'Cmd' : 'Ctrl') + '</kbd>+<kbd>Enter</kbd> to continue'; });
     showPanel('intro');
     document.querySelectorAll('.sf-animate').forEach(function(el){
       requestAnimationFrame(function(){ el.classList.add('sf-animate--in'); });

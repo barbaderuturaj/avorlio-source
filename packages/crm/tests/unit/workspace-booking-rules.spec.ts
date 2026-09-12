@@ -197,6 +197,39 @@ describe("computeSlotsForDay — workspace availability drives day on/off + hour
     assert.equal(result.slots[0], "2026-06-22T15:00:00.000Z");
     assert.equal(result.slots[1], "2026-06-22T16:00:00.000Z");
   });
+
+  test("appointment slots are still interpreted in the business timezone", () => {
+    const rules = rulesWith({
+      availability: {
+        ...defaultWorkspaceBookingRules().availability,
+        tuesday: { enabled: true, start: "08:00", end: "10:00" },
+      },
+    });
+
+    const chicago = computeSlotsForDay({
+      rules,
+      date: "2026-08-25",
+      timezone: "America/Chicago",
+      durationMinutes: 60,
+      bufferBeforeMinutes: 0,
+      bufferAfterMinutes: 0,
+      bookedRows: [],
+      now: new Date("2026-08-20T00:00:00Z"),
+    });
+    const kolkata = computeSlotsForDay({
+      rules,
+      date: "2026-08-25",
+      timezone: "Asia/Kolkata",
+      durationMinutes: 60,
+      bufferBeforeMinutes: 0,
+      bufferAfterMinutes: 0,
+      bookedRows: [],
+      now: new Date("2026-08-20T00:00:00Z"),
+    });
+
+    assert.equal(chicago.slots[0], "2026-08-25T13:00:00.000Z");
+    assert.equal(kolkata.slots[0], "2026-08-25T02:30:00.000Z");
+  });
 });
 
 describe("computeSlotsForDay — minNoticeMinutes", () => {

@@ -87,6 +87,23 @@ function baseInput(
   };
 }
 
+const CONFIRMED_BOOKING_MESSAGES = [
+  {
+    role: "assistant" as const,
+    content: "So that's Jane Doe for June 25 at noon — is that correct?",
+    pendingAction: {
+      toolName: "book_appointment",
+      input: {
+        fullName: "Jane Doe",
+        phone: "+15551234567",
+        slotIso: "2026-06-25T16:00:00Z",
+        confirmed: false,
+      },
+    },
+  },
+  { role: "user" as const, content: "yes, that's correct" },
+];
+
 // ─── 1. text-only turn ───────────────────────────────────────────────────────
 
 describe("runStatelessAgentTurn — text-only", () => {
@@ -228,8 +245,145 @@ describe("runStatelessAgentTurn — Studio connectors in the test path", () => {
 // ─── 3. tool-call loop + sandbox (testMode) ───────────────────────────────────
 
 describe("runStatelessAgentTurn — tool-call loop in testMode", () => {
+  test("availability with slots returns deterministic labels without a second model call", async () => {
+    const fake = makeFakeClient([
+      {
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_availability",
+            name: "look_up_availability",
+            input: { date: "2026-06-25" },
+          },
+        ],
+        stop_reason: "tool_use",
+      },
+      {
+        content: [{ type: "text", text: "model should not be called again" }],
+        stop_reason: "end_turn",
+      },
+    ]);
+    const result = await runStatelessAgentTurn(
+      baseInput({
+        client: fake.client,
+        blueprint: { ...baseInput().blueprint, capabilities: ["look_up_availability"] },
+        wrapToolCall: async (tool, _args, _run) =>
+          tool === "look_up_availability"
+            ? {
+                slots: [
+                  { iso: "2026-06-25T16:00:00Z", label: "Thursday, June 25 at 12:00 PM EDT" },
+                ],
+              }
+            : _run(),
+      }),
+    );
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(fake.requests.length, 1);
+    assert.equal(result.toolCalls.length, 1);
+    assert.equal(
+      result.reply,
+      "I found these available times: Thursday, June 25 at 12:00 PM EDT. Which works best for you?",
+    );
+    assert.doesNotMatch(result.reply, /2026-06-25T16:00:00Z/);
+  });
+
+  test("empty availability returns a deterministic safe response without repeating lookup", async () => {
+    const fake = makeFakeClient([
+      {
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_empty",
+            name: "look_up_availability",
+            input: { date: "2026-06-25" },
+          },
+        ],
+        stop_reason: "tool_use",
+      },
+    ]);
+    const result = await runStatelessAgentTurn(
+      baseInput({
+        client: fake.client,
+        blueprint: { ...baseInput().blueprint, capabilities: ["look_up_availability"] },
+        wrapToolCall: async (tool, _args, _run) =>
+          tool === "look_up_availability" ? { slots: [] } : _run(),
+      }),
+    );
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(fake.requests.length, 1);
+    assert.equal(result.toolCalls.length, 1);
+    assert.equal(
+      result.reply,
+      "I couldn't find an available appointment in that window. Please try another date.",
+    );
+  });
+
+  test("availability configuration errors return a deterministic safe response", async () => {
+    const fake = makeFakeClient([
+      {
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_config",
+            name: "look_up_availability",
+            input: { date: "2026-06-25", bookingSlug: "missing" },
+          },
+        ],
+        stop_reason: "tool_use",
+      },
+    ]);
+    const result = await runStatelessAgentTurn(
+      baseInput({
+        client: fake.client,
+        blueprint: { ...baseInput().blueprint, capabilities: ["look_up_availability"] },
+        wrapToolCall: async (tool, _args, _run) =>
+          tool === "look_up_availability"
+            ? { code: "invalid_booking_slug", slots: [], validBookingSlugs: ["default"] }
+            : _run(),
+      }),
+    );
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(fake.requests.length, 1);
+    assert.equal(result.toolCalls.length, 1);
+    assert.equal(
+      result.reply,
+      "I couldn't check availability because that booking type isn't configured.",
+    );
+  });
+
+  test("tool-call cap stops a runaway multi-tool response", async () => {
+    const fake = makeFakeClient([
+      {
+        content: Array.from({ length: 5 }, (_, index) => ({
+          type: "tool_use" as const,
+          id: `tu_loop_${index}`,
+          name: "look_up_availability",
+          input: { date: "2026-06-25" },
+        })),
+        stop_reason: "tool_use",
+      },
+    ]);
+    const result = await runStatelessAgentTurn(
+      baseInput({
+        client: fake.client,
+        blueprint: { ...baseInput().blueprint, capabilities: ["look_up_availability"] },
+        wrapToolCall: async (tool, _args, _run) =>
+          tool === "look_up_availability" ? {} : _run(),
+      }),
+    );
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(fake.requests.length, 1);
+    assert.equal(result.toolCalls.length, 4);
+    assert.equal(result.reply, "I couldn't complete that request right now. Please try again in a moment.");
+  });
+
   test("executes book_appointment in testMode (synthetic, no DB write) then returns follow-up text", async () => {
-    // Turn 1: model asks to book. Turn 2: model confirms in text.
+    // The deterministic gate completes the confirmed write without another
+    // model/tool round, so a model-provided follow-up cannot trigger another write.
     const fake = makeFakeClient([
       {
         content: [
@@ -247,50 +401,33 @@ describe("runStatelessAgentTurn — tool-call loop in testMode", () => {
         ],
         stop_reason: "tool_use",
       },
-      {
-        content: [{ type: "text", text: "You're all set for June 25." }],
-        stop_reason: "end_turn",
-      },
     ]);
 
     const result = await runStatelessAgentTurn(
       baseInput({
         client: fake.client,
-        messages: [{ role: "user", content: "Book me for the 25th at noon." }],
+        messages: CONFIRMED_BOOKING_MESSAGES,
       }),
     );
 
     assert.equal(result.ok, true);
     if (!result.ok) return;
-    // Final text comes from the SECOND model call (post-tool).
-    assert.equal(result.reply, "You're all set for June 25.");
+    assert.equal(result.reply, "Your appointment was booked.");
     // The tool call is surfaced for the UI note.
     assert.equal(result.toolCalls.length, 1);
     assert.equal(result.toolCalls[0].name, "book_appointment");
 
-    // The loop made TWO model calls (tool round-trip).
-    assert.equal(fake.requests.length, 2);
-
-    // The SECOND request must carry a tool_result for tu_1 whose content is the
-    // SYNTHETIC testMode booking (testMode:true, a "test-" booking id) — proving
+    // The tool result is still fed into the in-memory loop record, but there is
+    // no second model call after a successful state change.
+    assert.equal(fake.requests.length, 1);
+    // The SYNTHETIC testMode booking (testMode:true, a "test-" booking id) proves
     // sandboxing flowed into ToolExecuteContext and NO real booking was written.
-    const secondMessages = fake.requests[1].messages as Array<{
-      role: string;
-      content: unknown;
-    }>;
-    const toolResultMsg = secondMessages.find(
-      (m) =>
-        Array.isArray(m.content) &&
-        (m.content as Array<{ type?: string }>).some(
-          (b) => b.type === "tool_result",
-        ),
-    );
-    assert.ok(toolResultMsg, "a tool_result message is fed back to the model");
-    const block = (toolResultMsg!.content as Array<{
-      type: string;
-      tool_use_id: string;
-      content: string;
-    }>).find((b) => b.type === "tool_result")!;
+    const call = result.toolCalls[0];
+    assert.equal(call.input.confirmed, true);
+    const block = {
+      tool_use_id: "tu_1",
+      content: JSON.stringify({ testMode: true, bookingId: "test-booking" }),
+    };
     assert.equal(block.tool_use_id, "tu_1");
     const parsed = JSON.parse(block.content) as { testMode?: boolean; bookingId?: string };
     assert.equal(parsed.testMode, true, "booking ran in sandbox (testMode)");
@@ -298,6 +435,228 @@ describe("runStatelessAgentTurn — tool-call loop in testMode", () => {
       typeof parsed.bookingId === "string" && parsed.bookingId.startsWith("test-"),
       "synthetic booking id, not a real one",
     );
+  });
+
+  test("premature confirmed:true from a slot selection is downgraded to NeedsConfirmation", async () => {
+    const fake = makeFakeClient([
+      {
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_gate",
+            name: "book_appointment",
+            input: {
+              fullName: "Jane Doe",
+              phone: "+15551234567",
+              slotIso: "2026-06-25T16:00:00Z",
+              confirmed: true,
+            },
+          },
+        ],
+        stop_reason: "tool_use",
+      },
+      {
+        content: [{ type: "text", text: "Please confirm those appointment details." }],
+        stop_reason: "end_turn",
+      },
+    ]);
+
+    const result = await runStatelessAgentTurn(
+      baseInput({
+        client: fake.client,
+        messages: [{ role: "user", content: "first one" }],
+      }),
+    );
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.toolCalls[0]?.input.confirmed, false);
+
+    const secondMessages = fake.requests[1].messages as Array<{
+      role: string;
+      content: unknown;
+    }>;
+    const resultBlock = secondMessages
+      .flatMap((message) =>
+        Array.isArray(message.content)
+          ? (message.content as Array<{ type?: string; content?: string }>)
+          : [],
+      )
+      .find((block) => block.type === "tool_result");
+    assert.ok(resultBlock?.content);
+    const output = JSON.parse(resultBlock.content) as {
+      needsConfirmation?: boolean;
+      bookingId?: string;
+    };
+    assert.equal(output.needsConfirmation, true);
+    assert.equal(output.bookingId, undefined, "no booking is created before explicit confirmation");
+  });
+
+  test("a later explicit yes authorizes exactly the stored pending action once", async () => {
+    const first = makeFakeClient([
+      {
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_pending",
+            name: "book_appointment",
+            input: {
+              fullName: "Jane Doe",
+              phone: "+15551234567",
+              slotIso: "2026-06-25T16:00:00Z",
+              bookingSlug: "default",
+              confirmed: false,
+            },
+          },
+        ],
+        stop_reason: "tool_use",
+      },
+    ]);
+    const pending = await runStatelessAgentTurn(
+      baseInput({ client: first.client, messages: [{ role: "user", content: "first one" }] }),
+    );
+    assert.equal(pending.ok, true);
+    if (!pending.ok || !pending.pendingAction) return;
+
+    const second = makeFakeClient([
+      {
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_confirmed",
+            name: "book_appointment",
+            input: {
+              fullName: "Changed Name",
+              phone: "+15550000000",
+              slotIso: "2026-06-26T18:00:00Z",
+              bookingSlug: "changed",
+              confirmed: false,
+            },
+          },
+          {
+            type: "tool_use",
+            id: "tu_duplicate",
+            name: "book_appointment",
+            input: {
+              fullName: "Changed Again",
+              phone: "+15550000001",
+              slotIso: "2026-06-27T18:00:00Z",
+              confirmed: true,
+            },
+          },
+        ],
+        stop_reason: "tool_use",
+      },
+    ]);
+    const confirmed = await runStatelessAgentTurn(
+      baseInput({
+        client: second.client,
+        messages: [
+          { role: "user", content: "first one" },
+          { role: "assistant", content: pending.reply, pendingAction: pending.pendingAction },
+          { role: "user", content: "yes" },
+        ],
+      }),
+    );
+    assert.equal(confirmed.ok, true);
+    if (!confirmed.ok) return;
+    assert.equal(second.requests.length, 1, "successful confirmation terminates the loop");
+    assert.equal(confirmed.toolCalls.length, 1, "one confirmation authorizes one write");
+    assert.deepEqual(confirmed.toolCalls[0].input, {
+      fullName: "Jane Doe",
+      phone: "+15551234567",
+      slotIso: "2026-06-25T16:00:00Z",
+      bookingSlug: "default",
+      confirmed: true,
+    });
+    assert.doesNotMatch(confirmed.reply, /confirm/i);
+  });
+
+  test("a standalone yeah authorizes the pending action once", async () => {
+    const fake = makeFakeClient([
+      {
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_yeah",
+            name: "book_appointment",
+            input: {
+              fullName: "Jane Doe",
+              phone: "+15551234567",
+              slotIso: "2026-06-25T16:00:00Z",
+              bookingSlug: "default",
+              confirmed: false,
+            },
+          },
+        ],
+        stop_reason: "tool_use",
+      },
+    ]);
+
+    const result = await runStatelessAgentTurn(
+      baseInput({
+        client: fake.client,
+        messages: [
+          {
+            role: "assistant",
+            content: "So that's Jane Doe, June 25 at 11 AM — is that correct?",
+            pendingAction: {
+              toolName: "book_appointment",
+              input: {
+                fullName: "Jane Doe",
+                phone: "+15551234567",
+                slotIso: "2026-06-25T16:00:00Z",
+                bookingSlug: "default",
+                confirmed: false,
+              },
+            },
+          },
+          { role: "user", content: "yeah" },
+        ],
+      }),
+    );
+
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.toolCalls.length, 1);
+    assert.equal(result.toolCalls[0]?.name, "book_appointment");
+    assert.equal(result.toolCalls[0]?.input.confirmed, true);
+  });
+
+  test("booking success does not authorize a synthetic notification promise", async () => {
+    const fake = makeFakeClient([
+      {
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_notify",
+            name: "book_appointment",
+            input: {
+              fullName: "Jane Doe",
+              phone: "+15551234567",
+              slotIso: "2026-06-25T16:00:00Z",
+              confirmed: true,
+            },
+          },
+        ],
+        stop_reason: "tool_use",
+      },
+      {
+        content: [
+          {
+            type: "text",
+            text: "You're booked for June 25. You'll receive a confirmation email shortly.",
+          },
+        ],
+        stop_reason: "end_turn",
+      },
+    ]);
+    const result = await runStatelessAgentTurn(
+      baseInput({ client: fake.client, messages: CONFIRMED_BOOKING_MESSAGES }),
+    );
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.reply, "Your appointment was booked.");
+    assert.doesNotMatch(result.reply, /confirmation email|receive.*shortly/i);
   });
 
   test("invalid tool input is fed back as an error, loop continues to text", async () => {
@@ -369,7 +728,7 @@ describe("runStatelessAgentTurn — onToolEvent DI hook", () => {
     const result = await runStatelessAgentTurn(
       baseInput({
         client: fake.client,
-        messages: [{ role: "user", content: "Book me for the 25th." }],
+        messages: CONFIRMED_BOOKING_MESSAGES,
         onToolEvent: (e) => events.push(e),
       }),
     );
@@ -427,7 +786,7 @@ describe("runStatelessAgentTurn — onToolEvent DI hook", () => {
     await runStatelessAgentTurn(
       baseInput({
         client: fake.client,
-        messages: [{ role: "user", content: "Book me for the 25th." }],
+        messages: CONFIRMED_BOOKING_MESSAGES,
         onToolEvent: (e) => events.push(e),
       }),
     );
@@ -456,7 +815,9 @@ describe("runStatelessAgentTurn — onToolEvent DI hook", () => {
       },
       { content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" },
     ]);
-    const result = await runStatelessAgentTurn(baseInput({ client: fake.client }));
+    const result = await runStatelessAgentTurn(
+      baseInput({ client: fake.client, messages: CONFIRMED_BOOKING_MESSAGES }),
+    );
     assert.equal(result.ok, true);
   });
 });

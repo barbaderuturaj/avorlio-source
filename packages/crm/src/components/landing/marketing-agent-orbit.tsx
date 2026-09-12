@@ -94,7 +94,7 @@ export function MarketingAgentOrbit() {
           {/* eslint-disable-next-line @next/next/no-img-element -- static brand asset */}
           <img
             src="/brand/seldonframe-icon-white.svg"
-            alt="SeldonFrame agent"
+            alt="Avorlio AI agent"
             width={34}
             height={34}
             className="block"
@@ -121,9 +121,6 @@ export function MarketingAgentOrbit() {
             <LogoTile logo={logo} size={34} />
           </li>
         ))}
-        <li className="ml-1 text-[13px] font-[500] text-[#6E665A]">
-          + 1,000 more apps via Composio
-        </li>
       </ul>
     </section>
   );

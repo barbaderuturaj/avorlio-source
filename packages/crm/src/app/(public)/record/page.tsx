@@ -36,17 +36,17 @@ function isTierLadderOn(env: { SF_TIER_LADDER?: string | undefined }): boolean {
 }
 
 export const metadata: Metadata = {
-  title: "Turn a screen recording into a working AI agent — SeldonFrame",
+  title: "Avorlio — AI Front Office for Service Businesses",
   description:
-    "Screen-record yourself doing the job once. Seldon watches, asks about what it didn't understand, and compiles a working agent — free to try, no signup.",
+    "Avorlio helps service businesses capture leads, answer questions, book appointments, and follow up automatically.",
   robots: { index: true, follow: true },
-  alternates: { canonical: "https://app.seldonframe.com/record" },
+  alternates: { canonical: "https://app.avorlio.com/record" },
   openGraph: {
-    title: "Turn a screen recording into a working AI agent — SeldonFrame",
+    title: "Avorlio — AI Front Office for Service Businesses",
     description:
-      "Show Seldon how you work. It builds the agent — compiled from your real workflow, testable before you switch it on.",
+      "Avorlio helps service businesses capture leads, answer questions, book appointments, and follow up automatically.",
     type: "website",
-    url: "https://app.seldonframe.com/record",
+    url: "https://app.avorlio.com/record",
     images: [{ url: "/brand/og-image.png", width: 1200, height: 630 }],
   },
 };

@@ -158,7 +158,7 @@ export function HeroModeSwitch() {
   return (
     <div
       role="tablist"
-      aria-label="How do you want to show Seldon your business?"
+      aria-label="How do you want to show Avorlio your business?"
       className="grid w-full grid-cols-2 gap-1 rounded-[12px] border border-[var(--lp-border-soft)] bg-[var(--lp-bg)] p-1"
     >
       <button

@@ -80,6 +80,38 @@ const FALLBACKS: Record<string, FallbackEntry> = {
     fixHint:
       "The agent claimed an action without calling the matching tool. Verify the agent's blueprint includes the relevant capability (reschedule_appointment, cancel_appointment, etc.) under /agents/[id]/settings.",
   },
+  no_unsupported_emergency_claims: {
+    correction:
+      "Your previous response made an unsupported emergency, 24/7, on-call, immediate-dispatch, same-day guarantee, or emergency-services claim. Regenerate using only verified business facts. Do not mention 911 or emergency services unless the visitor described an immediate safety hazard such as fire, smoke, gas smell, sparks, or suspected carbon monoxide.",
+    finalFallback:
+      "Let me look into that for you.",
+    fixHint:
+      "The agent made an emergency/service-availability claim that is not grounded in the workspace Soul. Add explicit business facts for true emergency coverage, or keep the response limited to listed hours and scheduling.",
+  },
+  availability_times_from_tool: {
+    correction:
+      "Your previous response offered concrete appointment times without a successful availability lookup. Regenerate without inventing times. If availability is needed, call look_up_availability before showing slots.",
+    finalFallback:
+      "Let me check the real schedule before I offer times.",
+    fixHint:
+      "The agent offered appointment slots without a successful look_up_availability tool call. Confirm the blueprint includes look_up_availability and that the booking tool can return slots.",
+  },
+  no_unsupported_escalation_claims: {
+    correction:
+      "Your previous response added recipient, dispatch, callback, or timing details that the escalation tool result did not confirm. Regenerate with a plain handoff acknowledgement such as 'I've passed this to the team' or 'I've escalated this for human follow-up.' Do not mention emergency team, dispatch, technicians, shortly, right away, within a time window, or guaranteed callback unless the tool result explicitly says so.",
+    finalFallback:
+      "Let me look into that for you.",
+    fixHint:
+      "The agent embellished an escalation confirmation. The escalation tool currently proves only that the handoff was recorded; add explicit structured fields to the tool result before allowing recipient or response-time promises.",
+  },
+  no_unbacked_operational_promises: {
+    correction:
+      "Your previous response promised or implied operational action that is not backed by a successful authoritative tool result. Regenerate without promising that the business will send or dispatch a technician, send someone out, arrange emergency help, call the visitor back, make a follow-up call, contact them shortly or later, or respond immediately/as soon as possible unless the tool result explicitly supports that claim. Safety guidance for a real hazard is still allowed.",
+    finalFallback:
+      "Let me look into that for you.",
+    fixHint:
+      "The agent promised an operational action without a successful tool result. Keep safety guidance factual, and only promise dispatch, callbacks, or response timing after the matching tool result explicitly confirms it.",
+  },
 };
 
 export function getFallbackEntry(validatorName: string): FallbackEntry | null {
@@ -119,7 +151,11 @@ export function selectFinalFallback(
     "no_pii_leak",
     "quotes_only_from_soul_pricing",
     "no_prompt_injection_echo",
+    "no_unsupported_emergency_claims",
+    "availability_times_from_tool",
+    "no_unbacked_operational_promises",
     "no_hallucinated_state_change",
+    "no_unsupported_escalation_claims",
     "response_length_under_cap",
     "no_avoid_words",
   ];
@@ -131,6 +167,38 @@ export function selectFinalFallback(
   }
   // Generic — neutral, no info solicitation, no false confirmations.
   return "Let me look into that for you.";
+}
+
+const HAZARD_MESSAGE_PATTERN =
+  /\b(gas smell|smell gas|gas leak|smoke|fire|sparks?|carbon monoxide|co alarm|fumes|electrical shock|flames?)\b/i;
+
+/**
+ * Deterministic last-resort assistant text used when regeneration fails or
+ * the model returns nothing useful. Keeps hazard handling safe without
+ * requiring another model call.
+ */
+export function selectDeterministicFinalFallback(
+  failedValidatorNames: string[],
+  userMessage: string,
+): string {
+  if (HAZARD_MESSAGE_PATTERN.test(userMessage)) {
+    return "If you smell gas, leave the building immediately and contact emergency services or your gas utility from a safe location.";
+  }
+  return selectFinalFallback(failedValidatorNames);
+}
+
+/**
+ * If the model produced only blank/whitespace text, replace it with a safe
+ * deterministic fallback instead of letting an empty assistant message pass.
+ */
+export function ensureDeterministicAssistantText(
+  candidateText: string,
+  failedValidatorNames: string[],
+  userMessage: string,
+): string {
+  return candidateText.trim().length > 0
+    ? candidateText
+    : selectDeterministicFinalFallback(failedValidatorNames, userMessage);
 }
 
 /** Map a validator name to its operator-facing fix hint. */

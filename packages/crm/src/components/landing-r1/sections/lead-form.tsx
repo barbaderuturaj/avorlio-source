@@ -17,8 +17,7 @@ import { submitLeadFormAction } from "@/lib/landing/lead-form-action";
 import type { R1LeadFormSection } from "@/lib/landing/r1-payload-prompt";
 
 const DEFAULTS = {
-  heading: "Get a fast callback",
-  subheading: "Tell us what you need — we'll text you a time in minutes.",
+  heading: "Tell us what you need",
   needLabel: "What do you need?",
   consentText:
     "By submitting, you agree to receive automated marketing and informational text messages (appointment scheduling, reminders, and follow-ups) from us at the number provided. Consent is not a condition of purchase. Msg & data rates may apply. Msg frequency varies. Reply STOP to opt out, HELP for help.",
@@ -41,16 +40,18 @@ export function leadFormConfirmation(input: {
   const first = firstNameOf(input.name);
   if (input.smsSent) {
     return {
-      headline: first ? `Got it, ${first} — check your phone` : "Got it — check your phone",
-      body: "We just texted you a booking link. Tap it to grab a time, or reply to that text and we'll get you booked.",
+      headline: first ? `Thanks, ${first}. We received your request.` : "Thanks! We received your request.",
+      body: input.bookUrl
+        ? "We sent you a link to view available times."
+        : "We sent a confirmation text about your request.",
       showBookButton: false,
       bookUrl: input.bookUrl,
     };
   }
   return {
-    headline: first ? `Got it, ${first}!` : "Got it!",
-    body: "Thanks for reaching out — book instantly below and we'll see you soon.",
-    showBookButton: true,
+    headline: first ? `Thanks, ${first}. We received your request.` : "Thanks! We received your request.",
+    body: "Thanks for reaching out.",
+    showBookButton: Boolean(input.bookUrl),
     bookUrl: input.bookUrl,
   };
 }
@@ -79,7 +80,7 @@ export function LeadFormCard({ orgSlug, businessName, leadForm }: LeadFormCardPr
   const [confirm, setConfirm] = useState<ReturnType<typeof leadFormConfirmation> | null>(null);
 
   const heading = leadForm.heading || DEFAULTS.heading;
-  const subheading = leadForm.subheading || DEFAULTS.subheading;
+  const subheading = leadForm.subheading || `Share your contact details and choose a service. ${businessName} can follow up during business hours.`;
   const needLabel = leadForm.needLabel || DEFAULTS.needLabel;
   const customConsentText = leadForm.consentText || null;
   const options = leadForm.needOptions ?? [];
@@ -110,7 +111,7 @@ export function LeadFormCard({ orgSlug, businessName, leadForm }: LeadFormCardPr
             <p className="sf-leadform-sub">{confirm.body}</p>
             {confirm.showBookButton && confirm.bookUrl ? (
               <a className="sf-leadform-submit" href={confirm.bookUrl}>
-                Book instantly
+                View available times
               </a>
             ) : null}
           </div>
@@ -167,25 +168,21 @@ export function LeadFormCard({ orgSlug, businessName, leadForm }: LeadFormCardPr
               ) : null}
 
               <button type="submit" className="sf-leadform-submit" disabled={pending}>
-                {pending ? "Sending…" : "Get my callback"}
+                {pending ? "Sending…" : "Submit request"}
               </button>
-              <p className="sf-leadform-trust">★★★★★ Trusted by your neighbors</p>
               {customConsentText ? (
                 <p className="sf-leadform-consent">{customConsentText}</p>
               ) : (
                 <p className="sf-leadform-consent">
-                  By submitting, you agree to receive automated marketing and informational text messages
-                  (appointment scheduling, reminders, and follow-ups) from {businessName} at the number
-                  provided. Consent is not a condition of purchase. Msg &amp; data rates may apply. Msg
-                  frequency varies. Reply STOP to opt out, HELP for help.{" "}
+                  {"By submitting, you agree to receive automated marketing and informational text messages (appointment scheduling, reminders, and follow-ups) from " + businessName + " at the number provided. Consent is not a condition of purchase. Msg & data rates may apply. Msg frequency varies. Reply STOP to opt out, HELP for help. "}
                   <Link href="/privacy" className="sf-leadform-consent-link">
                     Privacy Policy
-                  </Link>{" "}
-                  &amp;{" "}
+                  </Link>
+                  {" & "}
                   <Link href="/terms" className="sf-leadform-consent-link">
                     Terms
                   </Link>
-                  .
+                  {"."}
                 </p>
               )}
             </form>
@@ -205,6 +202,9 @@ export function LeadFormCard({ orgSlug, businessName, leadForm }: LeadFormCardPr
           border-radius: 16px;
           padding: clamp(24px, 5vw, 40px);
           box-shadow: 0 12px 40px rgba(0, 0, 0, 0.08);
+        }
+        @media (min-width: 1024px) {
+          .sf-leadform-card { padding: 44px; }
         }
         .sf-leadform-heading {
           font-family: var(--font-headline);

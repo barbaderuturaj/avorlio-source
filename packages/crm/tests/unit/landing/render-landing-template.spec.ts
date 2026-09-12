@@ -41,6 +41,7 @@ import { renderLandingTemplate } from "../../../src/lib/landing/render-landing-t
 import { LANDING_TEMPLATES } from "../../../src/components/landing-templates/registry";
 import type { R1LandingPayload } from "../../../src/lib/landing/r1-payload-prompt";
 import type { TemplateProps } from "../../../src/components/landing-templates/_contract/types";
+import { buildVerifiedBusinessFacts } from "../../../src/lib/landing/factual-grounding";
 
 // The function returns a plain (untyped-at-the-call-site) ReactElement | null
 // per its signature; this helper narrows it to the template's known props
@@ -196,6 +197,34 @@ describe("renderLandingTemplate — case 3: r1 null + soul fallback", () => {
 
   test("ctas.callHref derives from the soul's phone", () => {
     assert.equal(props(result).ctas.callHref, "tel:6045550144");
+  });
+
+  test("scrubs unsupported soul/template defaults at the public template boundary", () => {
+    const result = renderLandingTemplate({
+      slug: "dallasflow-plumbing",
+      orgId: "org_plumbing",
+      landingTemplate: REGISTERED_ID,
+      r1: null,
+      soul: {
+        business_name: "DallasFlow Plumbing",
+        tagline: "5-star rated licensed and insured same-day plumbing",
+        soul_description: "We offer financing and free estimates.",
+        service_area: ["Dallas", "Plano", "Irving"],
+        offerings: ["Drain cleaning", "Leak repair", "Emergency plumbing"],
+        emergency_service: false,
+      },
+      themeArchetype: undefined,
+      facts: buildVerifiedBusinessFacts({
+        business_name: "DallasFlow Plumbing",
+        service_area: ["Dallas", "Plano", "Irving"],
+        offerings: ["Drain cleaning", "Leak repair", "Emergency plumbing"],
+        emergency_service: false,
+      }),
+    });
+    const text = JSON.stringify(props(result).data);
+    assert.match(text, /DallasFlow Plumbing/);
+    assert.match(text, /Drain cleaning/);
+    assert.doesNotMatch(text, /5-star rated|licensed|insured|same-day|financing|free estimates/i);
   });
 });
 

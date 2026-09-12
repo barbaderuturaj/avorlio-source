@@ -24,7 +24,7 @@ export default async function DeviceAuthPage({
       <Frame title="Authorization link missing">
         <p style={{ color: "#666" }}>
           The link you opened doesn&apos;t include an authorization code.
-          Make sure you clicked the most recent email from SeldonFrame.
+          Make sure you clicked the most recent email from Avorlio.
         </p>
       </Frame>
     );
@@ -147,9 +147,9 @@ function Frame({ title, children }: { title: string; children: React.ReactNode }
         </h1>
         {children}
         <p style={{ margin: "32px 0 0", color: "#999", fontSize: 12 }}>
-          SeldonFrame ·{" "}
-          <a href="https://seldonframe.com" style={{ color: "#666" }}>
-            seldonframe.com
+          Avorlio ·{" "}
+          <a href="https://app.avorlio.com" style={{ color: "#666" }}>
+            app.avorlio.com
           </a>
         </p>
       </div>

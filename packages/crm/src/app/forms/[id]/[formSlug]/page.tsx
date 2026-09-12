@@ -1,4 +1,5 @@
 import { and, eq } from "drizzle-orm";
+import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 import { db } from "@/db";
 import { intakeForms, organizations } from "@/db/schema";
@@ -7,6 +8,12 @@ import { PublicThemeProvider } from "@/components/theme/public-theme-provider";
 import { PoweredByBadge } from "@seldonframe/core/virality";
 import { shouldShowPoweredByBadgeForOrg } from "@/lib/billing/public";
 import { getPublicOrgThemeBySlug } from "@/lib/theme/actions";
+import {
+  buildPublicBookingUrl,
+  getPublicBookingTemplateForOrg,
+  requestOriginFromHeaders,
+} from "@/lib/bookings/public-booking-url";
+import { rewriteStoredIntakeCompletionBookCta } from "@/lib/forms/public-intake-html";
 // 2026-05-18 (later) — agency-wide branding REMOVED from public-facing
 // intake pages. The agency's chrome substitution only applies to the
 // SMB operator's admin dashboard; their CUSTOMERS (the people filling
@@ -56,6 +63,17 @@ export default async function PublicIntakePage({
   const useBlueprintRender = Boolean(form.contentHtml && form.contentCss);
 
   if (useBlueprintRender) {
+    const bookingTemplate = await getPublicBookingTemplateForOrg(org.id);
+    const bookingUrl = bookingTemplate
+      ? buildPublicBookingUrl({
+          requestOrigin: requestOriginFromHeaders(await headers()),
+          orgSlug,
+          bookingSlug: bookingTemplate.slug,
+          baseDomain: process.env.WORKSPACE_BASE_DOMAIN ?? "app.seldonframe.com",
+        })
+      : null;
+    const contentHtml = rewriteStoredIntakeCompletionBookCta(form.contentHtml!, bookingUrl);
+
     // 2026-05-18 — inject the workspace logo + business name floating
     // above the pre-rendered blueprint HTML. The blueprint render was
     // produced before theme.logoUrl existed as a concept; rather than
@@ -102,7 +120,7 @@ export default async function PublicIntakePage({
             </span>
           </div>
         ) : null}
-        <div dangerouslySetInnerHTML={{ __html: form.contentHtml! }} />
+        <div dangerouslySetInnerHTML={{ __html: contentHtml }} />
         {showBadge ? (
           <div className="flex justify-center py-2">
             <PoweredByBadge />

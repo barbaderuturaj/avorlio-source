@@ -135,6 +135,49 @@ describe("look_up_availability honors the booking policy window ∩ free/busy", 
       [`${TEST_DATE}T09:00:00.000Z`],
     );
   });
+
+  test("book_external never offers a slot already occupied in SeldonFrame", async () => {
+    // External calendar says the full 09:00-11:00 window is free.
+    // Native/public availability says 09:00 is already occupied internally,
+    // so only 10:00 is actually safe to offer.
+    let listSlotsCalls = 0;
+
+    const deps: LookUpAvailabilityDeps = {
+      resolveBackend: () =>
+        backendWithWindows([
+          {
+            start: `${TEST_DATE}T09:00:00.000Z`,
+            end: `${TEST_DATE}T11:00:00.000Z`,
+          },
+        ]),
+      listSlots: async () => {
+        listSlotsCalls += 1;
+        return {
+          slots: [`${TEST_DATE}T10:00:00.000Z`],
+          durationMinutes: 60,
+          workspaceTimezone: "UTC",
+        };
+      },
+      now: FROZEN_NOW,
+    };
+
+    const res = (await lookUpAvailability.execute(
+      { date: TEST_DATE },
+      ctxWithPolicy({}),
+      deps,
+    )) as { slots: { iso: string }[] };
+
+    assert.ok(
+      listSlotsCalls >= 1,
+      "book_external must consult native/public availability for internal booking conflicts",
+    );
+
+    assert.deepEqual(
+      res.slots.map((s) => s.iso),
+      [`${TEST_DATE}T10:00:00.000Z`],
+      "09:00 is externally free but internally occupied and must never be offered",
+    );
+  });
 });
 
 describe("look_up_availability walks forward across days (book_external)", () => {

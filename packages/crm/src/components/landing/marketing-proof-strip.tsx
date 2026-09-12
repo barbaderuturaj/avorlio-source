@@ -5,17 +5,15 @@
 // the single most important being "I'm not technical" → you edit by chatting.
 // Server component — no client hooks needed.
 
-import { AvatarCircles } from "@/components/ui/magic/avatar-circles";
-import { EditByChatDemo } from "@/components/landing/edit-by-chat-demo";
 
 // 2026-07-16 (Max): "$29/mo flat" chip removed — the homepage sells the
 // agency tiers now, so a $29 anchor here undercut the $99+ grid below.
 // Price talk lives in the pricing section + FAQ.
 const CHIPS = [
-  "Build it free",
-  "Live in 3 minutes",
-  "No code",
-  "Cancel anytime",
+  "Built for service businesses",
+  "HVAC launch focus",
+  "Lead capture + booking",
+  "Follow-up automation",
 ] as const;
 
 export function MarketingProofStrip() {
@@ -36,9 +34,6 @@ export function MarketingProofStrip() {
           </span>
         </p>
 
-        {/* Show, don't tell — a live loop of editing the site by chatting. */}
-        <EditByChatDemo />
-
         {/* Reassurance chips */}
         <ul className="flex flex-wrap items-center justify-center gap-2 md:gap-2.5">
           {CHIPS.map((chip) => (
@@ -57,22 +52,6 @@ export function MarketingProofStrip() {
           ))}
         </ul>
 
-        {/* Founder proof accent — honest, no invented counts */}
-        <div className="flex items-center gap-2 pt-2">
-          <AvatarCircles
-            avatarUrls={[
-              {
-                imageUrl: "/brand/maxime-houle.png",
-                profileUrl: "https://twitter.com/maximehoule",
-                name: "Maxime Houle",
-              },
-            ]}
-            className="h-8 w-8"
-          />
-          <p className="text-[12.5px] leading-[1.4] text-[#6E665A]">
-            Built by the SeldonFrame founder
-          </p>
-        </div>
       </div>
     </section>
   );

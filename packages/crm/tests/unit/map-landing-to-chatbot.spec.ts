@@ -64,16 +64,16 @@ function buildFixturePayload(): R1LandingPayload {
 }
 
 describe("mapLandingContentToChatbot — real 5-FAQ/6-service payload", () => {
-  test("maps all 5 FAQ items with question/answer -> q/a and source: extracted", () => {
+  test("maps all 5 FAQ items with question/answer -> q/a and source: synthesized", () => {
     const mapped = mapLandingContentToChatbot(buildFixturePayload(), "PeakAir SD");
     assert.equal(mapped.faq.length, 5);
     assert.deepEqual(mapped.faq[0], {
       q: "Do you offer same-day service?",
       a: "Yes, same-day AC repair is available across El Paso.",
-      source: "extracted",
+      source: "synthesized",
     });
     for (const entry of mapped.faq) {
-      assert.equal(entry.source, "extracted");
+      assert.equal(entry.source, "synthesized");
       assert.ok(entry.q.length > 0);
       assert.ok(entry.a.length > 0);
     }

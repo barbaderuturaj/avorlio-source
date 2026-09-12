@@ -7,6 +7,7 @@
 
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 
 import { SiteShell } from "@/components/landing-r1/shell/site-shell";
 import { Navbar } from "@/components/landing-r1/chrome/navbar";
@@ -20,6 +21,13 @@ import { resolveMapQuery } from "@/lib/landing/map-embed";
 import { findServicePage, getServicePages } from "@/lib/landing/r1-site-tree";
 import { buildWorkspaceUrls } from "@/lib/billing/anonymous-workspace";
 import { getPublicChatbotEmbed } from "@/lib/agents/public-embed";
+import {
+  buildPublicBookingUrl,
+  buildPublicIntakeUrl,
+  getPublicBookingTemplateForOrg,
+  getPublicIntakeFormForOrg,
+  requestOriginFromHeaders,
+} from "@/lib/bookings/public-booking-url";
 
 type PageProps = {
   params: Promise<{ slug: string; service: string }>;
@@ -75,9 +83,27 @@ export default async function WorkspaceServicePage({ params }: PageProps) {
     process.env.WORKSPACE_BASE_DOMAIN ?? "app.seldonframe.com",
     r1.orgId,
   );
+  const bookingTemplate = await getPublicBookingTemplateForOrg(r1.orgId);
+  const bookingUrl = bookingTemplate
+    ? buildPublicBookingUrl({
+        requestOrigin: requestOriginFromHeaders(await headers()),
+        orgSlug: slug,
+        bookingSlug: bookingTemplate.slug,
+        baseDomain: process.env.WORKSPACE_BASE_DOMAIN ?? "app.seldonframe.com",
+      })
+    : null;
+  const intakeForm = await getPublicIntakeFormForOrg(r1.orgId);
+  const intakeUrl = intakeForm
+    ? buildPublicIntakeUrl({
+        requestOrigin: requestOriginFromHeaders(await headers()),
+        orgSlug: slug,
+        formSlug: intakeForm.slug,
+        baseDomain: process.env.WORKSPACE_BASE_DOMAIN ?? "app.seldonframe.com",
+      })
+    : null;
   const payload = rewriteR1Hrefs(r1.payload, {
-    book: workspaceUrls.book,
-    intake: workspaceUrls.intake,
+    book: bookingUrl,
+    intake: intakeUrl,
     home: workspaceUrls.home,
   });
 
@@ -101,12 +127,13 @@ export default async function WorkspaceServicePage({ params }: PageProps) {
         homeHref={homeHref}
         cta={payload.nav?.cta}
         logoUrl={payload.logo}
+        showReviews={payload.testimonials.testimonials.length > 0}
       />
       <ServicePageTemplate
         archetype={payload.hero.archetype}
         service={page}
         phone={payload.footer.phone}
-        ctaHref={workspaceUrls.book}
+        ctaHref={bookingUrl ?? "#contact"}
         orgSlug={slug}
         businessName={payload.hero.businessName}
         leadForm={payload.leadForm}

@@ -395,7 +395,12 @@ export function registerCrmEventListeners() {
       // was already per-step); running them concurrently via
       // Promise.allSettled preserves that isolation while turning ~3x
       // serial network-bound awaits into 1x wall-clock cost.
-      const [agentDispatchResult, outboundDispatchResult, calendarInviteResult] =
+      const [
+        agentDispatchResult,
+        outboundDispatchResult,
+        calendarInviteResult,
+        calendarPushResult,
+      ] =
         await Promise.allSettled([
           dispatchEventToDeployedAgents({
             orgId: bookingOrgId,
@@ -411,6 +416,10 @@ export function registerCrmEventListeners() {
             payload: data,
           }),
           sendBookingCalendarInvite({
+            orgId: bookingOrgId,
+            bookingId,
+          }),
+          pushBookingToConnectedCalendar({
             orgId: bookingOrgId,
             bookingId,
           }),
@@ -436,20 +445,15 @@ export function registerCrmEventListeners() {
         );
       }
 
-      // Task 8 — fire-and-forget push into the org's own connected Google/
-      // Outlook calendar (Composio, org-level). pushBookingToConnectedCalendar
-      // is already fail-soft internally (never throws); this void/.catch is
-      // belt-and-suspenders so a bug there can NEVER block or fail this
-      // handler. Non-blocking: we do not await it.
-      void pushBookingToConnectedCalendar({
-        orgId: bookingOrgId,
-        bookingId,
-      }).catch((err) => {
+      // Await this push so serverless execution cannot finish while the
+      // connected Google/Outlook event creation is still pending.
+      if (calendarPushResult.status === "rejected") {
+        // Belt-and-suspenders: the push helper is already fail-soft.
         console.warn(
           `[listeners] pushBookingToConnectedCalendar booking.created failed:`,
-          err,
+          calendarPushResult.reason,
         );
-      });
+      }
     }
   });
 

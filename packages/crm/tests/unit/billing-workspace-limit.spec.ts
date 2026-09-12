@@ -133,3 +133,36 @@ describe("enforceWorkspaceLimit â€” agency / agency_starter / agency_growth / ag
     }
   });
 });
+
+describe("enforceWorkspaceLimit — self-hosted", () => {
+  test("allows unlimited workspace creation when the deployment is self-hosted", async () => {
+    for (const count of [0, 1, 10, 50]) {
+      const decision = await enforceWorkspaceLimit(
+        { userId: "u1", primaryOrgId: "org-1", ownedWorkspaceCount: count },
+        {
+          resolveTier: async () => "inactive",
+          isSelfHosted: () => true,
+        },
+      );
+
+      assert.equal(
+        decision.allowed,
+        true,
+        `self-hosted must allow ${count} existing workspaces`,
+      );
+      if (decision.allowed) assert.equal(decision.tier, "inactive");
+    }
+  });
+
+  test("an injected hosted inactive deployment still blocks the second workspace", async () => {
+    const decision = await enforceWorkspaceLimit(
+      { userId: "u1", primaryOrgId: "org-1", ownedWorkspaceCount: 1 },
+      {
+        resolveTier: async () => "inactive",
+        isSelfHosted: () => false,
+      },
+    );
+
+    assert.equal(decision.allowed, false);
+  });
+});

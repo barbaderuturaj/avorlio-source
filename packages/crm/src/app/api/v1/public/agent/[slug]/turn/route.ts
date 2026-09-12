@@ -27,8 +27,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
-import { agentConversations, agents, organizations } from "@/db/schema";
+import { agents, organizations } from "@/db/schema";
 import { executeTurn } from "@/lib/agents/runtime";
+import { enforcePublicAgentOutput } from "@/lib/agents/public-output";
+import { resolvePublicWebConversationWithDb } from "@/lib/agents/public-web-conversation-db";
 import { decidePublicConversationStatus } from "@/lib/agents/public-turn-status";
 import { getCurrentUser } from "@/lib/auth/helpers";
 
@@ -38,12 +40,14 @@ type Body = {
   message?: string;
   channel_meta?: Record<string, unknown>;
   stream?: boolean;
+  start_new_conversation?: boolean;
 };
 
 const CRITICAL_VALIDATORS = [
   "quotes_only_from_soul_pricing",
   "no_prompt_injection_echo",
   "no_pii_leak",
+  "no_unbacked_operational_promises",
 ];
 
 // v1.40.8 — CORS headers for cross-origin embed.
@@ -59,9 +63,10 @@ const CRITICAL_VALIDATORS = [
 //
 // Origin = "*" is correct here: the chatbot is intentionally embeddable on
 // any operator's site (that's the entire point), and the endpoint serves
-// only public, conversation-scoped data. The downstream agent runtime
-// already enforces per-conversation auth via conversation_id + anonymous
-// session id. Loosening CORS doesn't loosen application authorization.
+// only public, conversation-scoped data. This route validates any supplied
+// conversation_id against the resolved agent/org and anonymous session before
+// it ever reaches the runtime. Loosening CORS doesn't loosen application
+// authorization.
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -175,33 +180,58 @@ export async function POST(
     isAuthenticatedOperator,
   });
 
-  // Get-or-create conversation
-  let conversationId = body.conversation_id;
-  if (!conversationId) {
-    const [agentForVersion] = await db
-      .select({ currentVersion: agents.currentVersion })
-      .from(agents)
-      .where(eq(agents.id, agentRow.id))
-      .limit(1);
-    const [created] = await db
-      .insert(agentConversations)
-      .values({
-        agentId: agentRow.id,
-        agentVersion: agentForVersion?.currentVersion ?? 1,
-        orgId: agentRow.orgId,
-        anonymousSessionId: body.anonymous_session_id ?? null,
-        channelMeta: body.channel_meta ?? {},
-        status: conversationStatus,
-      })
-      .returning({ id: agentConversations.id });
-    if (!created) {
-      return NextResponse.json(
-        { error: "conversation_create_failed" },
-        { status: 500, headers: CORS_HEADERS },
-      );
-    }
-    conversationId = created.id;
+  const conversationResolution = await resolvePublicWebConversationWithDb({
+    suppliedConversationId: body.conversation_id,
+    anonymousSessionId: body.anonymous_session_id,
+    agentId: agentRow.id,
+    orgId: agentRow.orgId,
+    status: conversationStatus,
+    channelMeta: body.channel_meta ?? {},
+    startNewConversation: body.start_new_conversation === true,
+  }).catch((err) => {
+    console.error("public_agent_conversation_resolve_failed", {
+      agentId: agentRow.id,
+      orgId: agentRow.orgId,
+      reason: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  });
 
+  if (!conversationResolution) {
+    return NextResponse.json(
+      { error: "conversation_create_failed" },
+      { status: 500, headers: CORS_HEADERS },
+    );
+  }
+
+  const conversationId = conversationResolution.conversationId;
+
+  if (conversationResolution.rejectedSuppliedReason) {
+    console.warn("public_agent_conversation_id_rejected", {
+      agentId: agentRow.id,
+      orgId: agentRow.orgId,
+      reason: conversationResolution.rejectedSuppliedReason,
+    });
+  }
+
+  if (conversationResolution.abandonedStaleConversationId) {
+    console.info("public_agent_stale_conversation_abandoned", {
+      agentId: agentRow.id,
+      orgId: agentRow.orgId,
+      conversationId: conversationResolution.abandonedStaleConversationId,
+    });
+  }
+
+  if (conversationResolution.abandonedResetConversationId) {
+    console.info("public_agent_conversation_reset", {
+      agentId: agentRow.id,
+      orgId: agentRow.orgId,
+      previousConversationId: conversationResolution.abandonedResetConversationId,
+      conversationId,
+    });
+  }
+
+  if (conversationResolution.created) {
     // 2026-08-07 — activation-moment analytics. Only for real ("active")
     // conversations — the operator test sandbox routes through this same
     // endpoint with status="test" (decidePublicConversationStatus above),
@@ -249,7 +279,11 @@ export async function POST(
           // Chunk + emit. Smaller chunks = smoother typewriter; we cap at
           // ~28 chars and pause ~22ms between chunks. Total response is
           // typically <600 chars so this lands in <500ms.
-          const text = result.assistantMessage;
+          const text = enforcePublicAgentOutput(
+            result.assistantMessage,
+            result.toolCalls,
+            result.toolResults,
+          );
           const chunks = chunkText(text, 28);
           for (const chunk of chunks) {
             send("delta", { text: chunk });
@@ -305,7 +339,11 @@ export async function POST(
   return NextResponse.json(
     {
       conversation_id: conversationId,
-      message: result.assistantMessage,
+      message: enforcePublicAgentOutput(
+        result.assistantMessage,
+        result.toolCalls,
+        result.toolResults,
+      ),
       validators_critical_failed: result.validators.some(
         (v) => !v.passed && CRITICAL_VALIDATORS.includes(v.name),
       ),

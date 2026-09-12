@@ -58,15 +58,14 @@ import {
   submitPublicBookingAction,
   type BookingIntakeField,
 } from "@/lib/bookings/actions";
+import {
+  addDaysToDateOnly,
+  dateOnlyFromLocalDate,
+  formatDateOnlyHeading,
+  localDateFromDateOnly,
+} from "@/lib/bookings/public-booking-date";
 import { isDemoBlockedError, isDemoReadonlyClient } from "@/lib/demo/client";
 import { useDemoToast } from "@/components/shared/demo-toast-provider";
-
-function toDateOnly(date: Date) {
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
 
 // v1.40.2 — format a UTC ISO slot string in the workspace's timezone.
 // Pre-1.40.2 we used the browser's locale-default TZ which DISAGREED
@@ -77,15 +76,6 @@ function toTimeLabel(value: string, timeZone: string) {
   return date.toLocaleTimeString([], {
     hour: "numeric",
     minute: "2-digit",
-    timeZone,
-  });
-}
-
-function formatSelectedDateHeading(date: Date, timeZone: string) {
-  return date.toLocaleDateString([], {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
     timeZone,
   });
 }
@@ -197,14 +187,13 @@ export function PublicBookingForm({
     d.setHours(0, 0, 0, 0);
     return d;
   }, []);
+  const todayISO = useMemo(() => dateOnlyFromLocalDate(today), [today]);
   const horizon = useMemo(() => {
-    const d = new Date(today);
-    d.setDate(d.getDate() + PUBLIC_BOOKING_WINDOW_DAYS);
-    return d;
-  }, [today]);
+    return localDateFromDateOnly(addDaysToDateOnly(todayISO, PUBLIC_BOOKING_WINDOW_DAYS));
+  }, [todayISO]);
 
-  const [selectedDate, setSelectedDate] = useState<Date>(today);
-  const selectedDateISO = useMemo(() => toDateOnly(selectedDate), [selectedDate]);
+  const [selectedDateISO, setSelectedDateISO] = useState<string>(todayISO);
+  const selectedDate = useMemo(() => localDateFromDateOnly(selectedDateISO), [selectedDateISO]);
 
   // v1.40.2 — display TZ is the WORKSPACE's TZ, not the browser's.
   // Customer's browser TZ doesn't matter — they're booking with an
@@ -321,7 +310,7 @@ export function PublicBookingForm({
           showDemoToast();
           return;
         }
-        throw error;
+        setSubmitError("We couldn't complete the booking. Please try again, or call us directly.");
       }
     });
   }
@@ -334,7 +323,7 @@ export function PublicBookingForm({
           <div className="mx-auto mb-4 inline-flex size-14 items-center justify-center rounded-full" style={{ backgroundColor: "color-mix(in srgb, var(--sf-primary, #21a38b) 15%, transparent)" }}>
             <Check className="size-7" style={{ color: "var(--sf-primary, #21a38b)" }} />
           </div>
-          <h1 className="text-2xl font-semibold tracking-tight" style={{ color: "var(--sf-text)" }}>You&apos;re booked.</h1>
+          <h1 className="text-2xl font-semibold tracking-tight" style={{ color: "var(--sf-text)" }}>Booking confirmed.</h1>
           <p className="mt-2 text-sm leading-relaxed" style={{ color: "var(--sf-muted)" }}>{confirmationMessage}</p>
         </div>
       </main>
@@ -425,9 +414,7 @@ export function PublicBookingForm({
                     selected={selectedDate}
                     onSelect={(day) => {
                       if (day) {
-                        const next = new Date(day);
-                        next.setHours(0, 0, 0, 0);
-                        setSelectedDate(next);
+                        setSelectedDateISO(dateOnlyFromLocalDate(day));
                         setStep("pick-time");
                       }
                     }}
@@ -443,7 +430,7 @@ export function PublicBookingForm({
                   <div className="flex items-baseline justify-between gap-3">
                     <div>
                       <p className="text-base font-semibold" style={{ color: "var(--sf-text)" }}>
-                        {formatSelectedDateHeading(selectedDate, timezone)}
+                        {formatDateOnlyHeading(selectedDateISO)}
                       </p>
                       <p className="mt-0.5 text-xs" style={{ color: "var(--sf-muted)" }}>
                         {durationMinutes}-minute slot · times shown in {timezoneAbbr}
@@ -517,7 +504,7 @@ export function PublicBookingForm({
                   >
                     <div className="min-w-0">
                       <p className="text-sm font-semibold" style={{ color: "var(--sf-text)" }}>
-                        {formatSelectedDateHeading(selectedDate, timezone)} · {toTimeLabel(selectedSlot, timezone)}
+                        {formatDateOnlyHeading(selectedDateISO)} · {toTimeLabel(selectedSlot, timezone)}
                       </p>
                       <p className="mt-0.5 text-xs" style={{ color: "var(--sf-muted)" }}>
                         {durationMinutes} min · {timezoneAbbr}

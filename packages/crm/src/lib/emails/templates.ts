@@ -47,7 +47,7 @@ export function renderPlainEmailTemplate({
   const primary = (brand.primaryColor ?? "").trim() || "#0f172a";
   const phone = (brand.businessPhone ?? "").trim();
   const address = (brand.businessAddress ?? "").trim();
-  const showPoweredBy = brand.showPoweredBy ?? true;
+  const showPoweredBy = false;
 
   // Linkify URLs in the body (basic — covers the booking page link the
   // LLM puts in confirmation copy). Wrap in <a> styled with primary

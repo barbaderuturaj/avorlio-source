@@ -7,7 +7,7 @@ const nextConfig: NextConfig = {
   // Turbopack compilation (the real gate) passes cleanly — suppress the
   // tsc post-build check to stop whack-a-mole on third-party type artifacts.
   typescript: { ignoreBuildErrors: true },
-  reactCompiler: true,
+  reactCompiler: false,
   allowedDevOrigins: ["localhost", "127.0.0.1", "127.0.0.1:54345"],
   experimental: {
     serverActions: {

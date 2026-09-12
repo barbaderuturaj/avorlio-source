@@ -1,16 +1,23 @@
 "use server";
 
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, sql } from "drizzle-orm";
+import { headers } from "next/headers";
 import { db } from "@/db";
-import { contacts, organizations } from "@/db/schema";
+import { activities, bookings, contacts, deals, organizations, pipelines, users } from "@/db/schema";
 import { assertWritable as assertWritableImpl } from "@/lib/demo/server";
 import { enforceContactLimit as enforceContactLimitImpl } from "@/lib/billing/limits";
 import { emitSeldonEvent } from "@/lib/events/bus";
 import { findContactByPhone as findContactByPhoneImpl } from "@/lib/sms/api";
 import { sendSmsFromApi } from "@/lib/sms/api";
 import { normalizePhone } from "@/lib/sms/suppression";
-import { buildWorkspaceUrls } from "@/lib/billing/anonymous-workspace";
 import { sendNewLeadAlert } from "@/lib/notifications/ops-notifications";
+import {
+  buildPublicBookingUrl,
+  getPublicBookingTemplateForOrg,
+  requestOriginFromHeaders,
+  type PublicBookingTemplate,
+} from "@/lib/bookings/public-booking-url";
+import { resolveOrgActivityUserId } from "@/lib/crm/activity-user";
 import type { LimitDecision } from "@/lib/billing/limits";
 
 // ── Public contract ───────────────────────────────────────────────────────
@@ -30,6 +37,14 @@ export type LeadFormActionResult = {
   error?: string;
 };
 
+const LANDING_DEAL_DEDUP_WINDOW_MS = 10 * 60 * 1000;
+
+type ActivityUserResolverDeps = {
+  getOrgOwnerId: (orgId: string) => Promise<string | null>;
+  userExists: (userId: string) => Promise<boolean>;
+  getFallbackOrgUserId: (orgId: string) => Promise<string | null>;
+};
+
 // ── Injectable boundary (the repo's testable-deps idiom; see
 //    src/lib/events/listeners-testable.ts). The "use server" action below
 //    wires the production implementations; unit tests inject fakes so no
@@ -43,7 +58,11 @@ export type LeadFormDeps = {
   getContactById: (
     orgId: string,
     contactId: string,
-  ) => Promise<{ firstName: string | null; lastName: string | null } | null>;
+  ) => Promise<{
+    firstName: string | null;
+    lastName: string | null;
+    customFields?: Record<string, unknown> | null;
+  } | null>;
   createContact: (values: {
     orgId: string;
     firstName: string;
@@ -57,8 +76,34 @@ export type LeadFormDeps = {
     contactId: string,
     patch: Record<string, unknown>,
   ) => Promise<void>;
+  resolveActivityUserId: (orgId: string) => Promise<string | null>;
+  createActivity: (values: {
+    orgId: string;
+    userId: string;
+    contactId: string;
+    type: "note";
+    subject: string;
+    body: string;
+    metadata: Record<string, unknown>;
+  }) => Promise<void>;
+  getDefaultPipeline: (orgId: string) => Promise<{
+    id: string;
+    stages: Array<{ name: string; probability?: number | null }>;
+  } | null>;
+  hasRecentLandingDeal: (orgId: string, contactId: string, service: string, since: Date) => Promise<boolean>;
+  createDeal: (values: {
+    orgId: string;
+    contactId: string;
+    pipelineId: string;
+    title: string;
+    stage: string;
+    probability: number;
+    customFields: Record<string, unknown>;
+    notes: string | null;
+  }) => Promise<void>;
+  getBookingTemplate: (orgId: string) => Promise<PublicBookingTemplate | null>;
   emit: (type: "contact.created" | "form.submitted", data: Record<string, unknown>, orgId: string) => Promise<void>;
-  buildBookUrl: (slug: string, orgId: string) => string;
+  buildBookUrl: (params: { orgSlug: string; orgId: string; bookingSlug: string }) => string;
   sendSms: (params: {
     orgId: string;
     contactId: string;
@@ -101,6 +146,42 @@ function splitName(full: string): { firstName: string; lastName: string | null }
   };
 }
 
+export async function resolveLandingActivityUserId(
+  orgId: string,
+  deps: ActivityUserResolverDeps = {
+    getOrgOwnerId: async (id) => {
+      const [org] = await db
+        .select({ ownerId: organizations.ownerId })
+        .from(organizations)
+        .where(eq(organizations.id, id))
+        .limit(1);
+      return org?.ownerId ?? null;
+    },
+    userExists: async (userId) => {
+      const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId)).limit(1);
+      return Boolean(user?.id);
+    },
+    getFallbackOrgUserId: async (id) => {
+      const [owner] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.orgId, id), eq(users.role, "owner")))
+        .orderBy(asc(users.createdAt))
+        .limit(1);
+      if (owner?.id) return owner.id;
+      const [member] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.orgId, id))
+        .orderBy(asc(users.createdAt))
+        .limit(1);
+      return member?.id ?? null;
+    },
+  },
+): Promise<string | null> {
+  return resolveOrgActivityUserId(orgId, deps);
+}
+
 /**
  * Pure, injectable core. Returns a result object; never throws for the
  * expected branches (limit/suppressed/no-Twilio/validation). Order mirrors
@@ -139,7 +220,8 @@ export async function submitLeadFormWithDeps(
   }
 
   const normalizedPhone = normalizePhone(phoneRaw) || phoneRaw;
-  const bookUrl = deps.buildBookUrl(orgSlug, orgId);
+  const bookingTemplate = await deps.getBookingTemplate(orgId).catch(() => null);
+  const bookUrl = bookingTemplate ? deps.buildBookUrl({ orgSlug, orgId, bookingSlug: bookingTemplate.slug }) : "";
 
   // Idempotency: short-circuit a duplicate submission (same orgId+phone).
   const nowMs = deps.now().getTime();
@@ -148,7 +230,10 @@ export async function submitLeadFormWithDeps(
   }
 
   // ── Find-or-create contact by phone ──
-  const customFields: Record<string, unknown> = need ? { need } : {};
+  const customFields: Record<string, unknown> = {
+    ...(need ? { need } : {}),
+    lastLeadSource: "landing-leadform",
+  };
   let contactId = await deps.findContactByPhone(orgId, normalizedPhone);
   let created = false;
   const { firstName, lastName } = splitName(name);
@@ -157,7 +242,8 @@ export async function submitLeadFormWithDeps(
     // Upsert: backfill name ONLY when the existing record's is blank; always
     // merge the latest need into customFields.
     const existing = await deps.getContactById(orgId, contactId);
-    const patch: Record<string, unknown> = { customFields, updatedAt: deps.now() };
+    const mergedCustomFields = { ...(existing?.customFields ?? {}), ...customFields };
+    const patch: Record<string, unknown> = { customFields: mergedCustomFields, updatedAt: deps.now() };
     if (existing && !(existing.firstName ?? "").trim()) patch.firstName = firstName;
     if (existing && !(existing.lastName ?? "")?.trim()) patch.lastName = lastName;
     await deps.updateContact(contactId, patch);
@@ -189,6 +275,85 @@ export async function submitLeadFormWithDeps(
     data: { name, phone: normalizedPhone, need, source: "landing-leadform" },
   }, orgId);
 
+  // CRM projection is deliberately best-effort after the required contact
+  // write. A missing org user, pipeline, or individual projection failure
+  // must not turn a successful public lead submission into a user-visible
+  // error.
+  try {
+    const activityUserId = await deps.resolveActivityUserId(orgId);
+    if (activityUserId) {
+      await deps.createActivity({
+        orgId,
+        userId: activityUserId,
+        contactId,
+        type: "note",
+        subject: "Landing form submitted",
+        body: need ? `Service: ${need}` : "Landing form submitted without a service selection.",
+        metadata: {
+          source: "landing-leadform",
+          ...(need ? { service: need } : {}),
+        },
+      });
+    } else {
+      console.warn(JSON.stringify({
+        event: "landing_lead_activity_skipped",
+        reason: "no_org_user",
+        org_id: orgId,
+        contact_id: contactId,
+      }));
+    }
+  } catch (err) {
+    console.warn(JSON.stringify({
+      event: "landing_lead_activity_projection_failed",
+      org_id: orgId,
+      contact_id: contactId,
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  }
+
+  try {
+    const pipeline = await deps.getDefaultPipeline(orgId);
+    const firstStage = pipeline?.stages[0];
+    if (pipeline && firstStage) {
+      const duplicate = await deps.hasRecentLandingDeal(
+        orgId,
+        contactId,
+        need,
+        new Date(deps.now().getTime() - LANDING_DEAL_DEDUP_WINDOW_MS),
+      );
+      if (!duplicate) {
+        const contactName = [firstName, lastName].filter(Boolean).join(" ") || "Contact";
+        await deps.createDeal({
+          orgId,
+          contactId,
+          pipelineId: pipeline.id,
+          title: need ? `${need} — ${contactName}` : `Website inquiry — ${contactName}`,
+          stage: firstStage.name,
+          probability: firstStage.probability ?? 0,
+          customFields: {
+            source: "landing-leadform",
+            ...(need ? { service: need } : {}),
+          },
+          notes: null,
+        });
+      }
+    } else {
+      console.info(JSON.stringify({
+        event: "landing_lead_deal_skipped",
+        reason: "no_default_pipeline",
+        org_id: orgId,
+        contact_id: contactId,
+      }));
+    }
+  } catch (err) {
+    console.warn(JSON.stringify({
+      event: "landing_lead_deal_projection_failed",
+      org_id: orgId,
+      contact_id: contactId,
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  }
+
   // ── Text the lead. try/catch → graceful skip when no Twilio fromNumber
   //    (sendSmsFromApi throws). suppressed=true (no throw) also ⇒ smsSent:false. ──
   let smsSent = false;
@@ -198,7 +363,9 @@ export async function submitLeadFormWithDeps(
       orgId,
       contactId,
       toNumber: normalizedPhone,
-      body: `Hi ${firstName || name}, thanks for reaching out to ${businessName}! Grab a time here: ${bookUrl} — or reply and we'll get you booked. Reply STOP to opt out.`,
+      body: bookingTemplate
+        ? `Hi ${firstName || name}, thanks for reaching out to ${businessName}! View available times here: ${bookUrl}. Reply STOP to opt out.`
+        : `Hi ${firstName || name}, thanks for reaching out to ${businessName}. We received your request. Reply STOP to opt out.`,
     });
     smsSent = !res.suppressed;
   } catch {
@@ -213,7 +380,7 @@ export async function submitLeadFormWithDeps(
 
 // ── Production deps factory ──────────────────────────────────────────────
 
-function makeDefaultDeps(): LeadFormDeps {
+function makeDefaultDeps(requestOrigin: string | null = null): LeadFormDeps {
   return {
     assertWritable: assertWritableImpl,
     resolveOrgIdBySlug: async (slug) => {
@@ -228,7 +395,7 @@ function makeDefaultDeps(): LeadFormDeps {
     findContactByPhone: findContactByPhoneImpl,
     getContactById: async (orgId, contactId) => {
       const [row] = await db
-        .select({ firstName: contacts.firstName, lastName: contacts.lastName })
+        .select({ firstName: contacts.firstName, lastName: contacts.lastName, customFields: contacts.customFields })
         .from(contacts)
         .where(and(eq(contacts.orgId, orgId), eq(contacts.id, contactId)))
         .limit(1);
@@ -242,6 +409,34 @@ function makeDefaultDeps(): LeadFormDeps {
     updateContact: async (contactId, patch) => {
       await db.update(contacts).set(patch).where(eq(contacts.id, contactId));
     },
+    resolveActivityUserId: resolveLandingActivityUserId,
+    createActivity: async (values) => {
+      await db.insert(activities).values(values);
+    },
+    getDefaultPipeline: async (orgId) => {
+      const [pipeline] = await db
+        .select({ id: pipelines.id, stages: pipelines.stages })
+        .from(pipelines)
+        .where(and(eq(pipelines.orgId, orgId), eq(pipelines.isDefault, true)))
+        .limit(1);
+      return pipeline ?? null;
+    },
+    hasRecentLandingDeal: async (orgId, contactId, service, since) => {
+      const conditions = [
+        eq(deals.orgId, orgId),
+        eq(deals.contactId, contactId),
+        isNull(deals.closedAt),
+        gt(deals.createdAt, since),
+        sql`${deals.customFields}->>'source' = 'landing-leadform'`,
+        sql`COALESCE(${deals.customFields}->>'service', '') = ${service}`,
+      ];
+      const [existing] = await db.select({ id: deals.id }).from(deals).where(and(...conditions)).limit(1);
+      return Boolean(existing);
+    },
+    createDeal: async (values) => {
+      await db.insert(deals).values(values);
+    },
+    getBookingTemplate: getPublicBookingTemplateForOrg,
     emit: (type, data, orgId) =>
       emitSeldonEvent(
         type,
@@ -250,8 +445,13 @@ function makeDefaultDeps(): LeadFormDeps {
         data as never,
         { orgId },
       ),
-    buildBookUrl: (slug, orgId) =>
-      buildWorkspaceUrls(slug, process.env.WORKSPACE_BASE_DOMAIN ?? "app.seldonframe.com", orgId).book,
+    buildBookUrl: ({ orgSlug, bookingSlug }) =>
+      buildPublicBookingUrl({
+        requestOrigin,
+        orgSlug,
+        bookingSlug,
+        baseDomain: process.env.WORKSPACE_BASE_DOMAIN ?? "app.seldonframe.com",
+      }),
     sendSms: async ({ orgId, contactId, toNumber, body }) => {
       const res = await sendSmsFromApi({ orgId, userId: null, contactId, toNumber, body });
       return { suppressed: res.suppressed };
@@ -275,5 +475,6 @@ function makeDefaultDeps(): LeadFormDeps {
  * Thin wrapper over the injectable core with production deps.
  */
 export async function submitLeadFormAction(input: LeadFormInput): Promise<LeadFormActionResult> {
-  return submitLeadFormWithDeps(input, makeDefaultDeps());
+  const requestOrigin = requestOriginFromHeaders(await headers());
+  return submitLeadFormWithDeps(input, makeDefaultDeps(requestOrigin));
 }

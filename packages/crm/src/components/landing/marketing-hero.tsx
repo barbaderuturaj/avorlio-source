@@ -34,33 +34,23 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowRight, FileText, Globe } from "lucide-react";
 
-import { MarketingDemoMarquee } from "@/components/landing/marketing-demo-marquee";
 import { heroSubmitTarget } from "@/components/landing/hero-submit-target";
 import { BorderBeam } from "@/components/ui/border-beam";
 import { Highlighter } from "@/components/ui/highlighter";
 import { AnimatedShinyText } from "@/components/ui/magic/animated-shiny-text";
-import {
-  AGENCY_HERO_HEADLINE,
-  AGENCY_HERO_SUBHEAD,
-} from "@/lib/marketing/public-claims";
 
 // Re-exported for callers that only need the pure routing decision (e.g.
 // tests) without pulling in this "use client" component.
 export { heroSubmitTarget };
 
-const URL_EXAMPLES = [
-  "https://your-clients-hvac-company.com",
-  "https://your-clients-dental-practice.com",
-  "https://your-clients-medspa.com",
-  "https://your-clients-roofing-business.com",
-  "https://your-clients-law-firm.com",
-];
+const URL_EXAMPLES = ["https://your-hvac-company.com"];
 const BIZ_EXAMPLES = [
-  "Family-owned HVAC in Stockton, CA. 24/7 emergency service. Licensed C-20, bonded, insured. 4.8 stars on Google with 412 reviews.",
-  "Dental practice in Auburn, CA. Two board-certified DDS + a periodontist. In-network with 28 PPO carriers.",
-  "Medspa on Montana Avenue. Discreet, physician-led, by appointment only. AAD Fellow on staff.",
-  "Heritage roofer in the Hudson Valley. Slate, copper, cedar. Family-owned since 1962.",
+  "HVAC company serving homeowners with heating, cooling, repair, and maintenance appointments.",
 ];
+
+const HERO_HEADLINE = "Never miss another lead.";
+const HERO_SUBHEAD =
+  "Avorlio captures leads, answers questions, qualifies prospects, books appointments, and follows up automatically.";
 
 type TabKind = "url" | "biz";
 
@@ -228,7 +218,7 @@ export function MarketingHero({
   return (
     <section
       id="top"
-      aria-label="Seldon hero"
+      aria-label="Avorlio AI front office"
       className="relative flex flex-col items-center justify-center overflow-hidden px-5 pb-24 pt-[100px] text-center md:px-8 md:pb-32 md:pt-[120px] lg:px-12"
     >
       {/* Backdrop grid now lives page-wide on the shell (landing-mode.tsx). */}
@@ -254,20 +244,19 @@ export function MarketingHero({
       <p className="inline-flex items-center gap-2.5 font-sans text-[12.5px] tracking-[0.04em] text-[#6E665A]">
         <span className="inline-block h-px w-4 bg-[#9A9183]" aria-hidden />
         <span className="sf-blink-dot inline-block size-1.5 rounded-full bg-[#1F2B24]" aria-hidden />
-        The agency delivery loop — live in minutes
+        AI front office for service businesses
       </p>
 
       {/* Headline — outcome + mechanism (the Postiz formula) */}
       <h1 className="mt-3 max-w-[22ch] text-balance font-sans text-[clamp(34px,4.8vw,56px)] font-[500] leading-[1.04] tracking-[-0.025em] text-[#221D17]">
-        {AGENCY_HERO_HEADLINE}
+        {HERO_HEADLINE}
       </h1>
 
       {/* Subhead — what runs on autopilot, concretely, then the openness line */}
       <p className="mx-auto mt-4 max-w-[68ch] text-pretty text-[clamp(15.5px,1.6vw,17.5px)] leading-[1.55] text-[#6E665A]">
         <Highlighter repeat color="rgba(31, 43, 36,0.18)">
-          {AGENCY_HERO_SUBHEAD}
-        </Highlighter>{" "}
-        You keep the client relationship, the data, and the margin.
+          {HERO_SUBHEAD}
+        </Highlighter>
       </p>
       {/* Primary CTA — routes to the chatbox, not /signup: the label promises
           a build, and the ungated build IS the trial (route-by-promise,
@@ -286,7 +275,7 @@ export function MarketingHero({
           }}
           className="inline-flex items-center gap-2.5 rounded-[11px] bg-[#1F2B24] px-6 py-3.5 text-[15px] font-[500] text-[#F6F2EA] shadow-[0_1px_2px_rgba(34,29,23,.10),0_6px_16px_rgba(34,29,23,.10),0_18px_40px_rgba(34,29,23,.06),inset_0_1.5px_0_rgba(255,255,255,.12)] transition-all hover:-translate-y-[1.5px] hover:shadow-[0_2px_4px_rgba(34,29,23,.12),0_12px_26px_rgba(34,29,23,.14),inset_0_1.5px_0_rgba(255,255,255,.14)] active:translate-y-px"
         >
-          Build your first client front office →
+          Build your AI front office →
         </a>
       </div>
 
@@ -310,7 +299,7 @@ export function MarketingHero({
           ))}
         </span>
         Runs on Claude, ChatGPT, or Gemini —{" "}
-        <strong className="font-[600]">no token markups, no usage meters. Your margin stays yours.</strong>
+        <strong className="font-[600]">Every inquiry gets a clear next step.</strong>
       </p>
 
       {/* Input form */}
@@ -382,7 +371,7 @@ export function MarketingHero({
             }}
             autoComplete="off"
             spellCheck={false}
-            placeholder="https://your-clients-hvac-company.com"
+             placeholder="https://your-hvac-company.com"
             aria-label="Paste your client's website URL"
             className="h-14 w-full border-0 bg-transparent font-mono text-[15px] text-[#221D17] caret-[#1F2B24] outline-none placeholder:text-[#9A9183]"
           />
@@ -434,16 +423,9 @@ export function MarketingHero({
       </div>
       </div>
 
-      {/* Rotating live-demo marquee — directly under the CTA/form on
-          purpose: real generated sites are stronger social proof than any
-          logo wall (anchor target for "#demos"). */}
-      <div id="demos" className="w-full scroll-mt-24">
-        <MarketingDemoMarquee />
-      </div>
-
       {/* Proof checklist */}
       <ul className="mt-6 flex flex-wrap items-center justify-center gap-x-5 gap-y-2">
-        {["Start with a client URL", "Publish a tested workspace", "AGPL-3.0 and yours to keep"].map((item) => (
+        {["Start with your business details", "Capture and qualify new leads", "Book and follow up automatically"].map((item) => (
           <li key={item} className="flex items-center gap-2 text-[13.5px] text-[#6E665A]">
             <span className="flex size-[17px] items-center justify-center rounded-full bg-[rgba(31, 43, 36,.12)] text-[10px] font-[700] text-[#1F2B24]" aria-hidden>✓</span>
             {item}

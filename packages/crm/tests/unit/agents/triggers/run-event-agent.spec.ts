@@ -1148,6 +1148,29 @@ describe("runEventAgent — L3 guardrails: quiet hours", () => {
     assert.equal(result.blocked, 0);
   });
 
+  test("review-requester default quiet hours use the resolved workspace timezone without requiring memory", async () => {
+    const noonUtc = new Date("2026-06-26T12:00:00.000Z"); // 07:00 America/Chicago
+    const { deps, smsCalls } = makeDeps({
+      findEventAgents: async () => [reviewAgent("sms")],
+      now: () => noonUtc,
+      resolveTimezone: async () => "America/Chicago",
+    });
+    const result = await runEventAgent(bookingCompleted("contact-1"), deps);
+    assert.equal(smsCalls.length, 0, "07:00 local is inside the default quiet window");
+    assert.equal(result.blocked, 1);
+  });
+
+  test("invalid resolved timezone falls back to UTC without failing the event", async () => {
+    const { deps, smsCalls } = makeDeps({
+      findEventAgents: async () => [reviewAgent("sms")],
+      now: () => FIXED_NOW,
+      resolveTimezone: async () => "not/a-timezone",
+    });
+    const result = await runEventAgent(bookingCompleted("contact-1"), deps);
+    assert.equal(smsCalls.length, 1, "12:00 UTC is outside quiet hours after fallback");
+    assert.equal(result.sent, 1);
+  });
+
   test("a blocked quiet-hours send with NO memory store still blocks (records nothing)", async () => {
     const { deps, smsCalls } = makeDeps({
       findEventAgents: async () => [reviewAgent("sms")],

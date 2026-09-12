@@ -458,9 +458,7 @@ function renderFormField(field: BookingFormField): string {
 function renderConfirmationShell(blueprint: Blueprint): string {
   const c = blueprint.booking.confirmation;
   const headline = c.headline ?? "Your booking is confirmed";
-  const message =
-    c.message ??
-    "Check your email for the confirmation. We'll see you at the scheduled time.";
+  const message = sanitizeConfirmationMessage(c.message);
   return `<div class="sf-confirm" id="sf-confirm-panel">
     <div class="sf-confirm__icon" aria-hidden="true">${ICON_CHECK_CIRCLE}</div>
     <h2 class="sf-confirm__headline">${renderEmphasis(headline)}</h2>
@@ -470,6 +468,15 @@ function renderConfirmationShell(blueprint: Blueprint): string {
       <span class="sf-btn__label">Book another time</span>
     </button>
   </div>`;
+}
+
+export function sanitizeConfirmationMessage(message: string | undefined): string {
+  const trimmed = message?.trim();
+  if (!trimmed) return "Your booking is confirmed.";
+  if (/\b(calendar invite|reply to (?:that|the) email|email (?:will|should|is)|we'?ll send)\b/i.test(trimmed)) {
+    return "Your booking is confirmed.";
+  }
+  return trimmed;
 }
 
 // ─── Footer (matches landing) ─────────────────────────────────────────
@@ -819,12 +826,7 @@ const BOOKING_INTERACTIVITY_SCRIPT = `<script data-sf-booking="calcom-month-v1">
     }).then(function(){
       showConfirmation();
     }).catch(function(){
-      // Local-file preview / API not reachable: still show confirmation.
-      // The submit-error is shown only if we have a real network error
-      // we can recover from in production deploys.
-      if (window.location.protocol === 'file:' || window.location.hostname === 'localhost') {
-        showConfirmation();
-      } else if (error) {
+      if (error) {
         error.textContent = "Couldn't book that time — try again, or call us directly.";
         error.hidden = false;
         if (submit) submit.disabled = false;

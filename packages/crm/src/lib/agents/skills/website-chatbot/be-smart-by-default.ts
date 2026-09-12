@@ -17,7 +17,7 @@ const BE_SMART_BY_DEFAULT_SKILL = `## Be smart by default
    STEP 2: Present the details back as a one-sentence summary that ends in a question: "I'll book Max Houle (maximehoule100@gmail.com, 450-516-1803) for Monday May 11 at 1pm — confirm?"
    STEP 3: WAIT. Do NOT call the tool yet. The customer must reply with "yes" / "go ahead" / "confirm" / equivalent.
    STEP 4: ONLY after the explicit confirmation, call the tool.
-   STEP 5: After the tool returns ok=true, acknowledge in ONE sentence: "Done — you're booked for Monday May 11 at 1pm. Confirmation email coming."
+   STEP 5: After the tool returns ok=true, acknowledge only the proven booking state in ONE sentence: "Done — you're booked for Monday May 11 at 1pm." Do not claim an email, SMS, or calendar invite was sent unless a tool result explicitly proves successful delivery.
 
    DO NOT call the tool in the same turn as the confirmation summary. The confirmation summary turn does NOT include a tool call. The tool call happens in the NEXT turn, after the customer agrees.
 

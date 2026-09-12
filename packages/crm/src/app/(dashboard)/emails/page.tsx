@@ -1,9 +1,10 @@
 import { Mail } from "lucide-react";
-import { and, eq, gte, isNotNull, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gte, isNotNull, ne, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { contacts } from "@/db/schema";
+import { contacts, outboundMessageSends } from "@/db/schema";
 import { getOrgId } from "@/lib/auth/helpers";
 import { createEmailTemplateAction, listEmails, listEmailTemplates } from "@/lib/emails/actions";
+import { buildDeliveryStatusCounts, formatDeliveryStatusSummary } from "@/lib/messaging/delivery-summary";
 import {
   disconnectIntegrationAction,
   getEmailIntegrationsSettings,
@@ -60,9 +61,27 @@ export default async function EmailsPage({
     });
   }
 
-  const [templates, rows, emailIntegrations, newLeadsRow, outboundTriggers] = await Promise.all([
+  const [templates, rows, outboundSendRows, emailIntegrations, newLeadsRow, outboundTriggers] = await Promise.all([
     listEmailTemplates(),
     listEmails(),
+    orgId
+      ? db
+          .select({
+            id: outboundMessageSends.id,
+            channel: outboundMessageSends.channel,
+            eventType: outboundMessageSends.eventType,
+            toAddress: outboundMessageSends.toAddress,
+            subject: outboundMessageSends.subject,
+            status: outboundMessageSends.status,
+            error: outboundMessageSends.error,
+            sentAt: outboundMessageSends.sentAt,
+            createdAt: outboundMessageSends.createdAt,
+          })
+          .from(outboundMessageSends)
+          .where(eq(outboundMessageSends.orgId, orgId))
+          .orderBy(desc(outboundMessageSends.createdAt))
+          .limit(50)
+      : Promise.resolve([]),
     getEmailIntegrationsSettings(),
     // 2026-05-18 (messaging-layer slice 1) — count contacts with an
     // email created in the last 30 days. Used as a proxy for "leads
@@ -92,6 +111,35 @@ export default async function EmailsPage({
     listOutboundTriggers().catch(() => []),
   ]);
   const newLeadsLast30Days = Number(newLeadsRow.c ?? 0);
+  const deliveryRows = [
+    ...rows.map((r) => ({
+      id: r.id,
+      channel: "email" as const,
+      toAddress: r.toEmail,
+      subject: r.subject,
+      status: r.status,
+      provider: r.provider,
+      sentAt: r.sentAt ? r.sentAt.toISOString() : null,
+      createdAt: r.createdAt ? r.createdAt.toISOString() : null,
+      error: null,
+      eventType: null,
+      source: "email-record" as const,
+    })),
+    ...outboundSendRows.map((r) => ({
+      id: r.id,
+      channel: r.channel === "sms" ? ("sms" as const) : ("email" as const),
+      toAddress: r.toAddress,
+      subject: r.subject,
+      status: r.status,
+      provider: "outbound trigger",
+      sentAt: r.sentAt ? r.sentAt.toISOString() : null,
+      createdAt: r.createdAt ? r.createdAt.toISOString() : null,
+      error: r.error,
+      eventType: r.eventType,
+      source: "outbound-send" as const,
+    })),
+  ];
+  const deliverySummary = formatDeliveryStatusSummary(buildDeliveryStatusCounts(deliveryRows));
 
   return (
     <section className="animate-page-enter space-y-4 sm:space-y-6">
@@ -112,9 +160,9 @@ export default async function EmailsPage({
         </div>
         <p className="text-sm sm:text-base text-muted-foreground mt-1">
           Send a one-off message or save a template to reuse for campaigns.{" "}
-          {rows.length > 0 && (
+          {deliveryRows.length > 0 && (
             <span className="text-muted-foreground/70">
-              {rows.length} email{rows.length !== 1 ? "s" : ""} sent so far.
+              {deliverySummary}.
             </span>
           )}
         </p>
@@ -135,14 +183,7 @@ export default async function EmailsPage({
           tag: t.tag,
           triggerEvent: t.triggerEvent ?? null,
         }))}
-        sent={rows.map((r) => ({
-          id: r.id,
-          toEmail: r.toEmail,
-          subject: r.subject,
-          status: r.status,
-          provider: r.provider,
-          sentAt: r.sentAt ? r.sentAt.toISOString() : null,
-        }))}
+        deliveries={deliveryRows}
         createTemplateAction={createEmailTemplateAction}
         emailIntegrations={
           emailIntegrations ?? {

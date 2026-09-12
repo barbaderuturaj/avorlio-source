@@ -33,15 +33,23 @@ import {
   type AgentBlueprint,
   type AgentToolCall,
   type AgentToolResult,
+  bookings,
   type AgentValidatorResult,
 } from "@/db/schema";
 import { resolveRuntimeAiClient } from "@/lib/ai/client";
 import { composeSystemPrompt, applyDeploymentPersona } from "./prompt";
 import type { DeploymentPromptPersona } from "./prompt";
-import { runValidators } from "./validators";
-import { composeCorrectionPrompt, selectFinalFallback } from "./fallbacks";
+import { runValidators, sanitizeUnbackedOperationalPromises } from "./validators";
+import { enforcePublicAgentOutput } from "./public-output";
+import {
+  composeCorrectionPrompt,
+  ensureDeterministicAssistantText,
+  selectDeterministicFinalFallback,
+  selectFinalFallback,
+} from "./fallbacks";
 import {
   getToolsForCapabilities,
+  buildAvailabilityAssistantMessage,
   type AgentTool,
   type ToolExecuteContext,
 } from "./tools";
@@ -61,9 +69,42 @@ import { bindingToCtxBooking } from "@/lib/agents/booking/binding-ctx";
 import { captureLlmGeneration } from "@/lib/analytics/llm-capture";
 import { VOICE_PROFILE_NOTE_PATH } from "@/lib/agents/voice-profile/ingest-sent-mail";
 import { buildTurnMessages, type TurnMessage } from "@/lib/agents/turn-messages";
+import {
+  boundPublicAgentMessages,
+  estimatePublicAgentTokens,
+  PUBLIC_AGENT_MIN_MESSAGE_BUDGET_TOKENS,
+  PUBLIC_AGENT_OUTPUT_RESERVE_TOKENS,
+  PUBLIC_AGENT_REQUEST_BUDGET_TOKENS,
+  PUBLIC_AGENT_RETRY_MESSAGE,
+} from "@/lib/agents/context-budget";
+import {
+  buildPublicBookingToolInput,
+  buildPublicBookingMissingFieldMessage,
+  buildPublicSlotConfirmationReadBack,
+  latestHistoricalPublicSlotSelection,
+  latestPublicBookingAttemptTurns,
+  latestSuccessfulAvailabilitySlots,
+  missingPublicBookingFields,
+  recoverPublicBookingFieldsFromTurns,
+  resolvePublicSlotSelection,
+  type PublicBookingIntakeField,
+} from "@/lib/agents/public-slot-selection";
+import {
+  enforceExplicitConfirmation,
+  isExplicitAffirmativeConfirmation,
+  latestPendingConfirmationAction,
+} from "@/lib/agents/explicit-confirmation";
+import {
+  isPublicAvailabilityRequest,
+  localDateYmd,
+  shouldForceGenericAvailabilityLookup,
+} from "@/lib/agents/public-availability-intent";
+import { formatValidatorFailureDiagnostics } from "@/lib/agents/validator-diagnostics";
 
 const MODEL = process.env.ANTHROPIC_AGENT_MODEL?.trim() || "claude-sonnet-4-5-20250929";
 const MAX_TURN_ITERATIONS = 6; // tool-call cap per single turn (catches loops)
+const PUBLIC_WEBSITE_MAX_TURN_ITERATIONS = 3;
+const PUBLIC_WEBSITE_MAX_TOOL_CALLS = 4;
 // v1.26.1 — these are Seldon's internal accounting markup for
 // billing-the-operator-for-agent-platform-usage. The OPERATOR pays
 // the LLM bill directly via their BYOK Anthropic key; Seldon makes money
@@ -349,6 +390,70 @@ export async function executeTurn(input: {
     connectors: blueprint.connectors,
   });
 
+  let publicBookingTemplateSlugs: string[] | undefined;
+  let publicBookingIntakeFields: PublicBookingIntakeField[] = [];
+  if (agent.archetype === "website-chatbot") {
+    try {
+      const templateRows = await db
+        .select({
+          bookingSlug: bookings.bookingSlug,
+          metadata: bookings.metadata,
+        })
+        .from(bookings)
+        .where(and(eq(bookings.orgId, agent.orgId), eq(bookings.status, "template")));
+      publicBookingTemplateSlugs = [...new Set(templateRows.map((row) => row.bookingSlug).filter(Boolean))];
+      if (templateRows.length === 1) {
+        const metadata = templateRows[0]?.metadata;
+        const rawFields = metadata && typeof metadata === "object"
+          ? (metadata as { intakeFields?: unknown }).intakeFields
+          : null;
+        if (Array.isArray(rawFields)) {
+          publicBookingIntakeFields = rawFields.filter(
+            (field): field is PublicBookingIntakeField =>
+              Boolean(field) &&
+              typeof field === "object" &&
+              typeof (field as { id?: unknown }).id === "string" &&
+              typeof (field as { label?: unknown }).label === "string",
+          );
+        }
+      }
+    } catch (err) {
+      // Template resolution is a safety improvement, not a reason to make the
+      // public chat unavailable. The tool keeps its conservative legacy default
+      // behavior if this optional read fails.
+      console.warn(
+        JSON.stringify({
+          event: "public_booking_templates_resolve_failed",
+          orgId: agent.orgId,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+      publicBookingTemplateSlugs = undefined;
+      publicBookingIntakeFields = [];
+    }
+  }
+
+  const anthropicTools = tools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.jsonSchema as Anthropic.Messages.Tool.InputSchema,
+  }));
+  const fixedRequestTokens =
+    estimatePublicAgentTokens(systemPrompt) + estimatePublicAgentTokens(anthropicTools);
+  const publicMessageBudget = Math.max(
+    PUBLIC_AGENT_MIN_MESSAGE_BUDGET_TOKENS,
+    PUBLIC_AGENT_REQUEST_BUDGET_TOKENS -
+      fixedRequestTokens -
+      PUBLIC_AGENT_OUTPUT_RESERVE_TOKENS,
+  );
+  const usePublicContextBudget = agent.archetype === "website-chatbot";
+  const maxTurnIterations = usePublicContextBudget
+    ? PUBLIC_WEBSITE_MAX_TURN_ITERATIONS
+    : MAX_TURN_ITERATIONS;
+  const maxToolCalls = usePublicContextBudget
+    ? PUBLIC_WEBSITE_MAX_TOOL_CALLS
+    : Number.POSITIVE_INFINITY;
+
   // v1.26.1 — BYOK. Resolve the LLM client from the workspace's
   // configured key (organizations.integrations.anthropic.apiKey,
   // encrypted at rest). Operator pays Anthropic directly; Seldon charges
@@ -433,6 +538,9 @@ export async function executeTurn(input: {
   let totalTokensOut = 0;
   const allToolCalls: AgentToolCall[] = [];
   const allToolResults: AgentToolResult[] = [];
+  let pendingAction = latestPendingConfirmationAction(history);
+  let confirmationConsumed = false;
+  let stateChangeSucceeded = false;
   let finalText = "";
 
   // Adaptive per-turn model selection — the execution-side mirror of the author
@@ -450,7 +558,124 @@ export async function executeTurn(input: {
   // assistant turn row so cost/observability reflect what was spent, not MODEL.
   let lastModelUsed = MODEL;
 
-  for (let iter = 0; iter < MAX_TURN_ITERATIONS; iter++) {
+  // Public web follow-ups can select a slot that was offered in the previous
+  // turn. Resolve that selection from persisted tool output before asking the
+  // model to interpret it; this keeps the exact machine ISO paired with the
+  // human label and avoids privacy/fallback misclassification.
+  const startsNewAvailabilityAttempt =
+    agent.archetype === "website-chatbot" &&
+    isPublicAvailabilityRequest(input.userMessage);
+  const currentPublicSelection =
+    agent.archetype === "website-chatbot"
+      ? resolvePublicSlotSelection(
+          latestSuccessfulAvailabilitySlots(history),
+          input.userMessage,
+        )
+      : { kind: "no_match" as const };
+
+  const historicalPublicSelection =
+    agent.archetype === "website-chatbot"
+      ? latestHistoricalPublicSlotSelection(history)
+      : { kind: "no_match" as const };
+
+  // A current explicit choice wins. Otherwise retain the latest valid choice
+  // while later turns collect intake. A new availability request explicitly
+  // starts a new booking attempt and must never revive an older selection.
+  const publicSelection = startsNewAvailabilityAttempt
+    ? { kind: "no_match" as const }
+    : currentPublicSelection.kind === "no_match"
+      ? historicalPublicSelection
+      : currentPublicSelection;
+
+  const bookingHistory = history.map((turn) => ({
+    role: turn.role,
+    content: typeof turn.content === "string" ? turn.content : null,
+    toolCalls: turn.toolCalls,
+    toolResults: turn.toolResults,
+  }));
+  if (!persist) {
+    bookingHistory.push({
+      role: "user",
+      content: input.userMessage,
+      toolCalls: null,
+      toolResults: null,
+    });
+  }
+  const bookingConversationTurns = latestPublicBookingAttemptTurns(bookingHistory);
+  const recoveredBookingFields =
+    recoverPublicBookingFieldsFromTurns(
+      bookingConversationTurns,
+      publicBookingIntakeFields,
+    );
+
+  const bookingTool = tools.find((tool) => tool.name === "book_appointment");
+  const availabilityTool = tools.find(
+    (tool) => tool.name === "look_up_availability",
+  );
+  const deterministicAvailabilityInput =
+    agent.archetype === "website-chatbot" &&
+    availabilityTool &&
+    shouldForceGenericAvailabilityLookup(input.userMessage)
+      ? {
+          date: localDateYmd(
+            new Date(),
+            orgRow.timezone ?? "UTC",
+          ),
+        }
+      : null;
+
+  const missingSelectionFields =
+    publicSelection.kind === "matched" && bookingTool
+      ? missingPublicBookingFields(
+          recoveredBookingFields,
+          publicBookingIntakeFields,
+          input.bookingPolicy?.requiredFields ?? [],
+        )
+      : [];
+  const firstMissingSelectionField = missingSelectionFields[0];
+  const deterministicSelectionMissingMessage =
+    buildPublicBookingMissingFieldMessage(
+      firstMissingSelectionField,
+      publicBookingIntakeFields,
+    );
+  const pendingActionToolName = pendingAction?.toolName;
+  const deterministicConfirmedAction =
+    agent.archetype === "website-chatbot" &&
+    pendingAction &&
+    isExplicitAffirmativeConfirmation(input.userMessage) &&
+    tools.some((tool) => tool.name === pendingActionToolName)
+      ? {
+          toolName: pendingAction.toolName,
+          input: {
+            ...pendingAction.input,
+            confirmed: true,
+          },
+        }
+      : null;
+
+  const deterministicBookingInput =
+    !pendingAction &&
+    publicSelection.kind === "matched" &&
+    bookingTool &&
+    recoveredBookingFields.fullName &&
+    (recoveredBookingFields.phone || recoveredBookingFields.email) &&
+    missingSelectionFields.length === 0
+      ? {
+          ...buildPublicBookingToolInput(
+            publicSelection.slot,
+            { ...recoveredBookingFields, fullName: recoveredBookingFields.fullName! },
+            publicBookingTemplateSlugs?.length === 1
+              ? publicBookingTemplateSlugs[0]
+              : undefined,
+          ),
+        }
+      : null;
+
+  turnLoop: for (let iter = 0; iter < maxTurnIterations; iter++) {
+    if (deterministicSelectionMissingMessage && iter === 0) {
+      finalText = deterministicSelectionMissingMessage;
+      break;
+    }
     const turnModel = resolveTurnModel({
       userMessage: input.userMessage,
       toolNamesAvailable,
@@ -462,32 +687,120 @@ export async function executeTurn(input: {
     let response: Anthropic.Messages.Message;
     const llmCallStartedAt = Date.now();
     try {
-      // Token economy (2026-07-16): system + tools are static across the loop
-      // AND across every turn of this conversation → one cache breakpoint
-      // each; the moving breakpoint on the last message block makes both the
-      // next loop iteration and the NEXT TURN's history rebuild a cache READ
-      // instead of full-price input. Three markers total (≤ the API's 4).
-      response = await anthropic.messages.create({
-        model: turnModel,
-        max_tokens: 1024,
-        system: cachedSystemBlocks(systemPrompt) as Anthropic.Messages.MessageCreateParams["system"],
-        tools: cachedToolParams(
-          tools.map((t) => ({
-            name: t.name,
-            description: t.description,
-            input_schema: t.jsonSchema as Anthropic.Messages.Tool.InputSchema,
-          })),
-        ) as Anthropic.Messages.ToolUnion[],
-        messages: withMovingCacheBreakpoint(
-          messages as LooseMessage[],
-        ) as Anthropic.Messages.MessageParam[],
-      });
+      if (deterministicConfirmedAction && iter === 0) {
+        response = {
+          id: "deterministic-confirmed-action",
+          type: "message",
+          role: "assistant",
+          model: turnModel,
+          content: [
+            {
+              type: "tool_use",
+              id: "deterministic-confirmed-action",
+              name: deterministicConfirmedAction.toolName,
+              input: deterministicConfirmedAction.input,
+            },
+          ],
+          stop_reason: "tool_use",
+          stop_sequence: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        } as Anthropic.Messages.Message;
+      } else if (deterministicBookingInput && iter === 0) {
+        response = {
+          id: "deterministic-slot-selection",
+          type: "message",
+          role: "assistant",
+          model: turnModel,
+          content: [
+            {
+              type: "tool_use",
+              id: "deterministic-slot-selection",
+              name: "book_appointment",
+              input: deterministicBookingInput,
+            },
+          ],
+          stop_reason: "tool_use",
+          stop_sequence: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        } as Anthropic.Messages.Message;
+      } else if (deterministicAvailabilityInput && iter === 0) {
+        response = {
+          id: "deterministic-availability",
+          type: "message",
+          role: "assistant",
+          model: turnModel,
+          content: [
+            {
+              type: "tool_use",
+              id: "deterministic-availability",
+              name: "look_up_availability",
+              input: deterministicAvailabilityInput,
+            },
+          ],
+          stop_reason: "tool_use",
+          stop_sequence: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        } as Anthropic.Messages.Message;
+      } else {
+        const bounded = usePublicContextBudget
+          ? boundPublicAgentMessages(messages, publicMessageBudget)
+          : {
+              messages,
+              originalMessageCount: messages.length,
+              includedMessageCount: messages.length,
+              estimatedTokensBefore: estimatePublicAgentTokens(messages),
+              estimatedTokensAfter: estimatePublicAgentTokens(messages),
+              trimmed: false,
+            };
+        if (usePublicContextBudget && bounded.trimmed) {
+          console.info(
+            JSON.stringify({
+              event: "agent_context_trimmed",
+              conversation_id: conv.id,
+              agent_id: agent.id,
+              original_turn_count: history.length,
+              included_turn_count: bounded.includedMessageCount,
+              estimated_tokens_before: bounded.estimatedTokensBefore + fixedRequestTokens,
+              estimated_tokens_after: bounded.estimatedTokensAfter + fixedRequestTokens,
+              model: turnModel,
+            }),
+          );
+        }
+        // Token economy (2026-07-16): system + tools are static across the loop
+        // AND across every turn of this conversation → one cache breakpoint
+        // each; the moving breakpoint on the last message block makes both the
+        // next loop iteration and the NEXT TURN's history rebuild a cache READ
+        // instead of full-price input. Three markers total (≤ the API's 4).
+        response = await anthropic.messages.create({
+          model: turnModel,
+          max_tokens: 1024,
+          system: cachedSystemBlocks(systemPrompt) as Anthropic.Messages.MessageCreateParams["system"],
+          tools: cachedToolParams(anthropicTools) as Anthropic.Messages.ToolUnion[],
+          messages: withMovingCacheBreakpoint(
+            bounded.messages as LooseMessage[],
+          ) as Anthropic.Messages.MessageParam[],
+        });
+      }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       const errClass = classifyAnthropicError(detail);
       console.error(
         `[agent-runtime] anthropic_error agentId=${agent.id} convId=${conv.id} class=${errClass.reason} err=${detail}`,
       );
+      // A confirmed booking is an irreversible state change. If the follow-up
+      // model call fails after the booking tool succeeded, continue through
+      // the normal persistence/response path with the deterministic booking
+      // confirmation instead of returning a generic failure.
+      const committedBookingResponse = enforcePublicAgentOutput(
+        "",
+        allToolCalls,
+        allToolResults,
+        orgRow.timezone ?? "UTC",
+      );
+      if (committedBookingResponse) {
+        finalText = committedBookingResponse;
+        break;
+      }
       return {
         ok: false,
         reason: errClass.reason,
@@ -496,7 +809,11 @@ export async function executeTurn(input: {
         fallbackMessage:
           conv.status === "test"
             ? `[runtime error: ${errClass.reason}] ${errClass.operatorHint}`
-            : "I'm having a hiccup. Can I have someone follow up with you? What's your email?",
+            : errClass.reason === "llm_rate_limited" || errClass.reason === "llm_overloaded"
+              ? usePublicContextBudget
+                ? PUBLIC_AGENT_RETRY_MESSAGE
+                : selectDeterministicFinalFallback([], input.userMessage)
+              : selectDeterministicFinalFallback([], input.userMessage),
       };
     }
 
@@ -506,16 +823,22 @@ export async function executeTurn(input: {
     // affect the turn loop's control flow, model selection, or error
     // handling — matches captureLlmGeneration's own fail-silent contract.
     try {
-      captureLlmGeneration({
-        distinctId: agent.orgId,
-        orgId: agent.orgId,
-        model: turnModel,
-        inputTokens: response.usage?.input_tokens ?? 0,
-        outputTokens: response.usage?.output_tokens ?? 0,
-        latencyMs: Date.now() - llmCallStartedAt,
-        traceId: conv.id,
-        surface: agent.archetype === "workspace_copilot" ? "copilot" : "agent",
-      });
+      if (
+        !(deterministicConfirmedAction && iter === 0) &&
+        !(deterministicBookingInput && iter === 0) &&
+        !(deterministicAvailabilityInput && iter === 0)
+      ) {
+        captureLlmGeneration({
+          distinctId: agent.orgId,
+          orgId: agent.orgId,
+          model: turnModel,
+          inputTokens: response.usage?.input_tokens ?? 0,
+          outputTokens: response.usage?.output_tokens ?? 0,
+          latencyMs: Date.now() - llmCallStartedAt,
+          traceId: conv.id,
+          surface: agent.archetype === "workspace_copilot" ? "copilot" : "agent",
+        });
+      }
     } catch {
       // Never let analytics affect the agent runtime loop.
     }
@@ -546,6 +869,11 @@ export async function executeTurn(input: {
       break;
     }
 
+    if (usePublicContextBudget && allToolCalls.length + toolUseBlocks.length > maxToolCalls) {
+      finalText = "I couldn't check availability right now. Please try again in a moment.";
+      break;
+    }
+
     // Append assistant message to messages history (mid-turn)
     messages.push({
       role: "assistant",
@@ -560,7 +888,19 @@ export async function executeTurn(input: {
       is_error?: boolean;
     }> = [];
     for (const tu of toolUseBlocks) {
-      allToolCalls.push({ id: tu.id, name: tu.name, input: tu.input as Record<string, unknown> });
+      if (stateChangeSucceeded) break;
+      const gatedInput = enforceExplicitConfirmation(
+        tu.name,
+        tu.input,
+        input.userMessage,
+        pendingAction,
+        confirmationConsumed,
+      );
+      allToolCalls.push({
+        id: tu.id,
+        name: tu.name,
+        input: gatedInput as Record<string, unknown>,
+      });
       // Resolve by name across the tool set we built above — which now includes
       // wrapped MCP connector tools alongside the natives. (Native-only behavior
       // is unchanged: with no connectors this is exactly `tools` = the native
@@ -582,7 +922,7 @@ export async function executeTurn(input: {
         continue;
       }
       // Validate input against schema
-      const parsed = tool.inputSchema.safeParse(tu.input);
+      const parsed = tool.inputSchema.safeParse(gatedInput);
       if (!parsed.success) {
         const result: AgentToolResult = {
           toolCallId: tu.id,
@@ -605,6 +945,13 @@ export async function executeTurn(input: {
         agentId: agent.id,
         conversationId: conv.id,
         testMode: conv.status === "test",
+        timezone: orgRow.timezone ?? "UTC",
+        bookingTemplateSlugs: publicBookingTemplateSlugs,
+        bookingIntakeFields: publicBookingIntakeFields,
+        selectedSlotLabel:
+          deterministicBookingInput && iter === 0 && publicSelection.kind === "matched"
+            ? publicSelection.slot.label
+            : undefined,
         // ICP-3 — deployed-agent calendar binding (chat/SMS/email parity with
         // voice). Undefined for workspace agents → ctx.booking stays undefined.
         // Per-client booking policy threaded alongside (P1).
@@ -612,6 +959,30 @@ export async function executeTurn(input: {
       };
       try {
         const output = await (tool as AgentTool<unknown, unknown>).execute(parsed.data, ctx);
+        if (
+          output &&
+          typeof output === "object" &&
+          (output as { needsConfirmation?: unknown }).needsConfirmation === true
+        ) {
+          pendingAction = {
+            toolName: tu.name,
+            input: {
+              ...((gatedInput as Record<string, unknown>) ?? {}),
+              confirmed: false,
+            },
+          };
+        } else if (
+          (tu.name === "book_appointment" ||
+            tu.name === "reschedule_appointment" ||
+            tu.name === "cancel_appointment") &&
+          output &&
+          typeof output === "object" &&
+          (output as { ok?: unknown }).ok === true
+        ) {
+          confirmationConsumed = true;
+          pendingAction = null;
+          stateChangeSucceeded = true;
+        }
         const result: AgentToolResult = { toolCallId: tu.id, ok: true, output };
         allToolResults.push(result);
         toolResultsForThisIter.push({
@@ -623,6 +994,29 @@ export async function executeTurn(input: {
           // The FULL output still persists on the turn row (allToolResults).
           content: serializeToolResultCapped(output),
         });
+
+        if (
+          usePublicContextBudget &&
+          output &&
+          typeof output === "object" &&
+          (output as { needsConfirmation?: unknown }).needsConfirmation === true
+        ) {
+          const readBack = (output as { readBack?: unknown }).readBack;
+          finalText =
+            deterministicBookingInput &&
+            iter === 0 &&
+            publicSelection.kind === "matched" &&
+            recoveredBookingFields.fullName
+              ? buildPublicSlotConfirmationReadBack(
+                  recoveredBookingFields.fullName,
+                  publicSelection.slot,
+                  recoveredBookingFields.service,
+                )
+              : typeof readBack === "string" && readBack.trim().length > 0
+                ? readBack
+                : "Please confirm those appointment details.";
+          break turnLoop;
+        }
       } catch (err) {
         const result: AgentToolResult = {
           toolCallId: tu.id,
@@ -640,6 +1034,19 @@ export async function executeTurn(input: {
       }
     }
 
+    if (stateChangeSucceeded) {
+      const successfulTool = allToolCalls[allToolCalls.length - 1]?.name;
+      finalText =
+        successfulTool === "book_appointment"
+          ? "Your appointment was booked."
+          : successfulTool === "reschedule_appointment"
+            ? "Your appointment was rescheduled."
+            : successfulTool === "cancel_appointment"
+              ? "Your appointment was canceled."
+              : finalText;
+      break turnLoop;
+    }
+
     // Did any tool in this iteration error? If so, the NEXT iteration is a
     // recovery turn → escalate it to the premium model via resolveTurnModel.
     priorToolError = toolResultsForThisIter.some((r) => r.is_error === true);
@@ -648,7 +1055,47 @@ export async function executeTurn(input: {
       role: "user",
       content: toolResultsForThisIter,
     });
+
+    if (usePublicContextBudget) {
+      let availabilityResult: unknown;
+      for (let i = allToolCalls.length - 1; i >= 0; i--) {
+        const call = allToolCalls[i];
+        if (call?.name !== "look_up_availability") continue;
+        availabilityResult = allToolResults.find(
+          (result) => result.toolCallId === call.id,
+        )?.output;
+        break;
+      }
+      const availabilityMessage = buildAvailabilityAssistantMessage(availabilityResult);
+      const hasAvailabilitySlots =
+        availabilityResult &&
+        typeof availabilityResult === "object" &&
+        Array.isArray((availabilityResult as { slots?: unknown }).slots) &&
+        (availabilityResult as { slots: unknown[] }).slots.length > 0;
+      const hasAvailabilityError =
+        availabilityResult &&
+        typeof availabilityResult === "object" &&
+        typeof (availabilityResult as { code?: unknown }).code === "string";
+
+      // Slots are already formatted and authoritative. Do not spend another
+      // model round-trip merely asking the model to repeat them.
+      if (availabilityMessage && (hasAvailabilitySlots || hasAvailabilityError)) {
+        finalText = availabilityMessage;
+        break;
+      }
+      if (iter + 1 >= maxTurnIterations || allToolCalls.length >= maxToolCalls) {
+        finalText = availabilityMessage ?? "I couldn't check availability right now. Please try again in a moment.";
+        break;
+      }
+    }
   }
+
+  finalText = enforcePublicAgentOutput(
+    ensureDeterministicAssistantText(finalText, [], input.userMessage),
+    allToolCalls,
+    allToolResults,
+    orgRow.timezone ?? "UTC",
+  );
 
   // 7. Run validators
   // v1.27.7 — pass full conversation context (all user turns + tool
@@ -672,7 +1119,7 @@ export async function executeTurn(input: {
   // v1.28.6 — pass soul.contact so no_pii_leak doesn't over-fire on the
   // operator's own business email/phone (sharing those is the agent's
   // job, not a privacy violation).
-  const soulForValidators = (orgRow.soul as {
+  const soulForValidators = (personaSoul as {
     services?: Array<{ name: string }>;
     voice?: { avoidWords?: string[] };
     contact?: { email?: string; phone?: string };
@@ -699,7 +1146,7 @@ export async function executeTurn(input: {
 
   let validatorResults: AgentValidatorResult[];
   let criticalFailed: boolean;
-  ({ results: validatorResults, criticalFailed } = runValidators({
+  const validatorInput = {
     response: finalText,
     userMessage: input.userMessage,
     conversationContext,
@@ -713,7 +1160,27 @@ export async function executeTurn(input: {
     recentSuccessfulTools,
     blueprint,
     soul: soulForValidators,
-  }));
+  };
+  ({ results: validatorResults, criticalFailed } = runValidators(validatorInput));
+
+  // Deterministic public-output guard. In particular, a model may produce a
+  // notification promise that a prompt correction does not remove. Strip only
+  // the unsupported delivery clause and keep a successful booking statement.
+  const sanitizedFinalText = sanitizeUnbackedOperationalPromises(
+    finalText,
+    allToolCalls,
+    allToolResults,
+  );
+  if (sanitizedFinalText !== finalText) {
+    console.warn(
+      `[agent-runtime] unsupported_operational_promise_sanitized agentId=${agent.id} convId=${conv.id}`,
+    );
+    finalText = sanitizedFinalText;
+    ({ results: validatorResults, criticalFailed } = runValidators({
+      ...validatorInput,
+      response: finalText,
+    }));
+  }
 
   // v1.28.6 — REGENERATE on critical fail (Karpathy: trust the LLM with
   // corrective context, don't replace its judgment with a hardcoded
@@ -727,8 +1194,11 @@ export async function executeTurn(input: {
     const failedNames = validatorResults
       .filter((v) => !v.passed)
       .map((v) => v.name);
+    const failedDetails = formatValidatorFailureDiagnostics(validatorResults, {
+      candidateResponse: finalText,
+    });
     console.warn(
-      `[agent-runtime] critical_validator_failed_will_regenerate agentId=${agent.id} convId=${conv.id} fails=${failedNames.join(",")}`,
+      `[agent-runtime] critical_validator_failed_will_regenerate agentId=${agent.id} convId=${conv.id} fails=${failedNames.join(",")} details=${JSON.stringify(failedDetails)}`,
     );
 
     try {
@@ -739,6 +1209,9 @@ export async function executeTurn(input: {
         ...messages,
         { role: "user", content: correctionPrompt },
       ];
+      const boundedRegen = usePublicContextBudget
+        ? boundPublicAgentMessages(regenMessages, publicMessageBudget)
+        : { messages: regenMessages };
       // Regeneration IS a hard turn — the model just produced a critically-
       // failing response and gets one chance to recover. Escalate to premium
       // (priorToolError-equivalent recovery signal). Fail-soft → MODEL.
@@ -761,7 +1234,7 @@ export async function executeTurn(input: {
         // No tools on regeneration — we want a clean text response, not
         // another tool-loop iteration. The original turn already
         // resolved any tool calls; we're fixing the FINAL TEXT.
-        messages: regenMessages as Anthropic.Messages.MessageParam[],
+        messages: boundedRegen.messages as Anthropic.Messages.MessageParam[],
       });
       totalTokensIn += regenResponse.usage?.input_tokens ?? 0;
       totalTokensOut += regenResponse.usage?.output_tokens ?? 0;
@@ -772,7 +1245,7 @@ export async function executeTurn(input: {
         .map((b) => b.text)
         .join("\n");
 
-      if (regenText) {
+      if (regenText.trim().length > 0) {
         // Re-run validators on the regenerated response.
         const second = runValidators({
           response: regenText,
@@ -798,23 +1271,54 @@ export async function executeTurn(input: {
           const stillFailed = second.results
             .filter((v) => !v.passed)
             .map((v) => v.name);
-          finalText = selectFinalFallback(stillFailed);
+          const stillFailedDetails = formatValidatorFailureDiagnostics(second.results, {
+            candidateResponse: regenText,
+          });
+          finalText = selectDeterministicFinalFallback(
+            stillFailed,
+            input.userMessage,
+          );
           validatorResults = second.results;
           console.warn(
-            `[agent-runtime] critical_validator_failed_after_regen_using_fallback agentId=${agent.id} convId=${conv.id} fails=${stillFailed.join(",")}`,
+            `[agent-runtime] critical_validator_failed_after_regen_using_fallback agentId=${agent.id} convId=${conv.id} fails=${stillFailed.join(",")} details=${JSON.stringify(stillFailedDetails)}`,
           );
         }
       } else {
         // Regeneration returned no text — shouldn't happen, but fall back.
-        finalText = selectFinalFallback(failedNames);
+        finalText = selectDeterministicFinalFallback(failedNames, input.userMessage);
       }
     } catch (regenErr) {
       console.error(
         `[agent-runtime] regen_error agentId=${agent.id} convId=${conv.id} err=${regenErr instanceof Error ? regenErr.message : String(regenErr)}`,
       );
-      finalText = selectFinalFallback(failedNames);
+      finalText = selectDeterministicFinalFallback(failedNames, input.userMessage);
     }
   }
+
+  finalText = ensureDeterministicAssistantText(
+    finalText,
+    validatorResults?.filter((v) => !v.passed).map((v) => v.name) ?? [],
+    input.userMessage,
+  );
+
+  // Re-apply the same final guard after any model regeneration/fallback and
+  // recompute validator results so persisted/reporting state matches the text
+  // actually returned to the public caller.
+  const finalSanitizedText = enforcePublicAgentOutput(
+    finalText,
+    allToolCalls,
+    allToolResults,
+    orgRow.timezone ?? "UTC",
+  );
+  if (finalSanitizedText !== finalText) {
+    finalText = finalSanitizedText;
+  }
+  // Always recompute once more so persisted/reporting validator state describes
+  // exactly the text returned after deterministic output enforcement.
+  ({ results: validatorResults, criticalFailed } = runValidators({
+    ...validatorInput,
+    response: finalText,
+  }));
 
   // 8. Persist assistant turn
   const latencyMs = Date.now() - t0;
@@ -888,7 +1392,20 @@ export async function executeTurn(input: {
   // reachable today (the retry always follows an already-persisted first
   // turn), but cheap to close off.
   if (persist && nextTurnIndex === 0 && conv.status !== "test") {
-    await writeFirstTurnActivity(agent, orgRow.id, conv.id, input.userMessage);
+    try {
+      await writeFirstTurnActivity(agent, orgRow.id, conv.id, input.userMessage);
+    } catch (err) {
+      // CRM timeline enrichment is best-effort. The agent turn and any
+      // irreversible booking tool result must remain visible to the visitor.
+      console.error(
+        JSON.stringify({
+          event: "agent_first_turn_activity_failed",
+          orgId: orgRow.id,
+          conversationId: conv.id,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    }
   }
 
   return {

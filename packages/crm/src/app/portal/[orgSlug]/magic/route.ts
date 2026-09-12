@@ -9,6 +9,33 @@
 import { NextRequest, NextResponse } from "next/server";
 import { consumeOperatorMagicLink } from "@/lib/operator-portal/auth";
 
+function resolveOperatorRedirectOrigin(request: NextRequest): string {
+  for (const configured of [
+    process.env.NEXT_PUBLIC_APP_URL,
+    process.env.NEXTAUTH_URL,
+    process.env.AUTH_URL,
+  ]) {
+    const value = configured?.trim();
+    if (!value) continue;
+
+    try {
+      const url = new URL(value);
+      if (url.protocol === "http:" || url.protocol === "https:") {
+        return url.origin;
+      }
+    } catch {
+      // Try the next configured origin rather than trusting request headers.
+    }
+  }
+
+  const requestUrl = new URL(request.url);
+  if (["localhost", "127.0.0.1", "[::1]"].includes(requestUrl.hostname)) {
+    return requestUrl.origin;
+  }
+
+  throw new Error("Operator portal redirect origin is not configured");
+}
+
 export async function GET(
   request: NextRequest,
   context: { params: Promise<{ orgSlug: string }> },
@@ -35,6 +62,10 @@ export async function GET(
   // so after sign-in the operator continues straight into the app they
   // launched. An explicit ?redirect= (relative) still wins.
   const target =
-    redirectTo && redirectTo.startsWith("/") ? redirectTo : `/portal/${orgSlug}`;
-  return NextResponse.redirect(new URL(target, request.url));
+    redirectTo && redirectTo.startsWith("/") && !redirectTo.startsWith("//")
+      ? redirectTo
+      : `/portal/${orgSlug}`;
+  return NextResponse.redirect(
+    new URL(target, resolveOperatorRedirectOrigin(request)),
+  );
 }

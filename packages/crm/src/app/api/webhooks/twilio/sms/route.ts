@@ -10,6 +10,10 @@ import { classifyInboundIntent, shouldAutoReplyForIntent } from "@/lib/messaging
 import { findContactByPhone, persistInboundSms } from "@/lib/sms/api";
 import { toE164 } from "@/lib/sms/providers";
 import { addPhoneSuppression, isHelpKeyword, isStopKeyword } from "@/lib/sms/suppression";
+import {
+  buildUnmatchedInboundSmsLogPayload,
+  recordTwilioStatusEventOnce,
+} from "@/lib/sms/twilio-webhook-idempotency";
 import { verifyTwilioSignature } from "@/lib/sms/webhook-verify";
 import { dispatchTwilioInboundForMessageTriggers } from "@/lib/agents/message-trigger-wiring";
 import type { OrgSoul } from "@/lib/soul/types";
@@ -125,19 +129,35 @@ async function handleStatusCallback(params: {
     return { matched: false };
   }
 
-  const providerEventId = `${params.status}:${params.externalMessageId}:${Date.now()}`;
-
-  await db
-    .insert(smsEvents)
-    .values({
+  const eventResult = await recordTwilioStatusEventOnce(
+    {
       orgId: params.orgId,
       smsMessageId: row.id,
-      eventType: `sms.${params.status}`,
-      provider: "twilio",
-      providerEventId,
-      payload: params.rawBody,
-    })
-    .onConflictDoNothing({ target: [smsEvents.provider, smsEvents.providerEventId] });
+      externalMessageId: params.externalMessageId,
+      status: params.status,
+      rawBody: params.rawBody,
+    },
+    {
+      insertEvent: async (event) => {
+        const [createdEvent] = await db
+          .insert(smsEvents)
+          .values(event)
+          .onConflictDoNothing({ target: [smsEvents.provider, smsEvents.providerEventId] })
+          .returning({ id: smsEvents.id });
+        return createdEvent ?? null;
+      },
+    },
+  );
+
+  if (!eventResult.inserted) {
+    logEvent("twilio_webhook_status_duplicate", {
+      org_id: params.orgId,
+      external_id: params.externalMessageId,
+      status: params.status,
+      provider_event_id: eventResult.providerEventId,
+    });
+    return { matched: true, duplicate: true };
+  }
 
   switch (params.status) {
     case "delivered":
@@ -181,7 +201,7 @@ async function handleStatusCallback(params: {
       break;
   }
 
-  return { matched: true };
+  return { matched: true, duplicate: false };
 }
 
 export async function POST(request: Request) {
@@ -298,6 +318,17 @@ export async function POST(request: Request) {
   }
 
   const contactId = await findContactByPhone(orgId, fromNumber);
+  if (!contactId) {
+    logEvent(
+      "twilio_webhook_unmatched_inbound_sms",
+      buildUnmatchedInboundSmsLogPayload({
+        orgId,
+        fromNumber,
+        toNumber,
+        externalMessageId,
+      }),
+    );
+  }
 
   const inbound = await persistInboundSms({
     orgId,
@@ -308,6 +339,22 @@ export async function POST(request: Request) {
     externalMessageId,
     metadata: { twilio: body },
   });
+  if (inbound.duplicate) {
+    logEvent("twilio_webhook_inbound_duplicate", {
+      org_id: orgId,
+      contact_id: inbound.contactId ?? contactId,
+      from: fromNumber,
+      to: toNumber,
+      external_id: externalMessageId,
+      sms_message_id: inbound.id,
+    });
+    return NextResponse.json({
+      ok: true,
+      matched: true,
+      duplicate: true,
+      contactId: inbound.contactId ?? contactId,
+    });
+  }
 
   // 2026-05-18 — precedence check (moved up). If a conversation step
   // is currently paused on sms.replied for this contact (e.g.

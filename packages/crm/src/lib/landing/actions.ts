@@ -346,7 +346,7 @@ export async function publishLandingPageAction(pageId: string, published: boolea
 
 export async function getPublicLandingPage(orgSlug: string, slug: string) {
   const [org] = await db
-    .select({ id: organizations.id, name: organizations.name, settings: organizations.settings })
+    .select({ id: organizations.id, name: organizations.name, settings: organizations.settings, soul: organizations.soul })
     .from(organizations)
     .where(eq(organizations.slug, orgSlug))
     .limit(1);
@@ -365,7 +365,7 @@ export async function getPublicLandingPage(orgSlug: string, slug: string) {
     return null;
   }
 
-  return { orgId: org.id, orgName: org.name, orgSettings: org.settings, page };
+  return { orgId: org.id, orgName: org.name, orgSettings: org.settings, orgSoul: org.soul, page };
 }
 
 export async function trackLandingVisitAction({ pageId, visitorId }: { pageId: string; visitorId: string }) {

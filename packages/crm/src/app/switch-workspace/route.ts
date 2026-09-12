@@ -41,17 +41,21 @@ const COOKIE_OPTIONS = {
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
+  const redirectOrigin = resolveRedirectOrigin(
+    url.origin,
+    process.env.NEXT_PUBLIC_APP_URL,
+  );
   const targetOrgId = url.searchParams.get("to")?.trim() ?? "";
   const rawNext = url.searchParams.get("next")?.trim() ?? "/dashboard";
   const next = sanitizeNext(rawNext);
 
   if (!targetOrgId) {
-    return NextResponse.redirect(new URL(next, url.origin));
+    return NextResponse.redirect(new URL(next, redirectOrigin));
   }
 
   const session = await auth();
   if (!session?.user?.id) {
-    const loginUrl = new URL("/login", url.origin);
+    const loginUrl = new URL("/login", redirectOrigin);
     loginUrl.searchParams.set(
       "next",
       `/switch-workspace?to=${encodeURIComponent(targetOrgId)}&next=${encodeURIComponent(next)}`
@@ -61,10 +65,10 @@ export async function GET(request: Request) {
 
   const access = await checkWorkspaceAccess(session.user.id, targetOrgId);
   if (!access.allowed) {
-    return NextResponse.redirect(new URL("/dashboard?switch=denied", url.origin));
+    return NextResponse.redirect(new URL("/dashboard?switch=denied", redirectOrigin));
   }
 
-  const response = NextResponse.redirect(new URL(next, url.origin));
+  const response = NextResponse.redirect(new URL(next, redirectOrigin));
   response.cookies.set(COOKIE_NAME, targetOrgId, COOKIE_OPTIONS);
   return response;
 }
@@ -139,6 +143,20 @@ async function checkWorkspaceAccess(
   }
 
   return { allowed: false };
+}
+
+function resolveRedirectOrigin(
+  requestOrigin: string,
+  configuredAppUrl?: string,
+): string {
+  const configured = configuredAppUrl?.trim();
+  if (!configured) return requestOrigin;
+
+  try {
+    return new URL(configured).origin;
+  } catch {
+    return requestOrigin;
+  }
 }
 
 function sanitizeNext(value: string): string {

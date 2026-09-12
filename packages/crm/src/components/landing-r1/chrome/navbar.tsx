@@ -27,7 +27,6 @@ const ARCHETYPES_WITHOUT_NAVBAR: AestheticArchetypeId[] = [
 
 const DEFAULT_SECTIONS = [
   { label: "Services", href: "#services" },
-  { label: "Reviews", href: "#reviews" },
   { label: "FAQ", href: "#faq" },
   { label: "Contact", href: "#contact" },
 ];
@@ -77,8 +76,10 @@ export type NavbarProps = {
   phone: string;
   /** City · City · City tagline shown under the wordmark on desktop. */
   serviceAreas?: string[];
-  /** Anchor links — defaults to Services / Reviews / FAQ / Contact. */
+  /** Anchor links — defaults to Services / FAQ / Contact. */
   sections?: { label: string; href: string }[];
+  /** Render the reviews anchor only when verified testimonials exist. */
+  showReviews?: boolean;
   /** Multi-page: when non-empty, render a Services dropdown linking to each
    *  service detail page. Empty/omitted → no dropdown (current behavior). */
   servicePages?: NavServiceLink[];
@@ -104,6 +105,7 @@ export function Navbar({
   homeHref = "/",
   cta,
   logoUrl,
+  showReviews = false,
 }: NavbarProps) {
   if (ARCHETYPES_WITHOUT_NAVBAR.includes(archetype)) return null;
 
@@ -112,7 +114,10 @@ export function Navbar({
   // When the Services dropdown is shown, the plain "Services" anchor in
   // `sections` duplicates it — drop it so the nav never shows "Services"
   // twice (bug caught by vision-verify on a live r1 site, 2026-07-05).
-  const anchorSections = sectionsForNav(sections, serviceLinks.length > 0);
+  const anchorSections = sectionsForNav(
+    showReviews ? [...sections, { label: "Reviews", href: "#reviews" }] : sections,
+    serviceLinks.length > 0,
+  );
   const areaLine = serviceAreas && serviceAreas.length > 0
     ? serviceAreas.slice(0, 4).join(" · ")
     : null;

@@ -95,6 +95,30 @@ function normalizeBody(raw: unknown): ServicePageBody[] {
   return out;
 }
 
+type GridService = GenerateServicePagesArgs["gridServices"][number];
+
+/** Build a valid service page from only the real grid service data. */
+function buildFallbackServicePage(gridSvc: GridService): ServicePage | null {
+  const slug = serviceSlug(gridSvc.name);
+  if (!slug) return null;
+
+  return {
+    slug,
+    name: gridSvc.name,
+    summary: gridSvc.description,
+    body: [{ kind: "paragraph", text: gridSvc.description }],
+    ctaLabel: "Get a free estimate",
+    ...(gridSvc.photo ? { heroPhoto: gridSvc.photo } : {}),
+  };
+}
+
+function buildFallbackPages(gridServices: GridService[]): ServicePage[] {
+  return gridServices.flatMap((gridSvc) => {
+    const page = buildFallbackServicePage(gridSvc);
+    return page && validateSiteTree({ servicePages: [page] }).valid ? [page] : [];
+  });
+}
+
 // ── Public args type ─────────────────────────────────────────────────────────
 
 export type GenerateServicePagesArgs = {
@@ -182,7 +206,7 @@ export async function generateServicePages(
         message: msg.slice(0, 500),
       }),
     );
-    return [];
+    return buildFallbackPages(gridServices);
   }
 
   // ── Parse ─────────────────────────────────────────────────────────────────
@@ -196,7 +220,7 @@ export async function generateServicePages(
         stop_reason: rawResponse.stop_reason ?? "?",
       }),
     );
-    return [];
+    return buildFallbackPages(gridServices);
   }
 
   const cleaned = stripFences(rawText);
@@ -212,7 +236,7 @@ export async function generateServicePages(
         preview: cleaned.slice(0, 300),
       }),
     );
-    return [];
+    return buildFallbackPages(gridServices);
   }
 
   // Extract the servicePages array from the LLM output.
@@ -249,7 +273,10 @@ export async function generateServicePages(
   for (const gridSvc of gridServices) {
     const llmEntry = llmByName.get(gridSvc.name.toLowerCase().trim());
     if (!llmEntry) {
-      // No LLM content for this service — skip (keeps count ≤ real, no fabrication).
+      const fallback = buildFallbackServicePage(gridSvc);
+      if (fallback && validateSiteTree({ servicePages: [fallback] }).valid) {
+        out.push(fallback);
+      }
       continue;
     }
 

@@ -53,6 +53,8 @@ export type ValidatorContext = {
   soul: {
     services?: Array<{ name: string }>;
     voice?: { avoidWords?: string[] };
+    emergency_service?: boolean;
+    same_day?: boolean;
     /** v1.28.6 — operator's OWN business contact info. Not PII to
      *  protect — it's the contact the agent SHOULD share when asked
      *  "how do I reach you?". Validator allowlists these so the agent
@@ -366,6 +368,569 @@ const noHallucinatedStateChange: Validator = {
   },
 };
 
+// ─── 7. no_unsupported_emergency_claims ───────────────────────────────────
+//
+// Catches: model turns a generic "emergency service" service/category into
+// stronger operational claims: 24/7 coverage, on-call staff, immediate
+// dispatch, same-day guarantees, or emergency-services advice without a
+// user-described safety hazard.
+
+const SAFETY_HAZARD_PATTERN =
+  /\b(gas smell|smell gas|smoke|fire|sparks?|carbon monoxide|co alarm|fumes|electrical shock|flames)\b/i;
+
+const EMERGENCY_SERVICE_ADVICE_PATTERN =
+  /\b(911|emergency services|fire department|evacuate|leave (the )?(home|house|building)|get (out|outside))\b/i;
+
+const UNSUPPORTED_EMERGENCY_CLAIMS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /\b24\s*\/\s*7\b|\b24-hour\b|\baround[- ]the[- ]clock\b/i, label: "24/7 coverage" },
+  { pattern: /\bon[- ]call\b/i, label: "on-call staffing" },
+  {
+    pattern:
+      /\b((immediate|right away|asap)\s+(dispatch|service|technician|tech|response)|dispatch\s+(immediately|right away|asap))\b/i,
+    label: "immediate dispatch/response",
+  },
+  { pattern: /\bguaranteed\s+same[- ]day\b|\bsame[- ]day\s+(guarantee|guaranteed)\b/i, label: "guaranteed same-day service" },
+];
+
+const noUnsupportedEmergencyClaims: Validator = {
+  name: "no_unsupported_emergency_claims",
+  severity: "critical",
+  run: ({ response, userMessage }) => {
+    const failures: string[] = [];
+
+    for (const claim of UNSUPPORTED_EMERGENCY_CLAIMS) {
+      if (claim.pattern.test(response)) failures.push(claim.label);
+    }
+
+    if (
+      EMERGENCY_SERVICE_ADVICE_PATTERN.test(response) &&
+      !SAFETY_HAZARD_PATTERN.test(userMessage)
+    ) {
+      failures.push("emergency-services advice without a described safety hazard");
+    }
+
+    if (failures.length === 0) {
+      return { name: "no_unsupported_emergency_claims", passed: true };
+    }
+    return {
+      name: "no_unsupported_emergency_claims",
+      passed: false,
+      details: `Unsupported emergency/safety claims: ${[...new Set(failures)].join(", ")}`,
+    };
+  },
+};
+
+// ─── 8. availability_times_from_tool ───────────────────────────────────────
+//
+// If the assistant offers concrete appointment availability, those concrete
+// slots must match the labels returned by successful look_up_availability
+// results. Business-hour statements are intentionally out of scope.
+
+const APPOINTMENT_TIME_PATTERN =
+  /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday),?\s+([a-z]+)\s+(\d{1,2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/gi;
+
+const APPOINTMENT_AVAILABILITY_LANGUAGE =
+  /\b(next|available|availability|open|opening|openings|slot|slots|appointment|appointments|time|times)\b/i;
+
+function normalizeSlotText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/\u202f|\u00a0/g, " ")
+    .replace(/[.,]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function canonicalAppointmentTime(match: RegExpMatchArray): string {
+  const weekday = match[1] ?? "";
+  const month = match[2] ?? "";
+  const day = String(Number(match[3] ?? "0"));
+  const hour = String(Number(match[4] ?? "0"));
+  const minute = match[5] ?? "00";
+  const meridiem = match[6] ?? "";
+  return `${weekday} ${month} ${day} at ${hour}:${minute} ${meridiem}`.toLowerCase();
+}
+
+function collectAvailabilitySlotLabels(
+  calls: readonly AgentToolCall[],
+  results: readonly AgentToolResult[],
+): Set<string> {
+  const labels = new Set<string>();
+  for (const call of calls) {
+    if (call.name !== "look_up_availability") continue;
+    const result = results.find((r) => r.toolCallId === call.id);
+    if (!result?.ok || !result.output || typeof result.output !== "object") continue;
+    const output = result.output as { slots?: unknown };
+    if (!Array.isArray(output.slots)) continue;
+    for (const rawSlot of output.slots) {
+      if (!rawSlot || typeof rawSlot !== "object") continue;
+      const slot = rawSlot as { label?: unknown; iso?: unknown };
+      if (typeof slot.label === "string" && slot.label.trim()) {
+        labels.add(normalizeSlotText(slot.label));
+        const labelMatch = Array.from(slot.label.matchAll(APPOINTMENT_TIME_PATTERN))[0];
+        if (labelMatch) labels.add(canonicalAppointmentTime(labelMatch));
+      }
+      if (typeof slot.iso === "string" && slot.iso.trim()) {
+        labels.add(normalizeSlotText(slot.iso));
+      }
+    }
+  }
+  return labels;
+}
+
+const availabilityTimesFromTool: Validator = {
+  name: "availability_times_from_tool",
+  severity: "critical",
+  run: ({ response, turnToolCalls, turnToolResults }) => {
+    const offeredTimes = Array.from(response.matchAll(APPOINTMENT_TIME_PATTERN));
+    if (
+      offeredTimes.length === 0 ||
+      !APPOINTMENT_AVAILABILITY_LANGUAGE.test(response)
+    ) {
+      return { name: "availability_times_from_tool", passed: true };
+    }
+
+    const allowedLabels = collectAvailabilitySlotLabels(
+      turnToolCalls ?? [],
+      turnToolResults ?? [],
+    );
+
+    const unsupported = offeredTimes
+      .map((match) => ({
+        raw: match[0],
+        canonical: canonicalAppointmentTime(match),
+      }))
+      .filter((offered) => {
+        if (allowedLabels.has(normalizeSlotText(offered.raw))) return false;
+        if (allowedLabels.has(offered.canonical)) return false;
+        for (const label of allowedLabels) {
+          if (label.includes(offered.canonical)) return false;
+        }
+        return true;
+      });
+
+    if (unsupported.length === 0) {
+      return { name: "availability_times_from_tool", passed: true };
+    }
+    return {
+      name: "availability_times_from_tool",
+      passed: false,
+      details: `Assistant offered appointment times not returned by look_up_availability: ${unsupported.map((s) => s.raw).join(", ")}`,
+    };
+  },
+};
+
+// ─── 9. no_unbacked_operational_promises ──────────────────────────────────
+//
+// escalate_to_human returning ok:true proves only that the handoff was
+// recorded. It does not prove a recipient identity, dispatch path, technician
+// assignment, callback method, or response-time promise unless the tool result
+// starts returning those facts explicitly.
+
+const ESCALATION_ACK_PATTERN =
+  /\b(i'?ve|i have)\s+(passed|forwarded|escalated|sent)\b|\bpassed this to the team\b|\bescalated this for human follow-up\b/i;
+
+const ESCALATION_RECIPIENT_CLAIMS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /\bemergency team\b/i, label: "emergency team" },
+  { pattern: /\bdispatch team\b/i, label: "dispatch team" },
+  {
+    pattern:
+      /\b(?:(?:i'?ve|i have)\s+(?:passed|forwarded|escalated|sent)\b|(?:send|dispatch|arrange)\b)[^.!?\n]{0,80}\b(?:technician|tech)s?\b|\b(?:technician|tech)s?\b[^.!?\n]{0,80}\b(?:will|is going to)\s+(?:be there|arrive|come out|contact|call|reach out|follow up)\b/i,
+    label: "technician",
+  },
+];
+
+const ESCALATION_TIMING_OR_CALLBACK_CLAIMS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /\bshortly\b/i, label: "shortly" },
+  { pattern: /\bright away\b|\basap\b|\bimmediately\b/i, label: "immediate response" },
+  { pattern: /\bwithin\s+\d+\s+(minute|minutes|hour|hours)\b/i, label: "specific response time" },
+  { pattern: /\b(will|they'?ll|someone will|team will)\s+(call|phone|text|email|contact|reach out|follow up)\b/i, label: "guaranteed callback/contact" },
+  { pattern: /\bcall you back\b/i, label: "callback offer" },
+  { pattern: /\bcontact you\b/i, label: "contact offer" },
+];
+
+const OPERATIONAL_PROMISE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /\b(send|dispatch|arrange)\s+(a\s+)?(technician|tech|someone|team|emergency help|emergency technician)\b/i, label: "send/dispatch someone" },
+  { pattern: /\bwe('?ll| will)\s+(send|dispatch|arrange)\b/i, label: "promise to send or dispatch" },
+  { pattern: /\bwe can\s+(send|dispatch|arrange|call|contact|follow up)\b/i, label: "we can operational promise" },
+  { pattern: /\bi can\s+(have\s+someone\s+)?(send|dispatch|arrange|call|contact|follow up)\b/i, label: "i can operational promise" },
+  { pattern: /\bwould you like us to\s+(send|dispatch|arrange|call|contact|follow up)\b/i, label: "operational offer" },
+  { pattern: /\blet me(?: have)?\s+(someone|a technician|the team|us)\s+(call|contact|reach out|follow up|send|dispatch|arrange)\b/i, label: "operational offer" },
+  { pattern: /\b(call|contact|follow up with|reach out to)\s+you\b/i, label: "callback/contact promise" },
+  { pattern: /\b(you('?ll| will)\s+be\s+(called|contacted|reached out to)\b|\bthere'?ll\s+be\s+a\s+follow[- ]up\s+call\b)/i, label: "guaranteed callback/contact" },
+  { pattern: /\b(shortly|later|soon|as soon as possible|right away|immediately)\b/i, label: "time promise" },
+];
+
+const NOTIFICATION_DELIVERY_CLAIMS: Array<{ pattern: RegExp; label: string }> = [
+  {
+    pattern:
+      /\b(?:a\s+)?(?:confirmation\s+)?(?:text|sms|email|calendar invite)\s+(?:will|is going to|should)\s+(?:be\s+)?(?:sent|delivered|arrive|come)(?:\s+(?:shortly|soon|later|in\s+a\s+moment))?\b/i,
+    label: "unverified notification delivery",
+  },
+  {
+    pattern:
+      /\b(?:we|i)\s+(?:will|can)\s+send\s+(?:a\s+)?(?:confirmation\s+)?(?:text|sms|email|calendar invite)\b/i,
+    label: "unverified notification delivery",
+  },
+  {
+    pattern:
+      /\b(?:a\s+)?(?:confirmation\s+)?(?:text|sms|email|calendar invite)\s+(?:has been|was)\s+(?:sent|delivered)\b/i,
+    label: "unverified notification delivery",
+  },
+  {
+    pattern:
+      /\b(?:a\s+)?(?:confirmation\s+)?(?:text|sms|email)(?:\s*\/\s*(?:text|sms|email))?\s+(?:is|are)\s+on\s+its\s+way\b/i,
+    label: "unverified notification delivery",
+  },
+  {
+    pattern:
+      /\b(?:you(?:'ll|\s+will)\s+(?:receive|get)\s+(?:a\s+)?(?:confirmation\s+)?(?:text|sms|email|calendar invite))(?:\s+(?:shortly|soon|later|in\s+ a\s+moment))?\b/i,
+    label: "unverified notification delivery",
+  },
+];
+
+const HANDOFF_TIMING_SENTENCE =
+  /(?:^|(?<=[.!?])\s+)[^.!?]*\b(?:team|someone|they|we|i)\b[^.!?]*\b(?:follow(?:\s*up)?|contact|call|reach out|be in touch)\b[^.!?]*\b(?:shortly|soon|today|right away|immediately|within\s+(?:a|an|one|\d+)\s+(?:minute|minutes|hour|hours))\b[^.!?]*[.!?]?/gi;
+
+const SERVICE_PROMISE_PATTERN =
+  /\b(offer|offers|provide|provides|schedule|book|arrange|set up|can do|can help with|we do|we handle)\b[^.!?\n]{0,80}\b(inspection|inspections|service|visit|repairs?|maintenance|check[- ]?ups?|diagnostic|assessment)\b/gi;
+
+// Generic booking intent is not a new service-catalog claim. Keep this
+// deliberately narrow: "schedule/arrange a service visit" is allowed, while
+// "schedule a gas-leak inspection" must still match a configured service.
+const GENERIC_BOOKING_ACTION_PATTERN =
+  /\b(schedule|book|set up|arrange)\b[^.!?\n]{0,40}\b(?:visit|appointment)\b/i;
+
+const GENERIC_APPOINTMENT_PATTERN =
+  /\b(?:(?:a|an|the|our|your|this|that)\s+)?appointment\b(?:\s+for\s+(?:that|this|the)\s+service)?/i;
+
+const GENERIC_SERVICE_VISIT_PATTERN =
+  /\b(?:(?:a|an|the|our|your|this|that)\s+)?(?:plumbing\s+)?service\s+(?:visit|appointment)\b/i;
+
+const NAMED_SERVICE_VISIT_MODIFIER_PATTERN =
+  /\b(?!(?:a|an|the|our|your|this|that|plumbing)\b)[a-z][a-z-]*\s+service\s+(?:visit|appointment)\b/i;
+
+const NAMED_PLUMBING_SERVICE_VISIT_MODIFIER_PATTERN =
+  /\b(?!(?:a|an|the|our|your|this|that)\b)[a-z][a-z-]*\s+plumbing\s+service\s+(?:visit|appointment)\b/i;
+
+const NAMED_SERVICE_CATALOG_TERM_PATTERN =
+  /\b(inspection|inspections|repairs?|maintenance|check[- ]?ups?|diagnostic|assessment)\b/i;
+
+function isGenericBookingActionClaim(claimText: string): boolean {
+  return (
+    GENERIC_BOOKING_ACTION_PATTERN.test(claimText) &&
+    (isGenericServiceVisitClaim(claimText) || isGenericAppointmentClaim(claimText))
+  );
+}
+
+function isGenericBookingArrangeResponse(response: string, matchText: string): boolean {
+  return /\barrange\b/i.test(matchText) && isGenericBookingActionClaim(response);
+}
+
+function isGenericAppointmentClaim(claimText: string): boolean {
+  const normalizedClaim = normalizeSlotText(claimText);
+  return (
+    GENERIC_APPOINTMENT_PATTERN.test(normalizedClaim) &&
+    !NAMED_SERVICE_CATALOG_TERM_PATTERN.test(normalizedClaim)
+  );
+}
+
+function isGenericServiceVisitClaim(claimText: string): boolean {
+  const normalizedClaim = normalizeSlotText(claimText);
+  if (!GENERIC_SERVICE_VISIT_PATTERN.test(normalizedClaim)) return false;
+  if (NAMED_SERVICE_VISIT_MODIFIER_PATTERN.test(normalizedClaim)) return false;
+  if (NAMED_PLUMBING_SERVICE_VISIT_MODIFIER_PATTERN.test(normalizedClaim)) return false;
+
+  const withoutGenericVisit = normalizedClaim.replace(
+    /\b(?:(?:a|an|the|our|your|this|that)\s+)?(?:plumbing\s+)?service\s+(?:visit|appointment)\b/g,
+    " ",
+  );
+  return !NAMED_SERVICE_CATALOG_TERM_PATTERN.test(withoutGenericVisit);
+}
+
+function serviceMentionIsSupported(
+  claimText: string,
+  services: Array<{ name: string }> | undefined,
+): boolean {
+  const normalizedClaim = normalizeSlotText(claimText);
+  if (!normalizedClaim) return false;
+
+  const canonicalize = (value: string): string => {
+    const normalizedValue = normalizeSlotText(value);
+    return normalizedValue
+      .replace(/[-_]/g, " ")
+      .replace(/\bair conditioner\b/g, "ac")
+      .replace(/\bair conditioning\b/g, "ac")
+      .replace(/\ba\/c\b/g, "ac")
+      .replace(/\baircon\b/g, "ac");
+  };
+
+  const canonicalClaim = canonicalize(normalizedClaim);
+  return (services ?? []).some((service) => {
+    const normalizedService = normalizeSlotText(service.name);
+    const canonicalService = canonicalize(normalizedService);
+    return (
+      normalizedService.length > 0 &&
+      (normalizedClaim.includes(normalizedService) ||
+        normalizedService.includes(normalizedClaim) ||
+        canonicalClaim.includes(canonicalService) ||
+        canonicalService.includes(canonicalClaim))
+    );
+  });
+}
+
+function pricingFactLabelSupportsServiceClaim(
+  claimText: string,
+  pricingFacts: AgentBlueprint["pricingFacts"] | undefined,
+): boolean {
+  const normalizedClaim = normalizeSlotText(claimText);
+  if (!normalizedClaim) return false;
+  const claimSubject = canonicalizePricingServiceLabel(
+    normalizedClaim.replace(
+      /^.*\b(?:offer|offers|provide|provides|schedule|book|arrange|set up|can do|can help with|we do|we handle)\b\s*/i,
+      "",
+    ),
+  );
+  if (!claimSubject || isBareGenericServiceVisitSubject(claimSubject)) {
+    return false;
+  }
+
+  return (pricingFacts ?? []).some((fact) => {
+    const normalizedLabel = canonicalizePricingServiceLabel(fact.label);
+    return (
+      normalizedLabel.length > 0 &&
+      (normalizedClaim.includes(normalizedLabel) ||
+        normalizedLabel.includes(claimSubject) ||
+        claimSubject.includes(normalizedLabel))
+    );
+  });
+}
+
+function canonicalizePricingServiceLabel(value: string): string {
+  return normalizeSlotText(value)
+    .replace(/[-_]/g, " ")
+    .replace(/\bservices\b/g, "service")
+    .replace(/\bvisits\b/g, "visit")
+    .replace(/\bappointments\b/g, "appointment")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isBareGenericServiceVisitSubject(value: string): boolean {
+  return /^(?:(?:a|an|the|our|your|this|that)\s+)?service(?:\s+(?:visit|appointment))?$/.test(
+    value,
+  );
+}
+
+function successfulToolOutputs(
+  toolName: string,
+  calls: readonly AgentToolCall[],
+  results: readonly AgentToolResult[],
+): unknown[] {
+  const outputs: unknown[] = [];
+  for (const call of calls) {
+    if (call.name !== toolName) continue;
+    const result = results.find((r) => r.toolCallId === call.id);
+    if (result?.ok) outputs.push(result.output);
+  }
+  return outputs;
+}
+
+function stringValuesFromUnknown(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (!value || typeof value !== "object") return [];
+  if (Array.isArray(value)) return value.flatMap((v) => stringValuesFromUnknown(v));
+  return Object.values(value as Record<string, unknown>).flatMap((v) =>
+    stringValuesFromUnknown(v),
+  );
+}
+
+function toolOutputExplicitlySupports(
+  claimText: string,
+  outputs: readonly unknown[],
+): boolean {
+  const normalizedClaim = normalizeSlotText(claimText);
+  if (!normalizedClaim) return false;
+  return outputs.some((output) =>
+    stringValuesFromUnknown(output).some((value) => {
+      const normalizedValue = normalizeSlotText(value);
+      return (
+        normalizedValue.length > 0 &&
+        (normalizedValue.includes(normalizedClaim) ||
+          normalizedClaim.includes(normalizedValue))
+      );
+    }),
+  );
+}
+
+function toolOutputExplicitlyConfirmsNotificationDelivery(
+  claimText: string,
+  outputs: readonly unknown[],
+): boolean {
+  const normalizedClaim = normalizeSlotText(claimText);
+  const channels = ["text", "sms", "email", "calendar invite"].filter((channel) =>
+    normalizedClaim.includes(channel),
+  );
+  if (channels.length === 0) return false;
+
+  return outputs.some((output) => {
+    let serializedOutput = stringValuesFromUnknown(output).join(" ");
+    try {
+      // Include structured result keys too: a normal delivery result is often
+      // shaped like { notificationDelivery: { email: "sent" } }.
+      const json = JSON.stringify(output);
+      if (typeof json === "string") serializedOutput = json;
+    } catch {
+      // Tool outputs are expected to be JSON-safe, but retain the conservative
+      // scalar fallback if a connector ever returns an unusual value.
+    }
+    const normalizedOutput = normalizeSlotText(serializedOutput);
+    if (!/\b(sent|delivered)\b/.test(normalizedOutput)) return false;
+    return channels.some((channel) => normalizedOutput.includes(channel));
+  });
+}
+
+/**
+ * Remove only unsupported notification-delivery clauses while preserving a
+ * grounded state change such as "You're booked". This is intentionally a
+ * final deterministic guard: prompt correction and model regeneration are
+ * helpful, but neither may be the last line of defense for public output.
+ */
+export function sanitizeUnbackedOperationalPromises(
+  response: string,
+  turnToolCalls: readonly AgentToolCall[] = [],
+  turnToolResults: readonly AgentToolResult[] = [],
+): string {
+  const successfulOutputs = turnToolCalls.flatMap((call) => {
+    const result = turnToolResults.find((candidate) => candidate.toolCallId === call.id);
+    return result?.ok ? [result.output] : [];
+  });
+  const escalationOutputs = successfulToolOutputs(
+    "escalate_to_human",
+    turnToolCalls,
+    turnToolResults,
+  );
+
+  let sanitized = response;
+  for (const claim of NOTIFICATION_DELIVERY_CLAIMS) {
+    const match = sanitized.match(claim.pattern)?.[0];
+    if (!match || toolOutputExplicitlyConfirmsNotificationDelivery(match, successfulOutputs)) {
+      continue;
+    }
+    // Remove the sentence/clause, retaining a preceding booking confirmation.
+    sanitized = sanitized.replace(match, "");
+  }
+
+  sanitized = sanitized.replace(HANDOFF_TIMING_SENTENCE, (sentence) => {
+    if (toolOutputExplicitlySupports(sentence, escalationOutputs)) return sentence;
+    return escalationOutputs.length > 0
+      ? " I've passed your details to the team for follow-up."
+      : "";
+  });
+
+  return sanitized
+    .replace(/\s+([.!?])/g, "$1")
+    .replace(/([.!?])\s*([.!?])/g, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+const noUnbackedOperationalPromises: Validator = {
+  name: "no_unbacked_operational_promises",
+  severity: "critical",
+  run: ({ response, userMessage, turnToolCalls, turnToolResults, blueprint, soul }) => {
+    const calls = turnToolCalls ?? [];
+    const results = turnToolResults ?? [];
+    const escalationOutputs = successfulToolOutputs(
+      "escalate_to_human",
+      calls,
+      results,
+    );
+    const successfulOutputs = calls.flatMap((call) => {
+      const result = results.find((candidate) => candidate.toolCallId === call.id);
+      return result?.ok ? [result.output] : [];
+    });
+    const failures: string[] = [];
+
+    for (const claim of ESCALATION_RECIPIENT_CLAIMS) {
+      const match = response.match(claim.pattern)?.[0];
+      if (match && !toolOutputExplicitlySupports(match, escalationOutputs)) {
+        failures.push(claim.label);
+      }
+    }
+    for (const claim of ESCALATION_TIMING_OR_CALLBACK_CLAIMS) {
+      const match = response.match(claim.pattern)?.[0];
+      if (!match) continue;
+
+      // "Leave the building immediately" is safety guidance, not a promise
+      // about the business's response time. Callback/contact/timing claims
+      // remain blocked outside a genuine user-described hazard.
+      const isHazardSafetyTiming =
+        claim.label === "immediate response" &&
+        SAFETY_HAZARD_PATTERN.test(userMessage) &&
+        EMERGENCY_SERVICE_ADVICE_PATTERN.test(response);
+
+      if (
+        !isHazardSafetyTiming &&
+        !toolOutputExplicitlySupports(match, escalationOutputs)
+      ) {
+        failures.push(claim.label);
+      }
+    }
+    for (const claim of OPERATIONAL_PROMISE_PATTERNS) {
+      const match = response.match(claim.pattern)?.[0];
+      if (!match) continue;
+
+      // Safety urgency such as "leave the building immediately" is not an
+      // operational response-time promise. Other dispatch/contact patterns
+      // still independently block claims like "we'll dispatch immediately."
+      const isHazardSafetyTiming =
+        claim.label === "time promise" &&
+        SAFETY_HAZARD_PATTERN.test(userMessage) &&
+        EMERGENCY_SERVICE_ADVICE_PATTERN.test(response);
+
+      if (
+        !isHazardSafetyTiming &&
+        !isGenericBookingArrangeResponse(response, match) &&
+        !toolOutputExplicitlySupports(match, escalationOutputs)
+      ) {
+        failures.push(claim.label);
+      }
+    }
+    for (const claim of NOTIFICATION_DELIVERY_CLAIMS) {
+      const match = response.match(claim.pattern)?.[0];
+      if (
+        match &&
+        !toolOutputExplicitlyConfirmsNotificationDelivery(match, successfulOutputs)
+      ) {
+        failures.push(claim.label);
+      }
+    }
+    for (const match of response.matchAll(SERVICE_PROMISE_PATTERN)) {
+      const serviceMatch = match[0];
+      if (
+        !isGenericBookingActionClaim(serviceMatch) &&
+        !pricingFactLabelSupportsServiceClaim(
+          serviceMatch,
+          blueprint.pricingFacts,
+        ) &&
+        !serviceMentionIsSupported(serviceMatch, soul?.services)
+      ) {
+        failures.push("unsupported service promise");
+      }
+    }
+
+    if (failures.length === 0) {
+      return { name: "no_unbacked_operational_promises", passed: true };
+    }
+    return {
+      name: "no_unbacked_operational_promises",
+      passed: false,
+      details: `Unsupported operational claims: ${[...new Set(failures)].join(", ")}`,
+    };
+  },
+};
+
 // ─── runner ────────────────────────────────────────────────────────────────
 
 export const ALL_VALIDATORS: Validator[] = [
@@ -375,6 +940,9 @@ export const ALL_VALIDATORS: Validator[] = [
   noAvoidWords,
   responseLengthUnderCap,
   noHallucinatedStateChange,
+  noUnsupportedEmergencyClaims,
+  availabilityTimesFromTool,
+  noUnbackedOperationalPromises,
 ];
 
 export function runValidators(

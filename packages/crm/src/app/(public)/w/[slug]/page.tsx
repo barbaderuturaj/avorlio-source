@@ -13,6 +13,7 @@
 
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 
 import { Hero } from "@/components/landing-r1/sections/hero";
 import { ServicesGrid } from "@/components/landing-r1/sections/services-grid";
@@ -34,9 +35,17 @@ import { rewriteR1Hrefs } from "@/lib/landing/r1-rewrite-hrefs";
 import { getServicePages } from "@/lib/landing/r1-site-tree";
 import { buildWorkspaceUrls } from "@/lib/billing/anonymous-workspace";
 import { getPublicChatbotEmbed } from "@/lib/agents/public-embed";
+import {
+  buildPublicBookingUrl,
+  buildPublicIntakeUrl,
+  getPublicBookingTemplateForOrg,
+  getPublicIntakeFormForOrg,
+  requestOriginFromHeaders,
+} from "@/lib/bookings/public-booking-url";
 import { submittedSoulToTemplateData } from "@/lib/landing/r1-payload-to-template";
 import { renderLandingTemplate } from "@/lib/landing/render-landing-template";
 import { shouldIndexWorkspace } from "@/lib/web-build/policy";
+import { buildVerifiedBusinessFacts, sanitizePublicClaimText } from "@/lib/landing/factual-grounding";
 
 type PageProps = {
   params: Promise<{ slug: string }>;
@@ -55,7 +64,8 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
       // No org, or a soul with no real business_name → nothing meaningful.
       return { title: "Page not found" };
     }
-    const description = soul.soul_description ?? soul.tagline;
+    const facts = buildVerifiedBusinessFacts(ctx!.soul, ctx!.settings);
+    const description = sanitizePublicClaimText(soul.soul_description ?? soul.tagline, facts, undefined);
     // ctx is non-null here (soul came from it above).
     const indexable = shouldIndexWorkspace(ctx!.ownerId, ctx!.settings);
     return {
@@ -147,6 +157,25 @@ export default async function WorkspaceLandingPage({ params }: PageProps) {
 
   // Chatbot embed — shared by both render paths.
   const chatbotEmbed = await getPublicChatbotEmbed(ctx.orgId);
+  const bookingTemplate = await getPublicBookingTemplateForOrg(ctx.orgId);
+  const requestOrigin = requestOriginFromHeaders(await headers());
+  const bookingUrl = bookingTemplate
+    ? buildPublicBookingUrl({
+        requestOrigin,
+        orgSlug: slug,
+        bookingSlug: bookingTemplate.slug,
+        baseDomain: process.env.WORKSPACE_BASE_DOMAIN ?? "app.seldonframe.com",
+      })
+    : null;
+  const intakeForm = await getPublicIntakeFormForOrg(ctx.orgId);
+  const intakeUrl = intakeForm
+    ? buildPublicIntakeUrl({
+        requestOrigin,
+        orgSlug: slug,
+        formSlug: intakeForm.slug,
+        baseDomain: process.env.WORKSPACE_BASE_DOMAIN ?? "app.seldonframe.com",
+      })
+    : null;
 
   // Health-templates pilot: when the workspace has opted into a premium
   // full-page template (persisted at organizations.theme.landingTemplate),
@@ -165,6 +194,9 @@ export default async function WorkspaceLandingPage({ params }: PageProps) {
     r1: r1 ? { payload: r1.payload, archetype: r1.archetype } : null,
     soul: ctx.soul,
     themeArchetype: ctx.theme?.aestheticArchetype,
+    bookingUrl,
+    intakeUrl,
+    facts: buildVerifiedBusinessFacts(ctx.soul, ctx.settings),
   });
   if (templatePage) {
     return (
@@ -189,8 +221,8 @@ export default async function WorkspaceLandingPage({ params }: PageProps) {
     ctx.orgId,
   );
   const payload = rewriteR1Hrefs(r1.payload, {
-    book: workspaceUrls.book,
-    intake: workspaceUrls.intake,
+    book: bookingUrl,
+    intake: intakeUrl,
     home: workspaceUrls.home,
   });
 
@@ -219,6 +251,7 @@ export default async function WorkspaceLandingPage({ params }: PageProps) {
         homeHref={homeHref}
         cta={payload.nav?.cta}
         logoUrl={payload.logo}
+        showReviews={payload.testimonials.testimonials.length > 0}
       />
       {payload.emergency && <EmergencyStrip {...payload.emergency} />}
       <Hero {...payload.hero} orgSlug={slug} leadForm={payload.leadForm} />

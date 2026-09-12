@@ -24,8 +24,8 @@ const REWRITE_MAP: Record<string, "book" | "intake"> = {
 };
 
 type WorkspaceUrls = {
-  book: string;
-  intake: string;
+  book?: string | null;
+  intake?: string | null;
   home: string;
 };
 
@@ -50,7 +50,9 @@ function rewriteHref(href: string, urls: WorkspaceUrls): string {
   if (isPassThrough(href)) return href;
   const key = REWRITE_MAP[href];
   if (!key) return href;
-  return urls[key];
+  if (key === "book" && !urls.book) return "#contact";
+  if (key === "intake" && !urls.intake) return "#contact";
+  return urls[key] ?? href;
 }
 
 /**
@@ -72,21 +74,38 @@ export function rewriteR1Hrefs(
 ): R1LandingPayload {
   // Structural clone — avoids mutating the cached/loaded payload.
   const p: R1LandingPayload = JSON.parse(JSON.stringify(payload)) as R1LandingPayload;
+  const bookingUnavailable = !urls.book;
 
   // hero CTAs
-  p.hero.primaryCTA.href = rewriteHref(p.hero.primaryCTA.href, urls);
+  if (bookingUnavailable && p.hero.primaryCTA.href === "/book") {
+    p.hero.primaryCTA = { ...p.hero.primaryCTA, label: "Contact us", href: "#contact" };
+  } else {
+    p.hero.primaryCTA.href = rewriteHref(p.hero.primaryCTA.href, urls);
+  }
   if (p.hero.secondaryCTA) {
-    p.hero.secondaryCTA.href = rewriteHref(p.hero.secondaryCTA.href, urls);
+    if (bookingUnavailable && p.hero.secondaryCTA.href === "/book") {
+      p.hero.secondaryCTA = { ...p.hero.secondaryCTA, label: "Contact us", href: "#contact" };
+    } else {
+      p.hero.secondaryCTA.href = rewriteHref(p.hero.secondaryCTA.href, urls);
+    }
   }
 
   // services CTA
   if (p.services.cta) {
-    p.services.cta.href = rewriteHref(p.services.cta.href, urls);
+    if (bookingUnavailable && p.services.cta.href === "/book") {
+      p.services.cta = { ...p.services.cta, label: "Contact us", href: "#contact" };
+    } else {
+      p.services.cta.href = rewriteHref(p.services.cta.href, urls);
+    }
   }
 
   // faq CTA
   if (p.faq.cta) {
-    p.faq.cta.href = rewriteHref(p.faq.cta.href, urls);
+    if (bookingUnavailable && p.faq.cta.href === "/book") {
+      p.faq.cta = { ...p.faq.cta, label: "Contact us", href: "#contact" };
+    } else {
+      p.faq.cta.href = rewriteHref(p.faq.cta.href, urls);
+    }
   }
 
   // footer service links — only rewrite non-anchor hrefs
@@ -100,7 +119,9 @@ export function rewriteR1Hrefs(
   // sticky bar — bookHref only; smsHref is always sms: (pass-through)
   if (p.sticky) {
     if (p.sticky.bookHref) {
-      p.sticky.bookHref = rewriteHref(p.sticky.bookHref, urls);
+      p.sticky.bookHref = bookingUnavailable && p.sticky.bookHref === "/book"
+        ? undefined
+        : rewriteHref(p.sticky.bookHref, urls);
     }
     // smsHref: always a sms: href → isPassThrough returns true → no change needed
     // but run it through rewriteHref defensively so future mis-typed values are caught
@@ -112,7 +133,11 @@ export function rewriteR1Hrefs(
   // nav CTA — added in P4: the "/book" href is rewritten to the workspace
   // booking URL, exactly like the hero primary CTA.
   if (p.nav?.cta) {
-    p.nav.cta.href = rewriteHref(p.nav.cta.href, urls);
+    if (bookingUnavailable && p.nav.cta.href === "/book") {
+      p.nav.cta = undefined;
+    } else {
+      p.nav.cta.href = rewriteHref(p.nav.cta.href, urls);
+    }
   }
 
   return p;

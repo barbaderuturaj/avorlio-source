@@ -187,7 +187,7 @@ export function Sidebar(props: {
                   className="h-full w-full object-contain"
                 />
               ) : (
-                <Image src="/brand/seldonframe-icon.svg" alt="SeldonFrame" width={20} height={20} />
+                <Image src="/brand/seldonframe-icon.svg" alt="Avorlio" width={20} height={20} />
               )}
             </div>
             <div className="min-w-0">
@@ -198,7 +198,7 @@ export function Sidebar(props: {
                   AND the agency operator looking at their own dashboard
                   see the agency identity instead of "SeldonFrame". */}
               <p className="text-sm font-semibold tracking-tight text-foreground">
-                {agencyBrandName ?? "SeldonFrame"}
+                {agencyBrandName ?? "Avorlio"}
               </p>
               <p className="text-[11px] text-muted-foreground">
                 {agencyBrandName

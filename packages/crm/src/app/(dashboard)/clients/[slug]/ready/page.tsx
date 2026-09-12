@@ -30,14 +30,16 @@
 // workspaces).
 
 import { redirect } from "next/navigation";
+import { headers } from "next/headers";
 import Link from "next/link";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { ArrowRight, ExternalLink, Pencil, Sparkles } from "lucide-react";
 
 import { auth } from "@/auth";
 import { db } from "@/db";
-import { agents, bookings, intakeForms, landingPages, organizations, orgMembers, soulSources } from "@/db/schema";
+import { agents, bookings, intakeForms, landingPages, onboardingLinks, organizations, orgMembers, soulSources } from "@/db/schema";
 import { buildWorkspaceUrls } from "@/lib/billing/anonymous-workspace";
+import { requestOriginFromHeaders } from "@/lib/bookings/public-booking-url";
 // 2026-05-27 — Unified onboarding shell + step-3 completion path.
 import { OnboardingShell } from "@/components/onboarding/shell";
 import { getOnboardingState } from "@/lib/onboarding/state";
@@ -46,6 +48,7 @@ import { getOnboardingState } from "@/lib/onboarding/state";
 // hand off the workspace to its actual SMB owner without copy-pasting
 // URLs.
 import { InviteSmbOwner } from "./invite-smb-owner";
+import { OnboardingLinkButton } from "./onboarding-link-button";
 // 2026-05-22 — Copy-to-clipboard button for the R1 landing URL card.
 import { LandingUrlCopyButton } from "./landing-url-copy-button";
 // 2026-05-22 — Fallback generate button when R1 generation failed silently.
@@ -58,6 +61,8 @@ import { dismissOnboardingAction } from "./actions";
 // dashboard can reuse it too; prop derivation lives in resolveDesignModuleProps.
 import { ReadyDesignPicker } from "@/components/clients/design-picker/ReadyDesignPicker";
 import { resolveDesignModuleProps } from "@/components/clients/design-picker/resolve-module-props";
+import { buildChecklistView, isHvacOnboardingForm, readHvacInternalChecklist } from "@/lib/onboarding/internal-checklist";
+import { InternalOnboardingChecklist } from "./internal-onboarding-checklist";
 
 export const dynamic = "force-dynamic";
 
@@ -140,14 +145,22 @@ export default async function WorkspaceReadyPage({ params, searchParams }: Ready
 
   const urls = buildWorkspaceUrls(workspace.slug, WORKSPACE_BASE_DOMAIN, workspace.id);
 
+  // Human-readable public location for the Ready page.
+  // Hosted deployments show the workspace subdomain; self-hosted deployments
+  // show the path-based public URL on their configured application origin.
+  const publicLocation = urls.home.replace(/^https?:\/\//, "");
+
   // Build switch-workspace URLs ourselves instead of mutating the
   // `urls.admin_*` strings via .replace() — the URL stored in
   // urls.admin_dashboard is `…/switch-workspace?to=<id>&next=%2Fdashboard`
   // (URL-encoded), so .replace("/dashboard", "/whatever") matches
   // NOTHING and every admin button silently fell back to /dashboard.
   // That was the "Test chatbot redirects to dashboard" bug.
+  // Admin navigation is intentionally same-origin. A relative URL keeps
+  // self-hosted, hosted, localhost, and temporary tunnel deployments on the
+  // origin that is actually serving this Ready page.
   const sw = (next: string) =>
-    `https://${WORKSPACE_BASE_DOMAIN}/switch-workspace?to=${encodeURIComponent(workspace.id)}&next=${encodeURIComponent(next)}`;
+    `/switch-workspace?to=${encodeURIComponent(workspace.id)}&next=${encodeURIComponent(next)}`;
 
   // Query the actual block slugs for the public deep links.
   //
@@ -174,6 +187,22 @@ export default async function WorkspaceReadyPage({ params, searchParams }: Ready
     .select({ slug: intakeForms.slug, name: intakeForms.name })
     .from(intakeForms)
     .where(and(eq(intakeForms.orgId, workspace.id), eq(intakeForms.isActive, true)))
+    .limit(1);
+
+  // The customer onboarding form is the narrow HVAC launch signal for the
+  // internal checklist. It is deliberately separate from the public form
+  // renderer and is read-only here.
+  const [onboardingFormRow] = await db
+    .select({ id: intakeForms.id, slug: intakeForms.slug, name: intakeForms.name })
+    .from(intakeForms)
+    .where(and(eq(intakeForms.orgId, workspace.id), eq(intakeForms.slug, "onboarding")))
+    .limit(1);
+
+  const [onboardingLinkRow] = await db
+    .select({ status: onboardingLinks.status })
+    .from(onboardingLinks)
+    .where(eq(onboardingLinks.orgId, workspace.id))
+    .orderBy(desc(onboardingLinks.createdAt))
     .limit(1);
 
   // Look up the auto-created website-chatbot agent so the "Test chatbot"
@@ -225,7 +254,12 @@ export default async function WorkspaceReadyPage({ params, searchParams }: Ready
   // We don't use the subdomain shortcuts because proxy.ts's rewrite for
   // /book/* and /forms/* paths is a pass-through — both rely on the
   // orgSlug being in the path, not in the host.
-  const APP_BASE = `https://${WORKSPACE_BASE_DOMAIN}`;
+  const configuredAppBase = new URL(urls.admin_dashboard).origin;
+  const requestOrigin = requestOriginFromHeaders(await headers());
+  // Public links must stay on the origin that served this page. This covers
+  // self-hosted ports, tunnels, custom domains, and the canonical hosted app
+  // host without baking deployment assumptions into the Ready page.
+  const APP_BASE = requestOrigin ?? configuredAppBase;
 
   // R1 landing URL — public page at /w/[slug].
   const r1LandingUrl = hasR1Landing ? `${APP_BASE}/w/${workspace.slug}` : null;
@@ -272,6 +306,30 @@ export default async function WorkspaceReadyPage({ params, searchParams }: Ready
     ? sw(`/agents/${chatbotAgentRow.id}/test`)
     : null;
 
+  const showHvacChecklist = isHvacOnboardingForm(onboardingFormRow);
+  const checklistItems = showHvacChecklist
+    ? buildChecklistView(readHvacInternalChecklist(workspace.settings.internalOnboardingChecklist))
+    : [];
+  const onboardingStatus = onboardingLinkRow?.status === "submitted" || onboardingLinkRow?.status === "applied"
+    ? "received"
+    : "pending";
+  const checklistHrefs = {
+    review_submission: onboardingFormRow ? sw(`/forms/${onboardingFormRow.id}`) : undefined,
+    business_profile: sw("/settings/profile"),
+    ai_front_office: sw("/agents"),
+    booking_configuration: sw("/bookings"),
+    google_calendar: sw("/integrations?connect=calendar"),
+    lead_capture: sw("/forms"),
+    website_installation: `/clients/${workspace.slug}/landing/edit`,
+    booking_test: publicBookingUrl ?? undefined,
+    crm_test: sw("/contacts"),
+    chatbot_test: chatbotTestUrl ?? sw("/agents"),
+    email_integration: sw("/settings/integrations"),
+    sms_integration: sw("/settings/integrations"),
+    client_access: sw("/contacts"),
+    final_smoke_test: publicBookingUrl ?? r1LandingUrl ?? urls.home,
+  };
+
   // Deliverable cards. Two-tier ordering as of 2026-05-17:
   //
   //   1. OPERATOR DASHBOARD — the "Plumbing Owner" view. The most-used
@@ -303,13 +361,13 @@ export default async function WorkspaceReadyPage({ params, searchParams }: Ready
     {
       icon: "🏠",
       audience: "operator",
-      label: "Operator dashboard",
-      title: `${workspace.name}'s own admin view`,
+      label: "Client portal",
+      title: `${workspace.name}'s client operator portal`,
       description:
-        "What the SMB owner uses to run their business — contacts, deals, bookings, billing. Lighter than the agency view (no agents / automations / templates — those stay in your agency console).",
+        "What the HVAC client uses to see Today, leads, and appointments. Avorlio keeps AI, integrations, website setup, and configuration in the agency console.",
       publicHref: null,
       publicLabel: "",
-      adminHref: sw("/dashboard"),
+      adminHref: `/portal/${workspace.slug}/login`,
       adminLabel: "Open operator dashboard",
     },
     {
@@ -489,11 +547,12 @@ export default async function WorkspaceReadyPage({ params, searchParams }: Ready
             CRM, booking, intake, and AI chatbot — all wired together and
             published at{" "}
             <span className="font-medium text-foreground">
-              {workspace.slug}.{WORKSPACE_BASE_DOMAIN}
+              {publicLocation}
             </span>
             . Share the public URL with your client or keep tuning before you do.
           </p>
           <div className="flex flex-wrap items-center gap-3 pt-2">
+            <OnboardingLinkButton workspaceId={workspace.id} />
             <Link
               href={sw("/dashboard")}
               className="crm-pressable inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-primary px-5 text-sm font-semibold text-primary-foreground shadow-(--shadow-sm) transition-[background-color,transform] duration-150 ease-out hover:bg-primary/90"
@@ -512,6 +571,17 @@ export default async function WorkspaceReadyPage({ params, searchParams }: Ready
             </a>
           </div>
         </header>
+
+        {showHvacChecklist ? (
+          <InternalOnboardingChecklist
+            workspaceId={workspace.id}
+            workspaceSlug={workspace.slug}
+            onboardingStatus={onboardingStatus}
+            onboardingHref={onboardingFormRow ? sw(`/forms/${onboardingFormRow.id}`) : null}
+            items={checklistItems}
+            hrefs={checklistHrefs}
+          />
+        ) : null}
 
         {/* ============== R1 LANDING URL CARD ==============
             2026-05-22 — surfaces the auto-generated public landing
@@ -705,7 +775,7 @@ export default async function WorkspaceReadyPage({ params, searchParams }: Ready
                 <p className="text-sm text-muted-foreground">
                   Right now your client sees{" "}
                   <code className="rounded bg-muted/50 px-1.5 py-0.5 text-xs font-mono text-foreground">
-                    {workspace.slug}.{WORKSPACE_BASE_DOMAIN}
+                    {publicLocation}
                   </code>
                   . Connect a custom domain so the workspace lives at{" "}
                   <span className="font-medium text-foreground">{workspace.slug}.com</span>{" "}
@@ -717,7 +787,7 @@ export default async function WorkspaceReadyPage({ params, searchParams }: Ready
                   lives at <span className="font-medium text-foreground">{workspace.slug}.com</span>{" "}
                   instead of{" "}
                   <code className="rounded bg-muted/50 px-1.5 py-0.5 text-xs font-mono text-foreground">
-                    {workspace.slug}.{WORKSPACE_BASE_DOMAIN}
+                    {publicLocation}
                   </code>
                   .
                 </p>
@@ -838,7 +908,7 @@ export default async function WorkspaceReadyPage({ params, searchParams }: Ready
                   <>
                     Send them{" "}
                     <code className="rounded bg-muted/40 px-1 py-0.5 text-xs">
-                      {workspace.slug}.{WORKSPACE_BASE_DOMAIN}
+                      {publicLocation}
                     </code>{" "}
                     so they can see what their new Business OS looks like.
                   </>

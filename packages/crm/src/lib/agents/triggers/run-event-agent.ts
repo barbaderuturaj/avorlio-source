@@ -66,6 +66,7 @@ import { defaultRubricForSkill } from "@/lib/agents/verify/default-rubrics";
 import {
   evaluateGuardrails,
   defaultGuardrailsForSkill,
+  normalizeGuardrailTimezone,
   type Guardrails,
 } from "@/lib/agents/guardrails/agent-guardrails";
 // 2026-06-26 — Outbound-UX Bundle F2 (send delay). When the matched agent's
@@ -724,6 +725,19 @@ async function runOneAgent(
   // the daily-counter date key (and the increment after a successful send).
   const now = deps.now?.() ?? new Date();
 
+  // Resolve once and reuse for both the daily counter boundary and default
+  // quiet hours. Explicit blueprint guardrails remain authoritative.
+  let workspaceTimezone = "UTC";
+  if (deps.resolveTimezone) {
+    try {
+      workspaceTimezone = normalizeGuardrailTimezone(
+        await deps.resolveTimezone(event.orgId),
+      );
+    } catch {
+      workspaceTimezone = "UTC";
+    }
+  }
+
   // The daily-counter context is resolved ONCE here (function scope) so the gate
   // can read it AND step 5 can increment the SAME `_stats/<date>` note after a
   // successful send. Only meaningful when a memoryStore is wired (else count = 0,
@@ -731,20 +745,7 @@ async function runOneAgent(
   let dailyStatsKey: string | null = null;
   let sentTodayByAgent = 0;
   if (deps.memoryStore) {
-    // Resolve the workspace tz (organizations.timezone via deps; "UTC" on any
-    // failure) to bound the day, then recall the `_stats/<date>` note + take max.
-    let tz = "UTC";
-    if (deps.resolveTimezone) {
-      try {
-        const resolved = await deps.resolveTimezone(event.orgId);
-        if (typeof resolved === "string" && resolved.trim().length > 0) {
-          tz = resolved.trim();
-        }
-      } catch {
-        tz = "UTC";
-      }
-    }
-    dailyStatsKey = dailyStatsSubjectKey(dateKeyInTz(now, tz));
+    dailyStatsKey = dailyStatsSubjectKey(dateKeyInTz(now, workspaceTimezone));
     try {
       const statEntries = await recallAgentMemory(deps.memoryStore, {
         orgId: event.orgId,
@@ -757,7 +758,8 @@ async function runOneAgent(
     }
   }
 
-  const guardrails = agent.guardrails ?? defaultGuardrailsForSkill(agent.skill);
+  const guardrails =
+    agent.guardrails ?? defaultGuardrailsForSkill(agent.skill, workspaceTimezone);
   if (guardrails) {
     // lastSentToContactAt — the max `at` among the contact's already-recalled
     // SEND entries (review_requested / lead_contacted). Reuse `recalled`; skip a
@@ -1079,24 +1081,24 @@ async function runActionOnlyAgent(
   // the increment after a fire) — the same instant, exactly as the messaging path.
   const now = deps.now?.() ?? new Date();
 
+  let workspaceTimezone = "UTC";
+  if (deps.resolveTimezone) {
+    try {
+      workspaceTimezone = normalizeGuardrailTimezone(
+        await deps.resolveTimezone(event.orgId),
+      );
+    } catch {
+      workspaceTimezone = "UTC";
+    }
+  }
+
   // Resolve the per-agent daily counter ONCE (function scope) so the gate can read
   // it AND we can increment the SAME `_stats/<date>` note after a successful fire.
   // Only meaningful with a memoryStore (else count = 0, key = null, no increment).
   let dailyStatsKey: string | null = null;
   let firedTodayByAgent = 0;
   if (deps.memoryStore) {
-    let tz = "UTC";
-    if (deps.resolveTimezone) {
-      try {
-        const resolved = await deps.resolveTimezone(event.orgId);
-        if (typeof resolved === "string" && resolved.trim().length > 0) {
-          tz = resolved.trim();
-        }
-      } catch {
-        tz = "UTC";
-      }
-    }
-    dailyStatsKey = dailyStatsSubjectKey(dateKeyInTz(now, tz));
+    dailyStatsKey = dailyStatsSubjectKey(dateKeyInTz(now, workspaceTimezone));
     try {
       const statEntries = await recallAgentMemory(deps.memoryStore, {
         orgId: event.orgId,
@@ -1116,7 +1118,8 @@ async function runActionOnlyAgent(
   // throws); we feed `now`, the last fire we recalled for this contact, and the
   // per-agent daily count. A tripped brake BLOCKS the fire. Guarded (fail OPEN so a
   // brake bug never silently swallows the fire — but never crashes the handler).
-  const guardrails = agent.guardrails ?? defaultGuardrailsForSkill(agent.skill);
+  const guardrails =
+    agent.guardrails ?? defaultGuardrailsForSkill(agent.skill, workspaceTimezone);
   if (guardrails) {
     // The most recent prior FIRE for this agent (the frequency-cap input). P2.1
     // records a fire as `action_posted` (live) or `tool_not_connected` (no live

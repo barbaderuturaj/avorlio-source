@@ -25,7 +25,7 @@ export function PwaInstallCard() {
     <section className="crm-card space-y-3">
       <div>
         <h2 className="text-card-title">PWA</h2>
-        <p className="text-label text-[hsl(var(--color-text-secondary))]">Install SeldonFrame Hub for app-like access across devices.</p>
+        <p className="text-label text-[hsl(var(--color-text-secondary))]">Install Avorlio Hub for app-like access across devices.</p>
       </div>
 
       <button

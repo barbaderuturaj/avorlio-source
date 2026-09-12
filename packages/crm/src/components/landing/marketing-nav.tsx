@@ -27,13 +27,9 @@ import { BrandMark } from "./brand-mark";
  *  lessons.md rule: client-only conditional renders hide content from
  *  crawlers/LLMs. */
 const RESOURCE_LINKS = [
-  { href: "/alternatives", label: "Compare & pricing breakdowns" },
-  { href: "/guides", label: "Guides" },
-  { href: "/guides/gohighlevel", label: "GoHighLevel diagnostics" },
-  { href: "/best", label: "Best-of guides" },
-  { href: "/tools", label: "Free tools" },
-  { href: "/ai-agents", label: "AI agent library" },
-  { href: "/blog", label: "Blog — build notes & founder stories" },
+  { href: "#build", label: "How it works" },
+  { href: "#modules", label: "What Avorlio handles" },
+  { href: "#faq", label: "Questions" },
 ] as const;
 
 export function MarketingNav() {
@@ -84,29 +80,17 @@ export function MarketingNav() {
 
       <div className="mx-auto flex max-w-[1120px] items-center justify-between gap-6 px-6 py-4 md:px-8 lg:px-12 lg:py-[18px]">
         {/* Brand */}
-        <Link href="/" aria-label="SeldonFrame — home">
+        <Link href="/" aria-label="Avorlio — home">
           <BrandMark withPathChip />
         </Link>
 
         {/* Agency-first navigation plus Resources, login, and the primary CTA. */}
         <div className="inline-flex items-center gap-2 md:gap-3">
           <Link
-            href="/agencies"
-            className="hidden h-[34px] items-center whitespace-nowrap rounded-[11px] px-3 text-[13.5px] font-semibold text-[var(--lp-ink)] transition-colors hover:text-[var(--lp-accent)] md:inline-flex"
-          >
-            For agencies
-          </Link>
-          <Link
             href="/docs"
             className="hidden h-[34px] items-center whitespace-nowrap rounded-[11px] px-3 text-[13.5px] font-medium text-[var(--lp-muted)] transition-colors hover:text-[var(--lp-ink)] md:inline-flex"
           >
             Docs
-          </Link>
-          <Link
-            href="/pricing-public"
-            className="hidden h-[34px] items-center whitespace-nowrap rounded-[11px] px-3 text-[13.5px] font-medium text-[var(--lp-muted)] transition-colors hover:text-[var(--lp-ink)] md:inline-flex"
-          >
-            Pricing
           </Link>
           <div ref={resourcesRef} className="relative hidden md:block">
             <button
@@ -150,7 +134,7 @@ export function MarketingNav() {
             href="/#hero-form"
             className="inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap rounded-[11px] bg-[var(--lp-cta-bg)] px-4 text-[13.5px] font-semibold text-[var(--lp-cta-ink)] shadow-[0_1px_2px_color-mix(in_oklab,var(--lp-ink)_10%,transparent),0_6px_16px_color-mix(in_oklab,var(--lp-ink)_10%,transparent),0_18px_40px_color-mix(in_oklab,var(--lp-ink)_6%,transparent),inset_0_1.5px_0_rgba(255,255,255,.12)] transition-all hover:-translate-y-px hover:shadow-[0_2px_4px_color-mix(in_oklab,var(--lp-ink)_12%,transparent),0_12px_26px_color-mix(in_oklab,var(--lp-ink)_14%,transparent),inset_0_1.5px_0_rgba(255,255,255,.14)] active:translate-y-px focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--lp-accent)]"
           >
-            Start for free
+            Get started
           </Link>
         </div>
       </div>

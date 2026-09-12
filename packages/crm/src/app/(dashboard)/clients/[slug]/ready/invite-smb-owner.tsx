@@ -22,7 +22,7 @@
 
 import { useState, useTransition } from "react";
 import { Copy, Check, Mail, ExternalLink } from "lucide-react";
-import { requestOperatorMagicLinkAction } from "@/lib/operator-portal/auth";
+import { setOperatorPortalEmailAndSendMagicLinkAction } from "@/lib/operator-portal/auth";
 
 export function InviteSmbOwner({
   workspaceSlug,
@@ -60,7 +60,7 @@ export function InviteSmbOwner({
     setSentTo(null);
     startTransition(async () => {
       try {
-        const result = await requestOperatorMagicLinkAction({
+        const result = await setOperatorPortalEmailAndSendMagicLinkAction({
           orgSlug: workspaceSlug,
           email: email.trim(),
           invitedByName,
@@ -85,7 +85,7 @@ export function InviteSmbOwner({
         className="crm-pressable inline-flex h-8 items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 text-xs font-medium text-emerald-700 transition-[background-color,transform] duration-150 ease-out hover:bg-emerald-500/20 dark:text-emerald-300"
       >
         <Mail className="size-3.5" />
-        Invite SMB owner
+        Invite client operator
       </button>
     );
   }
@@ -94,7 +94,7 @@ export function InviteSmbOwner({
     <div className="mt-3 w-full space-y-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
       <div className="flex items-start justify-between gap-2">
         <p className="text-xs font-medium text-foreground">
-          Give {workspaceName}'s owner their own login
+          Give {workspaceName}'s primary client operator their own login
         </p>
         <button
           type="button"

@@ -80,6 +80,8 @@ export function Testimonials({
     };
   }, [advance, resolvedInterval, reduce, paused, testimonials.length]);
 
+  if (testimonials.length === 0) return null;
+
   return (
     <section
       data-archetype={arch.id}

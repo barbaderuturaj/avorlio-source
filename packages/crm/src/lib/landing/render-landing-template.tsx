@@ -26,6 +26,11 @@ import {
   archetypeToSfTheme,
   buildTemplateCtas,
 } from "@/lib/landing/template-adapters";
+import {
+  buildVerifiedBusinessFacts,
+  sanitizePublicLandingData,
+  type VerifiedBusinessFacts,
+} from "@/lib/landing/factual-grounding";
 import { ARCHETYPES, type AestheticArchetypeId } from "@/lib/workspace/aesthetic-archetypes";
 import type { R1LandingPayload } from "@/lib/landing/r1-payload-prompt";
 
@@ -39,6 +44,11 @@ export function renderLandingTemplate(input: {
   soul: unknown;
   /** live org-theme archetype (theme.aestheticArchetype) */
   themeArchetype: string | undefined;
+  /** Already-grounded public booking URL, when a usable template exists. */
+  bookingUrl?: string | null;
+  intakeUrl?: string | null;
+  /** Public factual boundary for soul/template fallbacks. */
+  facts?: VerifiedBusinessFacts;
 }): ReactElement | null {
   // Non-template workspaces (or unregistered/undefined ids) render nothing
   // here — callers fall through to the landing-r1 path.
@@ -48,11 +58,15 @@ export function renderLandingTemplate(input: {
   // Fill any empty photo slots with the template's curated fixture imagery
   // (Claude Design's hand-picked photos) so the page looks like the designed
   // template even when extraction captured few/no photos. Real photos win.
-  const templateData = withTemplateDefaults(
+  const templateDataRaw = withTemplateDefaults(
     input.r1
       ? r1PayloadToTemplateData(input.r1.payload)
       : submittedSoulToTemplateData(input.soul),
     input.landingTemplate,
+  );
+  const templateData = sanitizePublicLandingData(
+    templateDataRaw,
+    input.facts ?? buildVerifiedBusinessFacts(input.soul),
   );
   // Re-skin via the archetype palette ONLY when one is explicitly set (on
   // the r1 payload or the org theme). Otherwise pass undefined so the
@@ -66,7 +80,7 @@ export function renderLandingTemplate(input: {
   return (
     <Tpl
       data={templateData}
-      ctas={buildTemplateCtas(input.slug, input.orgId, templateData.phone)}
+      ctas={buildTemplateCtas(input.slug, input.orgId, templateData.phone, input.bookingUrl, input.intakeUrl)}
       theme={sfTheme}
     />
   );

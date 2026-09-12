@@ -8,7 +8,10 @@ import {
   adminTokenUserId,
   isAdminTokenUserId,
 } from "@/lib/auth/admin-token";
-import { buildStructuredWorkspaceUrls } from "@/lib/billing/anonymous-workspace";
+import {
+  buildStructuredWorkspaceUrls,
+  buildWorkspaceUrls,
+} from "@/lib/billing/anonymous-workspace";
 
 // ─── admin-token cookie module ─────────────────────────────────────────
 
@@ -125,4 +128,84 @@ test("buildStructuredWorkspaceUrls — workspace id + token are URL-encoded in a
     out.admin_url!.includes("token=token%20with%20spaces"),
     "token encoded"
   );
+});
+
+
+test("workspace URL builders ? self-hosted uses path-based URLs on the configured app origin", () => {
+  const previousAppUrl = process.env.NEXT_PUBLIC_APP_URL;
+  const previousNextAuthUrl = process.env.NEXTAUTH_URL;
+  const previousStripeKey = process.env.STRIPE_SECRET_KEY;
+
+  try {
+    process.env.NEXT_PUBLIC_APP_URL = "http://localhost:3000";
+    process.env.NEXTAUTH_URL = "http://localhost:3002";
+    delete process.env.STRIPE_SECRET_KEY;
+
+    const flat = buildWorkspaceUrls(
+      "dallasflow-plumbing",
+      "app.seldonframe.com",
+      "org-local",
+    );
+
+    assert.equal(flat.home, "http://localhost:3002/w/dallasflow-plumbing");
+    assert.equal(
+      flat.admin_dashboard,
+      "http://localhost:3002/switch-workspace?to=org-local&next=%2Fdashboard",
+    );
+
+    const structured = buildStructuredWorkspaceUrls(
+      "dallasflow-plumbing",
+      "app.seldonframe.com",
+      "org-local",
+      { bearerToken: "wst_local" },
+    );
+
+    assert.equal(
+      structured.public_urls.home,
+      "http://localhost:3002/w/dallasflow-plumbing",
+    );
+    assert.ok(
+      structured.admin_url?.startsWith(
+        "http://localhost:3002/admin/org-local",
+      ),
+    );
+  } finally {
+    if (previousAppUrl === undefined) delete process.env.NEXT_PUBLIC_APP_URL;
+    else process.env.NEXT_PUBLIC_APP_URL = previousAppUrl;
+
+    if (previousNextAuthUrl === undefined) delete process.env.NEXTAUTH_URL;
+    else process.env.NEXTAUTH_URL = previousNextAuthUrl;
+
+    if (previousStripeKey === undefined) delete process.env.STRIPE_SECRET_KEY;
+    else process.env.STRIPE_SECRET_KEY = previousStripeKey;
+  }
+});
+
+test("workspace URL builders ? hosted mode preserves SeldonFrame wildcard subdomains", () => {
+  const previousAppUrl = process.env.NEXT_PUBLIC_APP_URL;
+  const previousStripeKey = process.env.STRIPE_SECRET_KEY;
+
+  try {
+    process.env.NEXT_PUBLIC_APP_URL = "https://app.seldonframe.com";
+    process.env.STRIPE_SECRET_KEY = "sk_test_hosted_regression";
+
+    const flat = buildWorkspaceUrls(
+      "acme",
+      "app.seldonframe.com",
+      "org-hosted",
+    );
+
+    assert.equal(flat.home, "https://acme.app.seldonframe.com");
+    assert.ok(
+      flat.admin_dashboard.startsWith(
+        "https://app.seldonframe.com/switch-workspace",
+      ),
+    );
+  } finally {
+    if (previousAppUrl === undefined) delete process.env.NEXT_PUBLIC_APP_URL;
+    else process.env.NEXT_PUBLIC_APP_URL = previousAppUrl;
+
+    if (previousStripeKey === undefined) delete process.env.STRIPE_SECRET_KEY;
+    else process.env.STRIPE_SECRET_KEY = previousStripeKey;
+  }
 });

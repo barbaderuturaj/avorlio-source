@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import { Mail } from "lucide-react";
 import { BUILT_IN_EVENT_TYPE_SUGGESTIONS, isValidEventType } from "@/lib/events/event-types";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
+import { buildDeliveryStatusCounts, formatDeliveryStatusSummary } from "@/lib/messaging/delivery-summary";
 
 /*
   Square UI class reference (source of truth):
@@ -30,14 +31,19 @@ type TemplateRow = {
 
 type SentRow = {
   id: string;
-  toEmail: string;
-  subject: string;
+  channel: "email" | "sms";
+  toAddress: string;
+  subject: string | null;
   status: string;
   provider: string;
   sentAt: string | null;
+  createdAt: string | null;
+  error: string | null;
+  eventType: string | null;
+  source: "email-record" | "outbound-send";
 };
 
-type Tab = "templates" | "sent" | "settings";
+type Tab = "templates" | "delivery" | "settings";
 
 type EmailIntegrationsState = {
   // 2026-05-18 (later) — fromEmail + fromName captured at connect
@@ -83,7 +89,7 @@ function statusBadge(status: string) {
 
 export function EmailPageContent({
   templates,
-  sent,
+  deliveries,
   createTemplateAction,
   emailIntegrations,
   saveIntegrationAction,
@@ -91,7 +97,7 @@ export function EmailPageContent({
   newLeadsLast30Days = 0,
 }: {
   templates: TemplateRow[];
-  sent: SentRow[];
+  deliveries: SentRow[];
   createTemplateAction: (formData: FormData) => Promise<void>;
   emailIntegrations: EmailIntegrationsState;
   saveIntegrationAction: (formData: FormData) => Promise<void>;
@@ -111,10 +117,12 @@ export function EmailPageContent({
   const [pending, startTransition] = useTransition();
   const [previewTemplate, setPreviewTemplate] = useState<TemplateRow | null>(null);
   const [editTemplate, setEditTemplate] = useState<TemplateRow | null>(null);
+  const deliveryCounts = buildDeliveryStatusCounts(deliveries);
+  const deliverySummary = formatDeliveryStatusSummary(deliveryCounts);
 
   const tabs: { key: Tab; label: string }[] = [
     { key: "templates", label: `Templates (${templates.length})` },
-    { key: "sent", label: `Sent (${sent.length})` },
+    { key: "delivery", label: `Delivery log (${deliveries.length})` },
   ];
 
   return (
@@ -133,6 +141,15 @@ export function EmailPageContent({
           ))}
         </div>
       </div>
+
+      {deliveries.length > 0 ? (
+        <div className="rounded-lg border bg-card px-4 py-3 text-sm text-muted-foreground">
+          Delivery status: <span className="font-medium text-foreground">{deliverySummary}</span>
+          {deliveryCounts.failed > 0 ? (
+            <span className="text-negative"> · failed attempts need attention</span>
+          ) : null}
+        </div>
+      ) : null}
 
       {activeTab === "templates" ? (
         <section className="space-y-4">
@@ -430,12 +447,12 @@ export function EmailPageContent({
         </section>
       ) : null}
 
-      {activeTab === "sent" ? (
+      {activeTab === "delivery" ? (
         <section className="space-y-4">
-          {sent.length === 0 ? (
+          {deliveries.length === 0 ? (
             <div className="flex h-full items-center justify-center bg-card rounded-xl border min-h-52">
               <div className="text-center text-muted-foreground">
-                <p>No sent emails yet.</p>
+                <p>No message records yet.</p>
               </div>
             </div>
           ) : (
@@ -443,13 +460,13 @@ export function EmailPageContent({
               <div className="flex items-center justify-between border-b border-border px-5 py-3">
                 <div className="flex items-center gap-2">
                   <div className="size-3.5 rounded border border-border" />
-                  <p className="text-sm font-medium text-foreground">Sent</p>
+                  <p className="text-sm font-medium text-foreground">Delivery log</p>
                 </div>
-                <p className="text-xs text-muted-foreground">{sent.length} email{sent.length !== 1 ? "s" : ""}</p>
+                <p className="text-xs text-muted-foreground">{deliverySummary}</p>
               </div>
 
               <div className="flex-1 overflow-y-auto">
-                {sent.map((row) => (
+                {deliveries.map((row) => (
                   <div
                     key={row.id}
                     className="flex w-full gap-2.5 border-b border-border p-4 text-left transition-colors hover:bg-muted/70"
@@ -462,21 +479,27 @@ export function EmailPageContent({
                       <div className="flex items-start justify-between gap-2.5">
                         <div className="flex-1 overflow-hidden">
                           <p className="truncate text-[14px] tracking-tight font-medium text-foreground">
-                            {row.toEmail}
+                            {row.toAddress}
                           </p>
                           <p className="truncate text-[12px] tracking-tight text-muted-foreground">
-                            {row.subject}
+                            {row.subject || row.eventType || "Outbound message"}
                           </p>
                         </div>
                         <p className="shrink-0 text-[12px] tracking-tight text-foreground">
-                          {row.sentAt ? new Date(row.sentAt).toLocaleDateString([], { month: "short", day: "numeric" }) : "—"}
+                          {(row.sentAt || row.createdAt) ? new Date(row.sentAt || row.createdAt || "").toLocaleDateString([], { month: "short", day: "numeric" }) : "—"}
                         </p>
                       </div>
 
                       <div className="mt-1.5 flex items-center gap-2">
+                        <span className="rounded-full border border-border bg-muted/40 px-2 py-0.5 text-[11px] text-muted-foreground">{row.channel}</span>
                         <span className={`rounded-full border px-2 py-0.5 text-[11px] ${statusBadge(row.status)}`}>{row.status}</span>
                         <span className="text-[11px] text-muted-foreground">via {row.provider}</span>
                       </div>
+                      {row.error ? (
+                        <p className="mt-1.5 line-clamp-2 text-[11px] text-negative">
+                          {row.error}
+                        </p>
+                      ) : null}
                     </div>
                   </div>
                 ))}

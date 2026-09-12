@@ -18,7 +18,10 @@ import {
   testAgentTemplateTurn,
   markAgentTemplateTestedAction,
 } from "@/lib/agent-templates/test-actions";
-import type { StatelessToolCall } from "@/lib/agents/stateless-turn";
+import type {
+  StatelessToolCall,
+} from "@/lib/agents/stateless-turn";
+import type { PendingConfirmationAction } from "@/lib/agents/explicit-confirmation";
 import { LlmKeyDialog } from "@/components/integrations/llm-key-dialog";
 
 type Msg = {
@@ -26,6 +29,7 @@ type Msg = {
   content: string;
   /** Tool calls the agent made on this assistant turn (for the small note). */
   toolCalls?: StatelessToolCall[];
+  pendingAction?: PendingConfirmationAction;
 };
 
 /** Friendly, customer-safe labels for the tools a voice-receptionist can call.
@@ -96,7 +100,13 @@ export function TemplateTestClient(props: {
       .filter((m): m is Msg & { role: "user" | "assistant" } =>
         m.role === "user" || m.role === "assistant",
       )
-      .map((m) => ({ role: m.role, content: m.content }));
+      .map((m) => ({
+        role: m.role,
+        content: m.content,
+        ...(m.role === "assistant" && m.pendingAction
+          ? { pendingAction: m.pendingAction }
+          : {}),
+      }));
     const outgoing = [...priorTurns, { role: "user" as const, content: msg }];
 
     setMessages((m) => [...m, { role: "user", content: msg }]);
@@ -114,6 +124,7 @@ export function TemplateTestClient(props: {
             role: "assistant",
             content: result.reply || "…",
             toolCalls: result.toolCalls?.length ? result.toolCalls : undefined,
+            pendingAction: result.pendingAction,
           },
         ]);
       } else if (result.error === "no_llm_key") {

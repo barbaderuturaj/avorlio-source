@@ -32,7 +32,6 @@ export function OperatorLoginForm({
   const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(initialError ?? null);
   const [sentTo, setSentTo] = useState<string | null>(initialSentTo ?? null);
-  const [inboxUrl, setInboxUrl] = useState<string | null>(null);
 
   function handleSubmit() {
     startTransition(async () => {
@@ -44,7 +43,6 @@ export function OperatorLoginForm({
         });
         if (result.ok) {
           setSentTo(result.sentTo);
-          setInboxUrl(result.inboxUrl ?? null);
         } else {
           setError(humanizeReason(result.reason));
         }
@@ -86,28 +84,11 @@ export function OperatorLoginForm({
           The link is single-use and expires in 15 minutes. If you don&apos;t
           see it, check spam or request a new link below.
         </p>
-        {inboxUrl ? (
-          <a
-            href={inboxUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center justify-center w-full px-5 py-2.5 text-[13px] font-semibold"
-            style={{
-              backgroundColor: "#F7F7F5",
-              color: "#111",
-              border: "1px solid #E5E5E1",
-              borderRadius: "8px",
-            }}
-          >
-            Open Email Inbox
-          </a>
-        ) : null}
         <button
           type="button"
           onClick={() => {
             setSentTo(null);
             setError(null);
-            setInboxUrl(null);
           }}
           className="text-[12px] underline self-start"
           style={{ color: "#666" }}
@@ -190,16 +171,6 @@ export function OperatorLoginForm({
         {pending ? "Sending…" : "Send sign-in link"}
       </button>
 
-      <p className="text-[11px]" style={{ color: "#999" }}>
-        Are you a customer of {orgName}?{" "}
-        <a
-          href={`/customer/${orgSlug}/login`}
-          className="underline"
-          style={{ color: "#666" }}
-        >
-          Sign in here →
-        </a>
-      </p>
     </div>
   );
 }

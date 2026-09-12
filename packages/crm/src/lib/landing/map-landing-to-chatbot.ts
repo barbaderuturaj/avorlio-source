@@ -28,7 +28,7 @@ import { inferVertical } from "./r1-payload-prompt";
 export type MappedChatbotFaqEntry = {
   q: string;
   a: string;
-  source: "extracted";
+  source: "synthesized";
 };
 
 export type MappedChatbotPricingFact = {
@@ -91,7 +91,7 @@ export function mapLandingContentToChatbot(
         .map((item) => ({
           q: item.question.trim(),
           a: item.answer.trim(),
-          source: "extracted" as const,
+          source: "synthesized" as const,
         }))
     : [];
 

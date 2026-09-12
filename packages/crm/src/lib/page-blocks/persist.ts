@@ -671,7 +671,7 @@ async function persistBookingBlock(
     formFields: mergeBookingFormFields(props.form_fields ?? []),
     confirmation: prevBooking?.confirmation ?? {
       headline: "Your booking is confirmed",
-      message: "We'll send a calendar invite shortly. If anything changes, just reply to that email.",
+      message: "Your booking is confirmed.",
     },
   };
 

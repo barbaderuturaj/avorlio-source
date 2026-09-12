@@ -27,7 +27,7 @@
 // without conflicts). Theming via the agent's blueprint.greeting +
 // the workspace's primaryColor (queried at embed-load time).
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { agents, organizations } from "@/db/schema";
@@ -45,6 +45,7 @@ import {
 // workspaces hit the same logic in v2/complete BEFORE the chatbot
 // activates — this is the safety net for the existing ones.
 import { applyArchetypeThemeToOrg } from "@/lib/workspace/apply-archetype-theme";
+import { resolvePublicEmbedOrigin } from "@/lib/agents/public-embed-origin";
 
 export async function GET(
   request: Request,
@@ -69,13 +70,18 @@ export async function GET(
     })
     .from(agents)
     .innerJoin(organizations, eq(organizations.id, agents.orgId))
-    .where(eq(organizations.slug, orgSlugPart))
+    .where(
+      and(
+        eq(organizations.slug, orgSlugPart),
+        eq(agents.slug, agentSlugPart),
+      ),
+    )
     .limit(1);
 
   // Even if not found, return a no-op script (don't 404 — that
   // would log noise on the operator's website console).
-  const url = new URL(request.url);
-  const turnUrl = `${url.protocol}//${url.host}/api/v1/public/agent/${orgSlugPart}--${agentSlugPart}/turn`;
+  const publicOrigin = resolvePublicEmbedOrigin(request);
+  const turnUrl = `${publicOrigin}/api/v1/public/agent/${orgSlugPart}--${agentSlugPart}/turn`;
 
   if (!agentRow || agentRow.slug !== agentSlugPart || !["live", "test"].includes(agentRow.status)) {
     console.warn(JSON.stringify({
@@ -228,6 +234,7 @@ function renderEmbedScript(input: {
   window.__sf_agent_loaded__ = true;
   var CFG = ${JSON.stringify(config)};
   var SESSION_KEY = "sf_agent_session_" + (CFG.turnUrl.split("/turn")[0].split("/").pop() || "default");
+  var CONVERSATION_KEY = SESSION_KEY + "_conversation";
   var sessionId = (function(){
     try {
       var existing = localStorage.getItem(SESSION_KEY);
@@ -237,7 +244,24 @@ function renderEmbedScript(input: {
       return fresh;
     } catch(e) { return "anon-" + Date.now().toString(36); }
   })();
-  var conversationId = null;
+  var conversationId = (function(){
+    try {
+      return localStorage.getItem(CONVERSATION_KEY) || null;
+    } catch(e) {
+      return null;
+    }
+  })();
+  var restoredConversation = Boolean(conversationId);
+  var startNewConversation = false;
+  function persistConversationId(id){
+    if (!id) return;
+    conversationId = id;
+    restoredConversation = true;
+    startNewConversation = false;
+    try {
+      localStorage.setItem(CONVERSATION_KEY, id);
+    } catch(e) {}
+  }
 
   // 2026-05-22 — inject Google Fonts link into host page BEFORE the
   // panel CSS mounts, so the @font-face declarations are parsed by the
@@ -279,6 +303,10 @@ function renderEmbedScript(input: {
     // font so a clinical-trust dental gets Cabinet-Grotesk-styled name
     // while a bold-urgency plumber gets Outfit.
     ".sf-agent-header strong{font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:" + CFG.headlineFontStack + "}",
+    ".sf-agent-header-actions{display:flex;align-items:center;gap:4px;flex-shrink:0}",
+    ".sf-agent-new-chat{background:transparent;border:none;color:#fff;cursor:pointer;font-size:12px;padding:6px 8px;opacity:.9;border-radius:6px;font-family:inherit}",
+    ".sf-agent-new-chat:hover{opacity:1;background:rgba(255,255,255,.12)}",
+    ".sf-agent-new-chat:focus-visible{outline:2px solid #fff;outline-offset:1px}",
     ".sf-agent-close{background:transparent;border:none;color:#fff;cursor:pointer;font-size:24px;padding:4px 8px;opacity:.85;border-radius:6px;line-height:1}",
     ".sf-agent-close:hover{opacity:1;background:rgba(255,255,255,.12)}",
     ".sf-agent-close:focus-visible{outline:2px solid #fff;outline-offset:1px}",
@@ -370,7 +398,10 @@ function renderEmbedScript(input: {
     logoMarkup,
     '<strong>' + escapeHtml(CFG.orgName) + '</strong>',
     '</div>',
+    '<div class="sf-agent-header-actions">',
+    '<button class="sf-agent-new-chat" aria-label="Start a new chat" type="button">New chat</button>',
     '<button class="sf-agent-close" aria-label="Close chat" type="button">\\u00d7</button>',
+    '</div>',
     '</div>',
     '<div class="sf-agent-messages" id="sf-agent-msgs" role="log" aria-live="polite" aria-relevant="additions"></div>',
     '<form class="sf-agent-form" id="sf-agent-form" autocomplete="off">',
@@ -378,7 +409,6 @@ function renderEmbedScript(input: {
     '<textarea class="sf-agent-input" id="sf-agent-input" rows="1" placeholder="Type a message..." aria-label="Type a message"></textarea>',
     '<button class="sf-agent-send" type="submit" aria-label="Send message">Send</button>',
     '</form>',
-    '<div class="sf-agent-footer">Powered by <a href="https://seldonframe.com" target="_blank" rel="noopener">SeldonFrame</a></div>'
   ].join("");
 
   function escapeHtml(s){return String(s).replace(/[&<>"']/g, function(c){return ({"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"})[c];});}
@@ -423,6 +453,7 @@ function renderEmbedScript(input: {
   var inputEl = panel.querySelector("#sf-agent-input");
   var sendBtn = panel.querySelector(".sf-agent-send");
   var closeBtn = panel.querySelector(".sf-agent-close");
+  var newChatBtn = panel.querySelector(".sf-agent-new-chat");
 
   function appendMessage(role, content){
     var el = document.createElement("div");
@@ -460,6 +491,9 @@ function renderEmbedScript(input: {
     bubble.setAttribute("aria-expanded", "true");
     if (!msgsEl.children.length){
       appendMessage("assistant", CFG.greeting);
+      if (restoredConversation) {
+        appendMessage("system", "Continuing your recent chat. Choose New chat to start over.");
+      }
     }
     setTimeout(function(){ inputEl.focus(); }, 100);
   }
@@ -471,6 +505,15 @@ function renderEmbedScript(input: {
 
   bubble.addEventListener("click", openPanel);
   closeBtn.addEventListener("click", closePanel);
+  newChatBtn.addEventListener("click", function(){
+    if (sending) return;
+    startNewConversation = true;
+    restoredConversation = false;
+    msgsEl.innerHTML = "";
+    appendMessage("assistant", CFG.greeting);
+    appendMessage("system", "New chat ready.");
+    inputEl.focus();
+  });
 
   // v1.28.2 — Esc closes panel; Enter sends, Shift+Enter newline
   document.addEventListener("keydown", function(e){
@@ -516,6 +559,7 @@ function renderEmbedScript(input: {
         body: JSON.stringify({
           conversation_id: conversationId,
           anonymous_session_id: sessionId,
+          start_new_conversation: startNewConversation,
           message: msg,
           stream: true,
           channel_meta: {
@@ -528,7 +572,7 @@ function renderEmbedScript(input: {
       if (ctype.indexOf("text/event-stream") === -1) {
         // Server fell back to JSON (older route, error, etc.)
         var data = await res.json();
-        if (data.conversation_id) conversationId = data.conversation_id;
+        if (data.conversation_id) persistConversationId(data.conversation_id);
         typing.remove();
         appendMessage(data.message ? "assistant" : "system",
           data.message || "Something went wrong. Please try again.");
@@ -566,13 +610,13 @@ function renderEmbedScript(input: {
             try {
               var json = JSON.parse(payload);
               if (currentEvent === "start" && json.conversation_id) {
-                conversationId = json.conversation_id;
+                persistConversationId(json.conversation_id);
               } else if (currentEvent === "delta" && json.text) {
                 assistantText += json.text;
                 assistantEl.innerHTML = renderMarkdown(assistantText);
                 msgsEl.scrollTop = msgsEl.scrollHeight;
               } else if (currentEvent === "done") {
-                if (json.conversation_id) conversationId = json.conversation_id;
+                if (json.conversation_id) persistConversationId(json.conversation_id);
                 // Final markdown re-render to catch any partial-token edges
                 if (assistantText){
                   assistantEl.innerHTML = renderMarkdown(assistantText);

@@ -159,7 +159,7 @@ export function SiteShell({ archetype, mode = "light", workspaceId, orgTheme, ch
         <link key={family} rel="stylesheet" href={googleFontUrl(family)} />
       ))}
       {children}
-      {workspaceId && <PoweredByBadge workspaceId={workspaceId} />}
+      {false && workspaceId && <PoweredByBadge workspaceId={workspaceId} />}
       {/* Belt-and-suspenders: also clip at the html/body level so a child that
           escapes the flow can't add a scrollbar. Scoped global is fine here —
           the shell renders once per page. */}

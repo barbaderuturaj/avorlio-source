@@ -69,7 +69,7 @@ export function IntegrationBeam() {
           {/* eslint-disable-next-line @next/next/no-img-element -- static brand asset */}
           <img src="/brand/seldonframe-icon-white.svg" alt="" width={24} height={24} className="block" />
         </div>
-        <span className="text-[11px] font-[600] text-[#221D17]">SeldonFrame</span>
+        <span className="text-[11px] font-[600] text-[#221D17]">Avorlio</span>
       </div>
 
       {/* Outward: real integration targets, arranged in a column so each beam

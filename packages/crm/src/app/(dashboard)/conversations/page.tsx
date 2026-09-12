@@ -22,6 +22,7 @@ import { desc, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { contacts, smsMessages } from "@/db/schema";
 import { getOrgId } from "@/lib/auth/helpers";
+import { buildSmsInboxThreads, shouldShowDisconnectedPhoneEmptyState } from "@/lib/conversations/inbox-threads";
 import { getLabels } from "@/lib/soul/labels";
 import { hasLiveSmsForOrg } from "@/lib/telephony/config";
 
@@ -93,49 +94,8 @@ export default async function ConversationsPage() {
   // we filter to only those with at least one inbound row so the
   // inbox reflects "people who texted us" rather than every outbound
   // notification we ever sent.
-  const threadMap = new Map<
-    string,
-    {
-      contactId: string;
-      lastMessageAt: Date;
-      lastMessageBody: string;
-      lastMessageDirection: "inbound" | "outbound";
-      hasInbound: boolean;
-      // unread = inbound messages with no outbound after them. Walking
-      // the rows in desc order means as soon as we hit the first
-      // outbound for a contact, subsequent inbounds are NOT unread.
-      seenOutbound: boolean;
-      unreadCount: number;
-    }
-  >();
-
-  for (const row of rows) {
-    if (!row.contactId) continue;
-    const direction = row.direction as "inbound" | "outbound";
-    let thread = threadMap.get(row.contactId);
-    if (!thread) {
-      thread = {
-        contactId: row.contactId,
-        lastMessageAt: row.createdAt,
-        lastMessageBody: row.body,
-        lastMessageDirection: direction,
-        hasInbound: false,
-        seenOutbound: false,
-        unreadCount: 0,
-      };
-      threadMap.set(row.contactId, thread);
-    }
-    if (direction === "inbound") {
-      thread.hasInbound = true;
-      if (!thread.seenOutbound) thread.unreadCount += 1;
-    } else {
-      thread.seenOutbound = true;
-    }
-  }
-
-  const candidateContactIds = Array.from(threadMap.values())
-    .filter((thread) => thread.hasInbound)
-    .map((thread) => thread.contactId);
+  const smsThreads = buildSmsInboxThreads(rows);
+  const candidateContactIds = smsThreads.map((thread) => thread.contactId);
 
   // Resolve contact display names + phones in a single round-trip.
   const contactRows =
@@ -155,7 +115,7 @@ export default async function ConversationsPage() {
 
   const threads: ThreadRow[] = candidateContactIds
     .map((contactId) => {
-      const thread = threadMap.get(contactId)!;
+      const thread = smsThreads.find((item) => item.contactId === contactId)!;
       const contact = contactById.get(contactId) ?? null;
       const name = contact
         ? [contact.firstName, contact.lastName].filter(Boolean).join(" ").trim()
@@ -190,7 +150,7 @@ export default async function ConversationsPage() {
       {threads.length === 0 ? (
         <article className="crm-card mx-auto max-w-[480px] p-10 text-center">
           <MessageCircle className="mx-auto mb-4 size-10 text-muted-foreground" />
-          {phoneConnected ? (
+          {!shouldShowDisconnectedPhoneEmptyState({ phoneConnected, threadCount: threads.length }) ? (
             <>
               <h3 className="text-base font-semibold tracking-tight">
                 No inbound messages yet

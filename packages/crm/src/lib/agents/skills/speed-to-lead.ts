@@ -9,8 +9,8 @@
 // route handler, runtime, or test.
 //
 // Contract (pinned by tests/unit/agents/skills/speed-to-lead.spec.ts):
-//   • the body acknowledges receipt AND names a next step ("we'll be in touch
-//     shortly");
+//   • the body acknowledges receipt AND says the inquiry was passed to the team,
+//     without promising when a person will respond;
 //   • the businessName is used for the sign-off (it's who the lead hears from);
 //   • SMS is one short, subject-less line; email returns a subject + body;
 //   • every field is optional and degrades gracefully — no "null"/"undefined"
@@ -43,7 +43,7 @@ export function composeSpeedToLead(args: {
     const ack = business
       ? `Thanks for reaching out to ${business} ${re}.`
       : `Thanks for reaching out ${re}.`;
-    const next = "We got your message and will be in touch shortly.";
+    const next = "We received your message and passed it to the team for follow-up.";
     const body = `${hi}${ack} ${next}`.trim();
     return { body };
   }
@@ -61,9 +61,9 @@ export function composeSpeedToLead(args: {
       ? `Thank you for reaching out to ${business} ${re} — we've received your message.`
       : `Thank you for reaching out ${re} — we've received your message.`,
     "",
-    "One of our team will be in touch with you shortly. In the meantime, if anything is urgent, just reply to this message and we'll prioritize it.",
+    "We passed your message to the team for follow-up.",
     "",
-    "Talk soon,",
+    "Thank you,",
     signOff,
   ].join("\n");
 

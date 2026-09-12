@@ -192,14 +192,28 @@ export async function createBookingForCustomer(
   //    the booking is in pending_payment status (the Stripe webhook
   //    will emit booking.created once payment completes).
   if (status !== "pending_payment") {
-    await emitSeldonEvent(
-      "booking.created",
-      {
-        appointmentId: created.id,
-        contactId: input.customer.contactId,
-      },
-      { orgId: input.orgId },
-    );
+    try {
+      await emitSeldonEvent(
+        "booking.created",
+        {
+          appointmentId: created.id,
+          contactId: input.customer.contactId,
+        },
+        { orgId: input.orgId },
+      );
+    } catch (err) {
+      // The booking row is authoritative. Event-triggered notifications are
+      // best-effort and must never turn a committed booking into a failed
+      // tool result or cause a retry booking.
+      console.error(
+        JSON.stringify({
+          event: "createBookingForCustomer.booking_created_event_failed",
+          orgId: input.orgId,
+          bookingId: created.id,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    }
   }
 
   return {

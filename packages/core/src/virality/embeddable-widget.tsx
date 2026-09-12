@@ -3,7 +3,7 @@ import { PoweredByBadge } from "./powered-by-badge";
 export function EmbeddableWidget({
   title,
   iframeSrc,
-  removeBranding = false,
+  removeBranding = true,
 }: {
   title?: string;
   iframeSrc: string;

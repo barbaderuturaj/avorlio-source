@@ -3,8 +3,6 @@ import Link from "next/link";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { toInternalRedirectPath } from "@/lib/auth/signup-redirect";
-import { isGoogleAuthEnabled } from "@/lib/auth/google-enabled";
-import { isDemoReadonly } from "@/lib/demo/server";
 import { resolveAppOrigin } from "@/lib/marketplace/buy-box-auth";
 
 // 2026-07-04 — Prod incident: Google OAuth failed with
@@ -74,20 +72,13 @@ export default async function LoginPage({
     <div className="space-y-6">
       <div className="space-y-4">
         <div className="text-center">
-          <h1 className="text-section-title text-foreground">Welcome to SeldonFrame</h1>
+          <h1 className="text-section-title text-foreground">Welcome to Avorlio</h1>
           <p className="mt-1 text-label text-[hsl(var(--color-text-secondary))]">
-            The operating system for your business.
+            AI Front Office for service businesses.
           </p>
         </div>
         <LoginForm
           redirectTo={redirectTo}
-          googleEnabled={
-            isGoogleAuthEnabled({
-              GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
-              GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
-            }) && !isDemoReadonly()
-          }
-          // demo-readonly: hide Google — assertWritable would reject the action with a raw error boundary (review 2026-07-04)
         />
       </div>
 
@@ -99,7 +90,13 @@ export default async function LoginPage({
           <Link href="/terms" className="underline-offset-4 hover:underline">
             Terms of Service
           </Link>
-          <span className="ml-auto">&copy; 2026 SeldonFrame</span>
+          <a
+            href="https://github.com/barbaderuturaj/avorlio-source"
+            className="underline-offset-4 hover:underline"
+          >
+            Source Code · AGPL-3.0
+          </a>
+          <span className="ml-auto">&copy; 2026 Avorlio</span>
         </div>
       </footer>
     </div>

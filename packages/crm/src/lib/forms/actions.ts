@@ -1,6 +1,6 @@
 "use server";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
 import { contacts, intakeForms, intakeSubmissions, organizations } from "@/db/schema";
@@ -10,6 +10,7 @@ import { emitSeldonEvent } from "@/lib/events/bus";
 import { dispatchWebhook } from "@/lib/utils/webhooks";
 import { assertWritable } from "@/lib/demo/server";
 import type { IntakeFormField } from "@/db/schema/intake-forms";
+import { validatePublicIntakeAnswers } from "@/lib/forms/validation";
 
 function toSlug(value: string) {
   return (
@@ -74,7 +75,25 @@ export async function listForms() {
     return [];
   }
 
-  return db.select().from(intakeForms).where(eq(intakeForms.orgId, orgId));
+  return db
+    .select({
+      id: intakeForms.id,
+      orgId: intakeForms.orgId,
+      name: intakeForms.name,
+      slug: intakeForms.slug,
+      fields: intakeForms.fields,
+      settings: intakeForms.settings,
+      contentHtml: intakeForms.contentHtml,
+      contentCss: intakeForms.contentCss,
+      isActive: intakeForms.isActive,
+      createdAt: intakeForms.createdAt,
+      updatedAt: intakeForms.updatedAt,
+      submissionCount: sql<number>`count(${intakeSubmissions.id})::int`,
+    })
+    .from(intakeForms)
+    .leftJoin(intakeSubmissions, eq(intakeSubmissions.formId, intakeForms.id))
+    .where(eq(intakeForms.orgId, orgId))
+    .groupBy(intakeForms.id);
 }
 
 export async function createSuggestedFormAction() {
@@ -220,7 +239,15 @@ export async function submitPublicIntakeAction({
     throw new Error("Form not found");
   }
 
-  const email = typeof data.email === "string" ? data.email : null;
+  const [formFields] = await db
+    .select({ fields: intakeForms.fields })
+    .from(intakeForms)
+    .where(eq(intakeForms.id, form.id))
+    .limit(1);
+  const validationError = validatePublicIntakeAnswers(formFields?.fields ?? [], data);
+  if (validationError) throw new Error(validationError);
+
+  const email = typeof data.email === "string" ? data.email.trim() : null;
 
   let contactId: string | null = null;
 

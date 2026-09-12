@@ -55,7 +55,7 @@ function SeldonFrameMark({ className = "" }: { className?: string }) {
 export function PoweredByBadge({
   href = "https://seldonframe.com",
   label = "Powered by SeldonFrame",
-  removeBranding = false,
+  removeBranding = true,
   variant = "light",
 }: {
   href?: string;

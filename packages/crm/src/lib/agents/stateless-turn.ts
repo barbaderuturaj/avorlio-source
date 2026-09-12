@@ -12,7 +12,7 @@
 // blocks the production runtime uses — `composeSystemPrompt` (the channel-
 // agnostic brain: persona + soul + FAQ + pricing + hard-rules), the
 // `getToolsForCapabilities` / `findTool` tool registry, the same `MODEL`, the
-// same `MAX_TURN_ITERATIONS` cap, and the same Anthropic Messages-API message
+// same bounded Anthropic Messages-API message
 // shape. It does NOT re-implement prompt assembly or tool dispatch; it only
 // drops the persistence + budgeting + validator-regen layers that don't apply
 // to a throwaway sandbox turn.
@@ -30,10 +30,16 @@
 
 import type Anthropic from "@anthropic-ai/sdk";
 import type { OrgSoul } from "@/lib/soul/types";
-import type { AgentBlueprint, AgentToolCall } from "@/db/schema/agents";
+import type { AgentBlueprint, AgentToolCall, AgentToolResult } from "@/db/schema/agents";
 import { composeSystemPrompt } from "./prompt";
+import { sanitizeUnbackedOperationalPromises } from "./validators";
+import {
+  enforceExplicitConfirmation,
+  type PendingConfirmationAction,
+} from "./explicit-confirmation";
 import {
   getToolsForCapabilities,
+  buildAvailabilityAssistantMessage,
   type AgentTool,
   type ToolExecuteContext,
 } from "./tools";
@@ -50,15 +56,20 @@ import {
 // Mirror runtime.ts exactly so a template test behaves like the live agent.
 const MODEL =
   process.env.ANTHROPIC_AGENT_MODEL?.trim() || "claude-sonnet-4-5-20250929";
-const MAX_TURN_ITERATIONS = 6; // tool-call cap per single turn (catches loops)
+const MAX_TURN_ITERATIONS = 3; // Studio sandbox loop cap per single turn
+const MAX_TOOL_CALLS = 4; // bounds multi-tool responses as well as loop retries
 const MAX_TOKENS = 1024;
+const TOOL_LOOP_LIMIT_MESSAGE =
+  "I couldn't complete that request right now. Please try again in a moment.";
 
 /** A chat message in a stateless turn. `tool_use` / `tool_result` blocks are
- *  handled internally per-turn, so the cross-turn history the caller keeps is
- *  just plain user/assistant text — exactly what a chat panel holds. */
+ *  handled internally per-turn; the optional pending action is the small
+ *  structured exception needed to bind a later confirmation to one proposal. */
 export type StatelessChatMessage = {
   role: "user" | "assistant";
   content: string;
+  /** Ephemeral Studio state: binds an affirmative to the exact pending action. */
+  pendingAction?: PendingConfirmationAction;
 };
 
 /** A surfaced tool call (name only is enough for the test panel's "checked
@@ -232,7 +243,12 @@ function emitToolEvent(
 }
 
 export type RunStatelessAgentTurnResult =
-  | { ok: true; reply: string; toolCalls: StatelessToolCall[] }
+  | {
+      ok: true;
+      reply: string;
+      toolCalls: StatelessToolCall[];
+      pendingAction?: PendingConfirmationAction;
+    }
   | { ok: false; reason: string; message: string };
 
 // The Anthropic Messages-API message shape (mirrors runtime.ts).
@@ -309,9 +325,19 @@ export async function runStatelessAgentTurn(
   let priorToolError = false;
 
   const allToolCalls: StatelessToolCall[] = [];
+  const runtimeToolCalls: AgentToolCall[] = [];
+  const runtimeToolResults: AgentToolResult[] = [];
+  const latestAssistantMessage = [...input.messages]
+    .reverse()
+    .find((message) => message.role === "assistant");
+  let pendingAction = latestAssistantMessage?.pendingAction ?? null;
+  let confirmationConsumed = false;
+  let stateChangeSucceeded = false;
+  let deterministicAvailabilityReply: string | null = null;
+  let toolBudgetExhausted = false;
   let finalText = "";
 
-  for (let iter = 0; iter < MAX_TURN_ITERATIONS; iter++) {
+  turnLoop: for (let iter = 0; iter < MAX_TURN_ITERATIONS; iter++) {
     const turnModel = input.modelOverride ?? resolveTurnModel({
       userMessage: lastUserMessage,
       toolNamesAvailable,
@@ -389,9 +415,26 @@ export async function runStatelessAgentTurn(
       is_error?: boolean;
     }> = [];
     for (const tu of toolUseBlocks) {
+      if (stateChangeSucceeded) break;
+      if (allToolCalls.length >= MAX_TOOL_CALLS) {
+        toolBudgetExhausted = true;
+        break;
+      }
+      const gatedInput = enforceExplicitConfirmation(
+        tu.name,
+        tu.input,
+        lastUserMessage,
+        pendingAction,
+        confirmationConsumed,
+      );
       allToolCalls.push({
         name: tu.name,
-        input: (tu.input as Record<string, unknown>) ?? {},
+        input: (gatedInput as Record<string, unknown>) ?? {},
+      });
+      runtimeToolCalls.push({
+        id: tu.id,
+        name: tu.name,
+        input: (gatedInput as Record<string, unknown>) ?? {},
       });
       emitToolEvent(input.onToolEvent, { tool: tu.name, phase: "start", line: `Calling ${tu.name}…` });
       // Resolve across the built tool set (natives + any wrapped MCP tools),
@@ -399,6 +442,11 @@ export async function runStatelessAgentTurn(
       // the prior findTool lookup did.
       const tool = tools.find((t) => t.name === tu.name);
       if (!tool) {
+        runtimeToolResults.push({
+          toolCallId: tu.id,
+          ok: false,
+          error: `Unknown tool: ${tu.name}`,
+        });
         toolResultsForThisIter.push({
           type: "tool_result",
           tool_use_id: tu.id,
@@ -413,8 +461,13 @@ export async function runStatelessAgentTurn(
         });
         continue;
       }
-      const parsed = tool.inputSchema.safeParse(tu.input);
+      const parsed = tool.inputSchema.safeParse(gatedInput);
       if (!parsed.success) {
+        runtimeToolResults.push({
+          toolCallId: tu.id,
+          ok: false,
+          error: `Input validation failed: ${parsed.error.message}`,
+        });
         toolResultsForThisIter.push({
           type: "tool_result",
           tool_use_id: tu.id,
@@ -445,6 +498,36 @@ export async function runStatelessAgentTurn(
         const output = input.wrapToolCall
           ? await input.wrapToolCall(tu.name, parsed.data, runExecute)
           : await runExecute();
+        if (tu.name === "look_up_availability") {
+          const availabilityReply = buildAvailabilityAssistantMessage(output);
+          if (availabilityReply) {
+            deterministicAvailabilityReply = availabilityReply;
+          }
+        }
+        if (
+          output &&
+          typeof output === "object" &&
+          (output as { needsConfirmation?: unknown }).needsConfirmation === true
+        ) {
+          pendingAction = {
+            toolName: tu.name,
+            input: { ...((gatedInput as Record<string, unknown>) ?? {}), confirmed: false },
+          };
+        } else if (
+          tu.name === "book_appointment" ||
+          tu.name === "reschedule_appointment" ||
+          tu.name === "cancel_appointment"
+        ) {
+          const outputRecord = output && typeof output === "object"
+            ? (output as { ok?: unknown })
+            : null;
+          if (outputRecord?.ok === true) {
+            confirmationConsumed = true;
+            pendingAction = null;
+            stateChangeSucceeded = true;
+          }
+        }
+        runtimeToolResults.push({ toolCallId: tu.id, ok: true, output });
         toolResultsForThisIter.push({
           type: "tool_result",
           tool_use_id: tu.id,
@@ -463,8 +546,10 @@ export async function runStatelessAgentTurn(
           ok: true,
           line: proof ? `${tu.name} succeeded (${proof}).` : `${tu.name} succeeded.`,
         });
+        if (deterministicAvailabilityReply) break;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        runtimeToolResults.push({ toolCallId: tu.id, ok: false, error: message });
         // The raw `message` stays ONLY in this non-persisted tool_result
         // content — it's fed back to the LLM within THIS turn to help it
         // recover, and is never itself written to a durable store. The
@@ -487,14 +572,50 @@ export async function runStatelessAgentTurn(
       }
     }
 
+    if (deterministicAvailabilityReply) {
+      finalText = deterministicAvailabilityReply;
+      break turnLoop;
+    }
+    if (toolBudgetExhausted) {
+      finalText = TOOL_LOOP_LIMIT_MESSAGE;
+      break turnLoop;
+    }
+
+    if (stateChangeSucceeded) {
+      const successfulTool = allToolCalls[allToolCalls.length - 1]?.name;
+      finalText =
+        successfulTool === "book_appointment"
+          ? "Your appointment was booked."
+          : successfulTool === "reschedule_appointment"
+            ? "Your appointment was rescheduled."
+            : successfulTool === "cancel_appointment"
+              ? "Your appointment was canceled."
+              : finalText;
+      break turnLoop;
+    }
+
     // Did any tool in this iteration error? If so, the NEXT iteration is a
     // recovery turn → escalate it to the premium model via resolveTurnModel.
     priorToolError = toolResultsForThisIter.some((r) => r.is_error === true);
 
     messages.push({ role: "user", content: toolResultsForThisIter });
+
+    if (iter === MAX_TURN_ITERATIONS - 1) {
+      finalText = TOOL_LOOP_LIMIT_MESSAGE;
+      break turnLoop;
+    }
   }
 
-  return { ok: true, reply: finalText, toolCalls: allToolCalls };
+  return {
+    ok: true,
+    reply: sanitizeUnbackedOperationalPromises(
+      finalText,
+      runtimeToolCalls,
+      runtimeToolResults,
+    ),
+    toolCalls: allToolCalls,
+    ...(pendingAction ? { pendingAction } : {}),
+  };
 }
 
 // Re-export the AgentToolCall type for callers that want the canonical shape.

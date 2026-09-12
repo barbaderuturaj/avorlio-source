@@ -154,14 +154,32 @@ const THIRTY_DAYS_MINUTES = 60 * 24 * 30; // 43200
  *   NO quiet hours and NO per-contact gap (only the high daily budget brake).
  * - anything else: `null` (no defaults — the caller decides).
  */
-export function defaultGuardrailsForSkill(skill: string): Guardrails | null {
+export function normalizeGuardrailTimezone(timezone: string | null | undefined): string {
+  const candidate = timezone?.trim();
+  if (!candidate) return "UTC";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: candidate }).format(new Date(0));
+    return candidate;
+  } catch {
+    return "UTC";
+  }
+}
+
+export function defaultGuardrailsForSkill(
+  skill: string,
+  workspaceTimezone: string | null | undefined = "UTC",
+): Guardrails | null {
   switch (skill) {
     case "review-requester":
       return {
         enabled: true,
         maxPerDayPerAgent: 200,
         minMinutesBetweenPerContact: THIRTY_DAYS_MINUTES,
-        quietHours: { startHour: 21, endHour: 8, tz: "UTC" },
+        quietHours: {
+          startHour: 21,
+          endHour: 8,
+          tz: normalizeGuardrailTimezone(workspaceTimezone),
+        },
       };
     case "speed-to-lead":
       return {

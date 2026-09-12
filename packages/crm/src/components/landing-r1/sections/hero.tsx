@@ -464,8 +464,8 @@ function HeroStyles() {
       @media (min-width: 1024px) {
         .hero-split {
           grid-template-columns: 1fr 1fr;       /* TRUE 50-50 */
-          gap: 56px;
-          padding-top: 88px; padding-bottom: 96px;
+          gap: 72px;
+          padding-top: 104px; padding-bottom: 112px;
           align-items: center;
         }
       }

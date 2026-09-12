@@ -19,6 +19,10 @@ function isAnswerValid(field: Field, value: string): boolean {
   if (field.required && !trimmed) return false;
   if (!trimmed) return true; // optional + empty → fine
   if (field.type === "email") return EMAIL_PATTERN.test(trimmed);
+  if (field.type === "tel") {
+    const digits = trimmed.replace(/\D/g, "");
+    return digits.length >= 7 && !/^([0-9])\1+$/.test(digits);
+  }
   return true;
 }
 
@@ -37,8 +41,13 @@ export function PublicForm({
   const [step, setStep] = useState<Step>({ kind: "welcome" });
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [errorFor, setErrorFor] = useState<string | null>(null);
+  const [isMac, setIsMac] = useState(false);
   const { showDemoToast } = useDemoToast();
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    setIsMac(/Mac|iPhone|iPad/.test(navigator.platform));
+  }, []);
 
   const totalQuestions = fields.length;
   const estimatedMinutes = useMemo(() => Math.max(1, Math.round(totalQuestions * 0.25)), [totalQuestions]);
@@ -171,6 +180,17 @@ export function PublicForm({
             Your response has been submitted.
           </p>
         </div>
+        <button
+          type="button"
+          className="crm-button-secondary h-10 px-5 text-sm font-semibold"
+          onClick={() => {
+            setAnswers({});
+            setErrorFor(null);
+            setStep({ kind: "welcome" });
+          }}
+        >
+          Submit another response
+        </button>
       </div>
     );
   }
@@ -239,6 +259,7 @@ export function PublicForm({
             }}
             onKeyDown={(event) => handleKeyDown(event, currentField.type)}
             inputRef={inputRef}
+            shortcutLabel={isMac ? "Cmd" : "Ctrl"}
             onSelect={(value) => {
               setAnswers((prev) => ({ ...prev, [currentField.key]: value }));
               setErrorFor(null);
@@ -292,6 +313,7 @@ function QuestionInput({
   onKeyDown,
   onSelect,
   inputRef,
+  shortcutLabel,
 }: {
   field: Field;
   value: string;
@@ -299,6 +321,7 @@ function QuestionInput({
   onKeyDown: (event: React.KeyboardEvent) => void;
   onSelect: (value: string) => void;
   inputRef: React.MutableRefObject<HTMLInputElement | HTMLTextAreaElement | null>;
+  shortcutLabel: "Cmd" | "Ctrl";
 }) {
   const common = {
     id: field.key,
@@ -318,7 +341,7 @@ function QuestionInput({
         }}
         rows={4}
         className="crm-input min-h-24 w-full rounded-lg p-3 text-base"
-        placeholder="Type your answer (Cmd/Ctrl+Enter to continue)"
+        placeholder={`Type your answer (${shortcutLabel}+Enter to continue)`}
       />
     );
   }

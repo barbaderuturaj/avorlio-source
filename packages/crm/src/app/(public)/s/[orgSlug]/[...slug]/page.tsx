@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import { PoweredByBadge } from "@seldonframe/core/virality";
 import { PageRenderer } from "@/components/landing/page-renderer";
 import { ChatbotEmbedScript } from "@/components/landing/chatbot-script";
@@ -23,6 +24,13 @@ import { shouldIndexWorkspace } from "@/lib/web-build/policy";
 import { rewriteR1Hrefs } from "@/lib/landing/r1-rewrite-hrefs";
 import { resolveMapQuery } from "@/lib/landing/map-embed";
 import { buildWorkspaceUrls } from "@/lib/billing/anonymous-workspace";
+import {
+  buildPublicBookingUrl,
+  buildPublicIntakeUrl,
+  getPublicBookingTemplateForOrg,
+  getPublicIntakeFormForOrg,
+  requestOriginFromHeaders,
+} from "@/lib/bookings/public-booking-url";
 import { getWorkspaceTemplateContext } from "@/lib/landing/public-workspace";
 import { submittedSoulToTemplateData } from "@/lib/landing/r1-payload-to-template";
 import { renderLandingTemplate } from "@/lib/landing/render-landing-template";
@@ -39,6 +47,12 @@ import { Navbar } from "@/components/landing-r1/chrome/navbar";
 import { SiteShell } from "@/components/landing-r1/shell/site-shell";
 import { ServicePageTemplate } from "@/components/landing-r1/sections/service-page";
 import { findServicePage, getServicePages } from "@/lib/landing/r1-site-tree";
+import {
+  buildVerifiedBusinessFacts,
+  sanitizePublicClaimText,
+  sanitizePublicHtml,
+  sanitizePublicLandingData,
+} from "@/lib/landing/factual-grounding";
 
 type PageProps = {
   params: Promise<{ orgSlug: string; slug: string[] }>;
@@ -143,7 +157,8 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
     const ctx = await getWorkspaceTemplateContext(orgSlug);
     const soul = ctx ? submittedSoulToTemplateData(ctx.soul) : null;
     if (soul && soul.business_name !== "Our Practice") {
-      const description = soul.soul_description ?? soul.tagline;
+      const facts = buildVerifiedBusinessFacts(ctx!.soul, ctx!.settings);
+      const description = sanitizePublicClaimText(soul.soul_description ?? soul.tagline, facts, undefined);
       // ctx is non-null here (soul came from it above).
       const indexable = shouldIndexWorkspace(ctx!.ownerId, ctx!.settings);
       return {
@@ -185,9 +200,28 @@ export default async function PublicSPage({ params }: PageProps) {
         process.env.WORKSPACE_BASE_DOMAIN ?? "app.seldonframe.com",
         r1Data.orgId,
       );
+      const bookingTemplate = await getPublicBookingTemplateForOrg(r1Data.orgId);
+      const requestOrigin = requestOriginFromHeaders(await headers());
+      const bookingUrl = bookingTemplate
+        ? buildPublicBookingUrl({
+            requestOrigin,
+            orgSlug,
+            bookingSlug: bookingTemplate.slug,
+            baseDomain: process.env.WORKSPACE_BASE_DOMAIN ?? "app.seldonframe.com",
+          })
+        : null;
+      const intakeForm = await getPublicIntakeFormForOrg(r1Data.orgId);
+      const intakeUrl = intakeForm
+        ? buildPublicIntakeUrl({
+            requestOrigin,
+            orgSlug,
+            formSlug: intakeForm.slug,
+            baseDomain: process.env.WORKSPACE_BASE_DOMAIN ?? "app.seldonframe.com",
+          })
+        : null;
       const payload = rewriteR1Hrefs(r1Data.payload, {
-        book: workspaceUrls.book,
-        intake: workspaceUrls.intake,
+        book: bookingUrl,
+        intake: intakeUrl,
         home: workspaceUrls.home,
       });
       const r1ChatbotEmbed = await getPublicChatbotEmbed(r1Data.orgId);
@@ -209,12 +243,13 @@ export default async function PublicSPage({ params }: PageProps) {
             homeHref="/"
             cta={payload.nav?.cta}
             logoUrl={payload.logo}
+            showReviews={payload.testimonials.testimonials.length > 0}
           />
           <ServicePageTemplate
             archetype={payload.hero.archetype}
             service={servicePage}
             phone={payload.footer.phone}
-            ctaHref={workspaceUrls.book}
+            ctaHref={bookingUrl ?? "#contact"}
             orgSlug={orgSlug}
             businessName={payload.hero.businessName}
             leadForm={payload.leadForm}
@@ -236,6 +271,25 @@ export default async function PublicSPage({ params }: PageProps) {
   if (isHomePage(pageSlug)) {
     const r1Data = await loadLandingPayload(orgSlug);
     if (r1Data) {
+      const bookingTemplate = await getPublicBookingTemplateForOrg(r1Data.orgId);
+      const requestOrigin = requestOriginFromHeaders(await headers());
+      const bookingUrl = bookingTemplate
+        ? buildPublicBookingUrl({
+            requestOrigin,
+            orgSlug,
+            bookingSlug: bookingTemplate.slug,
+            baseDomain: process.env.WORKSPACE_BASE_DOMAIN ?? "app.seldonframe.com",
+          })
+        : null;
+      const intakeForm = await getPublicIntakeFormForOrg(r1Data.orgId);
+      const intakeUrl = intakeForm
+        ? buildPublicIntakeUrl({
+            requestOrigin,
+            orgSlug,
+            formSlug: intakeForm.slug,
+            baseDomain: process.env.WORKSPACE_BASE_DOMAIN ?? "app.seldonframe.com",
+          })
+        : null;
       // Health-templates parity (mirrors /w/[slug]): a workspace that picked a
       // premium template renders it on its subdomain too — /w and the subdomain
       // must never diverge. The template builds its own workspace-scoped CTAs,
@@ -247,6 +301,18 @@ export default async function PublicSPage({ params }: PageProps) {
         r1: { payload: r1Data.payload, archetype: r1Data.archetype },
         soul: null,
         themeArchetype: r1Data.theme?.aestheticArchetype,
+        bookingUrl,
+        intakeUrl,
+        facts: buildVerifiedBusinessFacts(
+          {
+            business_name: r1Data.payload.footer.businessName,
+            phone: r1Data.payload.footer.phone,
+            service_area: r1Data.payload.footer.serviceAreas,
+            offerings: r1Data.payload.services.services.map((service) => service.name),
+            emergency_service: Boolean(r1Data.payload.emergency),
+          },
+          r1Data.settings,
+        ),
       });
       if (templatePage) {
         const embed = await getPublicChatbotEmbed(r1Data.orgId);
@@ -265,8 +331,8 @@ export default async function PublicSPage({ params }: PageProps) {
         r1Data.orgId,
       );
       const payload = rewriteR1Hrefs(r1Data.payload, {
-        book: workspaceUrls.book,
-        intake: workspaceUrls.intake,
+        book: bookingUrl,
+        intake: intakeUrl,
         home: workspaceUrls.home,
       });
       // Subdomain R-branch chatbot embed (mirrors /w/[slug] route).
@@ -292,6 +358,7 @@ export default async function PublicSPage({ params }: PageProps) {
             homeHref="/"
             cta={payload.nav?.cta}
             logoUrl={payload.logo}
+            showReviews={payload.testimonials.testimonials.length > 0}
           />
           {payload.emergency && <EmergencyStrip {...payload.emergency} />}
           <Hero {...payload.hero} orgSlug={orgSlug} leadForm={payload.leadForm} />
@@ -320,6 +387,25 @@ export default async function PublicSPage({ params }: PageProps) {
       // template dispatch returns null.
       const ctx = await getWorkspaceTemplateContext(orgSlug);
       if (ctx) {
+        const bookingTemplate = await getPublicBookingTemplateForOrg(ctx.orgId);
+        const requestOrigin = requestOriginFromHeaders(await headers());
+        const bookingUrl = bookingTemplate
+          ? buildPublicBookingUrl({
+              requestOrigin,
+              orgSlug,
+              bookingSlug: bookingTemplate.slug,
+              baseDomain: process.env.WORKSPACE_BASE_DOMAIN ?? "app.seldonframe.com",
+            })
+          : null;
+        const intakeForm = await getPublicIntakeFormForOrg(ctx.orgId);
+        const intakeUrl = intakeForm
+          ? buildPublicIntakeUrl({
+              requestOrigin,
+              orgSlug,
+              formSlug: intakeForm.slug,
+              baseDomain: process.env.WORKSPACE_BASE_DOMAIN ?? "app.seldonframe.com",
+            })
+          : null;
         const templatePage = renderLandingTemplate({
           slug: orgSlug,
           orgId: ctx.orgId,
@@ -327,6 +413,9 @@ export default async function PublicSPage({ params }: PageProps) {
           r1: null,
           soul: ctx.soul,
           themeArchetype: ctx.theme?.aestheticArchetype,
+          bookingUrl,
+          intakeUrl,
+          facts: buildVerifiedBusinessFacts(ctx.soul, ctx.settings),
         });
         if (templatePage) {
           const embed = await getPublicChatbotEmbed(ctx.orgId);
@@ -366,6 +455,16 @@ export default async function PublicSPage({ params }: PageProps) {
   // flip. Now both old + new workspaces render light by default; the
   // operator can re-enable dark via theme settings if they want.
   const publicTheme = { ...theme, mode: "light" as const };
+  const facts = buildVerifiedBusinessFacts(payload.orgSoul, payload.orgSettings);
+  const safeContentHtml = payload.page.contentHtml
+    ? sanitizePublicHtml(payload.page.contentHtml, facts)
+    : payload.page.contentHtml;
+  const safePuckData = payload.page.puckData
+    ? sanitizePublicLandingData(payload.page.puckData, facts) as Record<string, unknown>
+    : payload.page.puckData;
+  const safeSections = payload.page.sections
+    ? sanitizePublicLandingData(payload.page.sections, facts) as LandingSection[]
+    : payload.page.sections;
 
   await trackLandingVisitAction({
     pageId: payload.page.id,
@@ -398,15 +497,15 @@ export default async function PublicSPage({ params }: PageProps) {
   return (
     <PublicThemeProvider theme={publicTheme}>
       <main className="light min-h-screen" style={{ backgroundColor: "var(--sf-bg)", color: "var(--sf-text)" }}>
-        {payload.page.puckData ? (
-          <PuckPageRenderer data={payload.page.puckData as Record<string, unknown>} orgId={payload.orgId} />
-        ) : payload.page.contentHtml && payload.page.contentCss ? (
+        {safePuckData ? (
+          <PuckPageRenderer data={safePuckData} orgId={payload.orgId} />
+        ) : safeContentHtml && payload.page.contentCss ? (
           <>
             <style dangerouslySetInnerHTML={{ __html: payload.page.contentCss }} />
-            <div dangerouslySetInnerHTML={{ __html: payload.page.contentHtml }} />
+            <div dangerouslySetInnerHTML={{ __html: safeContentHtml }} />
           </>
         ) : (
-          <PageRenderer sections={(payload.page.sections as LandingSection[]) ?? []} />
+          <PageRenderer sections={safeSections ?? []} />
         )}
 
         {showBadge ? (

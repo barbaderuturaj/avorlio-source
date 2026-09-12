@@ -141,7 +141,7 @@ export default async function ContactRecordPage({
       .orderBy(desc(portalDocuments.createdAt)),
     getContactRevenue(id).catch(() => 0),
     db
-      .select({ slug: organizations.slug })
+      .select({ slug: organizations.slug, timezone: organizations.timezone })
       .from(organizations)
       .where(eq(organizations.id, orgId))
       .limit(1)
@@ -291,6 +291,7 @@ export default async function ContactRecordPage({
         initialTab={initialTab}
         orgId={orgId}
         orgSlug={orgRow?.slug ?? null}
+        workspaceTimezone={orgRow?.timezone ?? "UTC"}
         clientWorkspaceSlug={clientWorkspaceSlug}
         portalGate={{
           allowed: portalGate.allowed,

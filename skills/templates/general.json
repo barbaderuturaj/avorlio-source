@@ -4,7 +4,7 @@
   "workspace": {
     "name": "[Your Business Name]",
     "industry": "general",
-    "tagline": "Local. Trusted. Fast.",
+    "tagline": "Local service, clear next steps.",
     "theme": {
       "mode": "light",
       "accent": "#1A1A1A",
@@ -45,8 +45,8 @@
         "type": "hero",
         "eyebrow": "[City] · [Service Category]",
         "headline": "Reliable [service] you can count on",
-        "subhead": "We help homeowners and businesses get [outcome] without the hassle. Free quote in under a day.",
-        "ctaPrimary": { "label": "Book a free consultation", "href": "/book", "kind": "primary" },
+        "subhead": "Tell us what you need and we'll help route your request.",
+        "ctaPrimary": { "label": "Request service", "href": "/book", "kind": "primary" },
         "ctaSecondary": { "label": "Get in touch", "href": "/intake", "kind": "secondary" },
         "imageUrl": null,
         "variant": "split-image-right"
@@ -54,9 +54,9 @@
       {
         "type": "trust-strip",
         "items": [
-          { "icon": "Star", "label": "5-star rated by local customers" },
-          { "icon": "ShieldCheck", "label": "Licensed and insured" },
-          { "icon": "Clock", "label": "Same-day service available" }
+          { "icon": "MapPin", "label": "Local service area" },
+          { "icon": "ClipboardCheck", "label": "Clear request intake" },
+          { "icon": "Clock", "label": "Business-hours scheduling" }
         ]
       },
       {
@@ -93,42 +93,34 @@
       {
         "type": "mid-cta",
         "headline": "Ready to get started?",
-        "subhead": "Tell us what you need and we'll send a free quote within 24 hours.",
-        "ctaPrimary": { "label": "Book a free consultation", "href": "/book", "kind": "primary" },
+        "subhead": "Tell us what you need and the team can follow up.",
+        "ctaPrimary": { "label": "Request service", "href": "/book", "kind": "primary" },
         "ctaSecondary": { "label": "Get in touch", "href": "/intake", "kind": "secondary" },
         "embedQuoteForm": true
       },
       {
         "type": "testimonials",
-        "headline": "[Testimonials headline]",
+        "headline": "[Customer feedback headline]",
         "featured": {
-          "quote": "[Featured testimonial quote]",
+          "quote": "[Verified customer quote]",
           "authorName": "[Customer Name]",
-          "authorRole": "[Customer Role]",
-          "rating": 5,
-          "source": "google"
+          "authorRole": "[Customer Role]"
         },
         "items": [
           {
-            "quote": "[Testimonial quote]",
+            "quote": "[Verified customer quote]",
             "authorName": "[Customer Name]",
-            "authorRole": "[Customer Role]",
-            "rating": 5,
-            "source": "google"
+            "authorRole": "[Customer Role]"
           },
           {
-            "quote": "[Testimonial quote]",
+            "quote": "[Verified customer quote]",
             "authorName": "[Customer Name]",
-            "authorRole": "[Customer Role]",
-            "rating": 5,
-            "source": "google"
+            "authorRole": "[Customer Role]"
           },
           {
-            "quote": "[Testimonial quote]",
+            "quote": "[Verified customer quote]",
             "authorName": "[Customer Name]",
-            "authorRole": "[Customer Role]",
-            "rating": 5,
-            "source": "google"
+            "authorRole": "[Customer Role]"
           }
         ]
       },
@@ -142,20 +134,20 @@
         "headline": "Frequently asked questions",
         "items": [
           {
-            "question": "How quickly can you come out?",
-            "answer": "Most jobs are scheduled within 24-48 hours. Same-day service is available for urgent issues — call us directly."
+            "question": "How do I request service?",
+            "answer": "Share what you need and the team can review the request."
           },
           {
-            "question": "Do you charge for estimates?",
-            "answer": "No. Estimates are always free and there's no obligation to book."
+            "question": "What information should I provide?",
+            "answer": "Share the service you need, your contact details, and any useful notes about the request."
           },
           {
-            "question": "Are you licensed and insured?",
-            "answer": "Yes. We're fully licensed in [State] and carry liability insurance for every job."
+            "question": "What areas do you serve?",
+            "answer": "We serve [City] and the surrounding area."
           },
           {
-            "question": "What payment methods do you accept?",
-            "answer": "We accept cash, check, all major credit cards, and offer financing on larger jobs."
+            "question": "How do you handle pricing?",
+            "answer": "Pricing depends on the service and scope. A person from the team can confirm pricing details."
           }
         ]
       },
@@ -175,9 +167,9 @@
   "booking": {
     "renderer": "calcom-month-v1",
     "eventType": {
-      "title": "Free consultation",
-      "description": "30-minute conversation to understand your needs and provide a quote.",
-      "durationMinutes": 30,
+      "title": "Service visit",
+      "description": "Service visit to understand your needs and plan next steps.",
+      "durationMinutes": 60,
       "location": { "kind": "phone" },
       "bufferMinutes": 0
     },
@@ -203,7 +195,7 @@
     ],
     "confirmation": {
       "headline": "Your booking is confirmed",
-      "message": "We'll send a calendar invite shortly. If anything changes, just reply to that email.",
+      "message": "Your appointment request has been scheduled.",
       "successRedirectUrl": null
     }
   },
@@ -233,7 +225,7 @@
     ],
     "completion": {
       "headline": "Got it — thanks!",
-      "message": "We'll be in touch within one business day. For urgent issues, give us a call at (555) 555-0100."
+      "message": "We received your request."
     }
   },
   "admin": {

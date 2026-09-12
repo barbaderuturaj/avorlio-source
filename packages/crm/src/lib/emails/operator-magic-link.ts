@@ -17,7 +17,7 @@
 //     the email goes FROM agency_domain when verified, footer says
 //     "on Acme AI" instead of "on SeldonFrame"
 
-const DEFAULT_FROM = "SeldonFrame <welcome@seldonframe.com>";
+const DEFAULT_FROM = "Avorlio <welcome@avorlio.com>";
 const SANDBOX_FROM_PATTERN = /@resend\.dev>?$/i;
 
 export interface OperatorMagicLinkEmailRequest {
@@ -124,10 +124,10 @@ function renderFooter(req: OperatorMagicLinkEmailRequest): string {
     const safeBrand = escapeHtml(req.brandName);
     const supportUrl = req.supportUrl
       ? escapeHtml(req.supportUrl)
-      : "https://seldonframe.com";
+      : "https://avorlio.com";
     return `<p style="margin:16px 0 0;color:#999;font-size:12px;">${safeWorkspace} on ${safeBrand} · <a href="${supportUrl}" style="color:#666;">${escapeHtml(req.supportUrl ?? "")}</a></p>`;
   }
-  return `<p style="margin:16px 0 0;color:#999;font-size:12px;">${safeWorkspace} on SeldonFrame · <a href="https://seldonframe.com" style="color:#666;">seldonframe.com</a></p>`;
+  return `<p style="margin:16px 0 0;color:#999;font-size:12px;">${safeWorkspace} on Avorlio · <a href="https://avorlio.com" style="color:#666;">avorlio.com</a></p>`;
 }
 
 export function renderOperatorMagicLinkEmailText(
@@ -135,7 +135,7 @@ export function renderOperatorMagicLinkEmailText(
 ): string {
   const platformLine = req.brandName
     ? `— ${req.workspaceName} on ${req.brandName}`
-    : `— ${req.workspaceName} on SeldonFrame`;
+    : `— ${req.workspaceName} on Avorlio`;
   const invitedByLine = req.invitedByName
     ? `${req.invitedByName} invited you to manage ${req.workspaceName}.\n\n`
     : "";

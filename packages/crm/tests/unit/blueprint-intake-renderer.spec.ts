@@ -166,6 +166,15 @@ test("renderFormbricksStackV1 — multi-select fields use role='checkbox' on eac
 
 // ─── Completion panel ─────────────────────────────────────────────────
 
+test("HVAC blueprint exposes intake completion Book service CTA", () => {
+  const blueprint = pickTemplate("hvac");
+  assert.deepEqual(blueprint.intake.completion.cta, {
+    label: "Book service",
+    href: "/book",
+    kind: "primary",
+  });
+});
+
 test("renderFormbricksStackV1 — emits completion panel with headline + message", () => {
   const blueprint = pickTemplate("hvac");
   const out = renderFormbricksStackV1(blueprint);
@@ -175,6 +184,13 @@ test("renderFormbricksStackV1 — emits completion panel with headline + message
     out.html.includes(`data-panel="complete"`),
     "completion panel data-panel attribute"
   );
+});
+
+test("renderFormbricksStackV1 renders HVAC completion Book service CTA", () => {
+  const out = renderFormbricksStackV1(pickTemplate("hvac"));
+  assert.match(out.html, /class="sf-btn sf-btn--primary sf-intake__complete-cta"/);
+  assert.match(out.html, /href="\/book"/);
+  assert.match(out.html, /Book service/);
 });
 
 test("renderFormbricksStackV1 — completion panel hidden initially (intro is the default)", () => {
@@ -259,4 +275,11 @@ test("renderFormbricksStackV1 — footer Powered-by SeldonFrame is present", () 
   const out = renderFormbricksStackV1(pickTemplate("hvac"));
   assert.ok(out.html.includes("Powered by"));
   assert.ok(out.html.includes("seldonframe.com"));
+});
+
+test("renderFormbricksStackV1 — restart creates a fresh submit session", () => {
+  const out = renderFormbricksStackV1(pickTemplate("general"));
+  assert.match(out.html, /state\.submitting = false/);
+  assert.match(out.html, /state\.idempotencyKey = null/);
+  assert.match(out.html, /navigator\.platform/);
 });

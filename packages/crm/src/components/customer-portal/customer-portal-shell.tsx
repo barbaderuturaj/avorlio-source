@@ -64,7 +64,7 @@ export function CustomerPortalShell({
 
   const brandName = branding?.is_white_label
     ? branding.brand_name
-    : "SeldonFrame";
+    : "Avorlio";
   const logoUrl = branding?.logo_url ?? null;
   const showPoweredByBadge = branding?.show_powered_by_badge ?? true;
 
@@ -167,12 +167,12 @@ export function CustomerPortalShell({
             <span>
               Powered by{" "}
               <a
-                href="https://seldonframe.com"
+                href="https://app.avorlio.com"
                 style={{ color: "#666" }}
                 target="_blank"
                 rel="noopener noreferrer"
               >
-                SeldonFrame
+                Avorlio
               </a>
             </span>
           </footer>

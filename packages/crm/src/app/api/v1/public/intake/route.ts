@@ -8,6 +8,8 @@ import type { IntakeFormField } from "@/db/schema/intake-forms";
 import { enforceContactLimit } from "@/lib/billing/limits";
 import { emitSeldonEvent } from "@/lib/events/bus";
 import { validateUploadField } from "@/lib/uploads/file-validation";
+import { validatePublicIntakeAnswers } from "@/lib/forms/validation";
+import { normalizePhone } from "@/lib/sms/suppression";
 import {
   resolveWorkspaceSlugFromRequest,
   resolveWorkspaceSlugFromRequestWithCustomDomains,
@@ -232,6 +234,14 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Form not found." }, { status: 404 });
   }
 
+  const validationError = validatePublicIntakeAnswers(
+    (Array.isArray(form.fields) ? form.fields : []) as IntakeFormField[],
+    answers,
+  );
+  if (validationError) {
+    return NextResponse.json({ error: validationError }, { status: 400 });
+  }
+
   // ------------------------------------------------------------------
   // Multipart file uploads: validate + push to Vercel Blob.
   // We enrich `answers` in-place so the rest of the submission path
@@ -388,83 +398,125 @@ export async function POST(request: Request) {
   let contactId: string | null = null;
   let contactCreated = false;
   let contactLimitBlocked = false;
-  if (extracted.email) {
-    const [existingContact] = await db
-      .select({ id: contacts.id })
+
+  // HVAC intake requires phone while email is optional. Resolve identity
+  // email-first, then fall back to normalized phone so a valid phone-only
+  // homeowner submission still becomes a CRM lead.
+  const normalizedPhone =
+    extracted.phone && extracted.phone.trim()
+      ? normalizePhone(extracted.phone.trim()) || extracted.phone.trim()
+      : null;
+  const normalizedEmail = extracted.email?.trim() || null;
+
+  let existingContact: {
+    id: string;
+    email: string | null;
+    phone: string | null;
+  } | null = null;
+
+  // Email remains the preferred identity when supplied. Use the same
+  // case-insensitive semantics as the contacts lower(email) unique index.
+  if (normalizedEmail) {
+    const [emailMatch] = await db
+      .select({
+        id: contacts.id,
+        email: contacts.email,
+        phone: contacts.phone,
+      })
       .from(contacts)
-      .where(and(eq(contacts.orgId, org.id), eq(contacts.email, extracted.email)))
+      .where(
+        and(
+          eq(contacts.orgId, org.id),
+          sql`lower(${contacts.email}) = lower(${normalizedEmail})`,
+        ),
+      )
       .limit(1);
-    if (existingContact) {
-      contactId = existingContact.id;
-      // 2026-05-19 — refresh contact's name + phone from this submission
-      // so downstream tools (send_email, create_activity, booking
-      // confirmation email) greet the person who JUST submitted, not
-      // whoever this contact was first seeded as. Operator dogfood:
-      // form submitted as "THIERRY" but confirmation email said
-      // "Hi Maxime" because the contact was created with that name in
-      // an earlier test and never refreshed.
-      //
-      // Defensive: only overwrite fields when the new submission has a
-      // non-empty value. Empty / null fields preserve the old record
-      // (e.g. customer didn't re-enter their phone this time).
-      const refresh: Partial<typeof contacts.$inferInsert> = {};
-      if (extracted.firstName && extracted.firstName.trim()) {
-        refresh.firstName = extracted.firstName.trim();
+    existingContact = emailMatch ?? null;
+  }
+
+  // If email is absent or did not match, fall back to phone. Contacts
+  // historically store phone in mixed formatting, so compare normalized
+  // values just like lib/sms/api.ts findContactByPhone().
+  if (!existingContact && normalizedPhone) {
+    const phoneCandidates = await db
+      .select({
+        id: contacts.id,
+        email: contacts.email,
+        phone: contacts.phone,
+      })
+      .from(contacts)
+      .where(eq(contacts.orgId, org.id));
+
+    existingContact =
+      phoneCandidates.find(
+        (row) =>
+          row.phone && normalizePhone(row.phone) === normalizedPhone,
+      ) ?? null;
+  }
+
+  if (existingContact) {
+    contactId = existingContact.id;
+
+    // Refresh only values actually supplied by this submission. When a
+    // phone match finds an older contact with no email, safely backfill it.
+    const refresh: Partial<typeof contacts.$inferInsert> = {};
+    if (extracted.firstName && extracted.firstName.trim()) {
+      refresh.firstName = extracted.firstName.trim();
+    }
+    if (extracted.lastName && extracted.lastName.trim()) {
+      refresh.lastName = extracted.lastName.trim();
+    }
+    if (normalizedPhone) {
+      refresh.phone = normalizedPhone;
+    }
+    if (normalizedEmail && !(existingContact.email ?? "").trim()) {
+      refresh.email = normalizedEmail;
+    }
+
+    if (Object.keys(refresh).length > 0) {
+      refresh.updatedAt = new Date();
+      try {
+        await db.update(contacts).set(refresh).where(eq(contacts.id, contactId));
+      } catch (err) {
+        // Non-fatal: submission still links to the resolved CRM contact.
+        console.warn(
+          JSON.stringify({
+            event: "public_intake_contact_refresh_failed",
+            org_id: org.id,
+            contact_id: contactId,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
       }
-      if (extracted.lastName && extracted.lastName.trim()) {
-        refresh.lastName = extracted.lastName.trim();
-      }
-      if (extracted.phone && extracted.phone.trim()) {
-        refresh.phone = extracted.phone.trim();
-      }
-      if (Object.keys(refresh).length > 0) {
-        refresh.updatedAt = new Date();
-        try {
-          await db.update(contacts).set(refresh).where(eq(contacts.id, contactId));
-        } catch (err) {
-          // Non-fatal — the rest of the submission flow still works
-          // with the stale contact row. Surface in logs for follow-up.
-          console.warn(
-            JSON.stringify({
-              event: "public_intake_contact_refresh_failed",
-              org_id: org.id,
-              contact_id: contactId,
-              error: err instanceof Error ? err.message : String(err),
-            }),
-          );
-        }
-      }
+    }
+  } else if (normalizedEmail || normalizedPhone) {
+    // Free-tier contact cap blocks only NEW contacts. The intake
+    // submission itself is still persisted below if the cap is reached.
+    const limit = await enforceContactLimit(org.id);
+    if (!limit.allowed) {
+      contactLimitBlocked = true;
+      console.info("[intake-route] contact limit reached", {
+        orgId: org.id,
+        tier: limit.tier,
+        used: limit.used,
+        limit: limit.limit,
+      });
     } else {
-      // April 30, 2026 — free-tier contact cap enforcement. Submissions
-      // are still saved to `intake_submissions` so the operator
-      // doesn't lose the lead, but we DON'T create a new `contacts`
-      // row past the cap. The /contacts page surfaces a banner so the
-      // operator knows new contacts are queued behind the upgrade.
-      const limit = await enforceContactLimit(org.id);
-      if (!limit.allowed) {
-        contactLimitBlocked = true;
-        console.info("[intake-route] contact limit reached", {
+      const [createdContact] = await db
+        .insert(contacts)
+        .values({
           orgId: org.id,
-          tier: limit.tier,
-          used: limit.used,
-          limit: limit.limit,
-        });
-      } else {
-        const [createdContact] = await db
-          .insert(contacts)
-          .values({
-            orgId: org.id,
-            firstName: extracted.firstName ?? extracted.email,
-            lastName: extracted.lastName ?? null,
-            email: extracted.email,
-            phone: extracted.phone ?? null,
-            status: "lead",
-            source: "intake",
-          })
-          .returning({ id: contacts.id });
-        contactId = createdContact?.id ?? null;
-        contactCreated = Boolean(contactId);
-      }
+          firstName: extracted.firstName?.trim() || normalizedEmail || normalizedPhone || "Lead",
+          lastName: extracted.lastName?.trim() || null,
+          email: normalizedEmail,
+          phone: normalizedPhone,
+          status: "lead",
+          source: "intake",
+        })
+        .returning({ id: contacts.id });
+
+      contactId = createdContact?.id ?? null;
+      contactCreated = Boolean(contactId);
     }
   }
 
@@ -479,7 +531,7 @@ export async function POST(request: Request) {
   // uploads, insert a portal_documents row per file so the operator sees
   // them in the contact's Documents tab. Skipped when:
   //   - no files were uploaded (intakeBlobMetas is empty)
-  //   - no contactId was resolved (contact limit hit, or no email field)
+  //   - no contactId was resolved (contact limit hit, or no contact identity)
   // Wrapped in try/catch so a DB failure NEVER blocks the intake response.
   if (intakeBlobMetas.length > 0 && contactId) {
     try {
@@ -517,33 +569,70 @@ export async function POST(request: Request) {
     }
   }
 
-  // Best-effort event emit — fire-and-forget so a Brain subscriber
-  // crash never blocks the public submission response.
-  if (contactCreated && contactId) {
-    void emitSeldonEvent("contact.created", { contactId }, { orgId: org.id }).catch(() => undefined);
-  }
-  void emitSeldonEvent(
-    "intake.submitted",
-    { formId: form.id, contactId: contactId ?? null },
-    { orgId: org.id }
-  ).catch(() => undefined);
+  // Customer-facing HVAC automation must finish before this serverless
+  // request returns. Each emission remains fail-soft so an automation
+  // failure never loses an already-saved intake submission.
+  const eventEmissions: Array<{
+    name: string;
+    promise: Promise<void>;
+  }> = [];
 
-  // Also emit `form.submitted` — the canonical agent-archetype trigger
-  // name (Speed-to-Lead and any future intake-listening archetype use
-  // it). Kept separate from `intake.submitted` for backward compat:
-  // existing subscribers (Brain, telemetry) keep using their event;
-  // the agent dispatcher hooks `form.submitted` exclusively. Payload
-  // includes `orgId` so the dispatcher's listener can route to the
-  // right workspace without re-resolving from the form id.
-  void emitSeldonEvent(
-    "form.submitted",
+  if (contactCreated && contactId) {
+    eventEmissions.push({
+      name: "contact.created",
+      promise: emitSeldonEvent(
+        "contact.created",
+        { contactId },
+        { orgId: org.id },
+      ),
+    });
+  }
+
+  eventEmissions.push(
     {
-      formId: form.id,
-      contactId: contactId ?? "",
-      data: answers,
+      name: "intake.submitted",
+      promise: emitSeldonEvent(
+        "intake.submitted",
+        { formId: form.id, contactId: contactId ?? null },
+        { orgId: org.id },
+      ),
     },
-    { orgId: org.id }
-  ).catch(() => undefined);
+    {
+      name: "form.submitted",
+      promise: emitSeldonEvent(
+        "form.submitted",
+        {
+          formId: form.id,
+          contactId: contactId ?? "",
+          data: answers,
+        },
+        { orgId: org.id },
+      ),
+    },
+  );
+
+  const eventResults = await Promise.allSettled(
+    eventEmissions.map((entry) => entry.promise),
+  );
+
+  for (let i = 0; i < eventResults.length; i++) {
+    const result = eventResults[i];
+    if (result.status !== "rejected") continue;
+
+    console.warn(
+      JSON.stringify({
+        event: "public_intake_event_emit_failed",
+        emitted_event: eventEmissions[i]?.name ?? "unknown",
+        org_id: org.id,
+        form_id: form.id,
+        contact_id: contactId,
+        error:
+          result.reason instanceof Error
+            ? result.reason.message.slice(0, 200)
+            : "unknown_error",
+      }),
+    );
+  }
 
   // v1.6.0 — brain trigger: append a dated observation to the
   // workspace's intake/recent-leads.md note. Captures the SHAPE of

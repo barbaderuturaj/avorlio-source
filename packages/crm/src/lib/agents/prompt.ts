@@ -285,14 +285,26 @@ export async function composeSystemPrompt(input: ComposeSystemPromptInput): Prom
       .join("\n");
     sections.push(
       `## Pricing (the ONLY prices you may quote)\n${pricingLines}\n\n` +
-        `If the visitor asks about a price not listed above, say you'll have someone follow up with a custom quote — DO NOT invent a number.`,
+        `Use only the exact configured facts above. Do not infer or invent another number, range, fee, discount, "starting at" amount, or free estimate/quote/consultation. ` +
+        `If the requested price is not listed, say pricing depends on the scope and a person must confirm it.`,
     );
   } else {
     sections.push(
-      `## Pricing\n` +
-        `You don't have access to specific prices. If asked, say "I'll have someone follow up with a quote" and call escalate_to_human.`,
+      `## Pricing (no authoritative pricing facts are configured)\n` +
+        `Never provide a numeric price, price range, fee, discount, "starting at" amount, or claim that an estimate, quote, or consultation is free. ` +
+        `Say pricing depends on the scope and a person must confirm it; use escalate_to_human when appropriate.`,
     );
   }
+
+  // Shared factual boundary. This is appended for every persona/template so a
+  // custom skill cannot quietly reintroduce unsupported operational or marketing
+  // claims after the grounded business context above.
+  sections.push(
+    `## Business-fact and operational truth boundary\n` +
+      `- A handoff or escalation only proves that the request was recorded or passed to the team. Never promise when a person will respond (including "shortly", "soon", "today", "right away", or a specific callback time) unless an authoritative configured SLA explicitly supports it.\n` +
+      `- A successful booking tool proves the booking result it returns. It does not prove that an email, SMS, calendar invite, or other notification was sent or will arrive; mention delivery only when the tool result explicitly reports successful delivery.\n` +
+      `- Never invent staff identities, credentials, certifications, team composition, reviews, guarantees, discounts, speed or turnaround claims, performance or outcome claims, or efficiency claims. Use such claims only when they are explicitly supported by the business facts supplied in this prompt or by a successful tool result.`,
+  );
 
   // FAQ knowledge — wrapped in semantic XML tags via the framing helper.
   // The helper prepends a directive instructing the LLM to treat tagged
@@ -383,9 +395,15 @@ export async function composeSystemPrompt(input: ComposeSystemPromptInput): Prom
     const sameDay = soulRaw.same_day === true;
     if (emergencyService || sameDay) {
       const flags: string[] = [];
-      if (emergencyService) flags.push("24/7 emergency service");
+      if (emergencyService) flags.push("emergency service offered");
       if (sameDay) flags.push("same-day appointments");
       factLines.push(`Availability: ${flags.join(", ")}`);
+    }
+
+    if (soulRaw.emergency_service === false) {
+      factLines.push(
+        "Emergency availability: 24/7 coverage, an on-call crew, immediate dispatch, and guaranteed same-day response are NOT verified business facts. Do not claim them.",
+      );
     }
 
     const serviceArea = Array.isArray(soulRaw.service_area)

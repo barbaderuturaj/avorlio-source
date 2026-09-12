@@ -1,14 +1,5 @@
-// Shared marketing-homepage copy constants.
-//
-// Extracted from app/(public)/page.tsx so the SAME positioning line is the
-// single source for both the human HTML homepage (PublicHomePage metadata +
-// hero) and its agent-Markdown twin (/home.md → renderHomeMarkdown). Keeping it
-// here — a plain, dependency-free module — lets the pure Markdown renderer import
-// the line WITHOUT pulling the server page component (and its auth() call) into
-// its module graph.
+// Copy shared by the agent-readable Markdown homepage.
 
-import { AGENCY_POSITIONING, AGENCY_HERO_SUBHEAD } from "@/lib/marketing/public-claims";
-
-/** The one-line product positioning used in the homepage metadata/description
- *  and quoted verbatim at the top of /home.md. */
-export const POSITIONING_ONE_LINER = `${AGENCY_POSITIONING} ${AGENCY_HERO_SUBHEAD}`;
+/** Truthful launch positioning for Avorlio's current homepage surfaces. */
+export const POSITIONING_ONE_LINER =
+  "Avorlio is the AI Front Office for service businesses — capturing leads, answering approved questions, qualifying prospects, booking appointments, and following up automatically.";

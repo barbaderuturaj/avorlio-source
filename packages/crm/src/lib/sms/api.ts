@@ -290,29 +290,78 @@ export async function persistInboundSms(params: {
   externalMessageId: string;
   metadata?: Record<string, unknown>;
 }) {
-  const [row] = await db
-    .insert(smsMessages)
-    .values({
-      orgId: params.orgId,
-      contactId: params.contactId,
-      userId: null,
-      provider: "twilio",
-      direction: "inbound",
-      fromNumber: normalizePhone(params.fromNumber),
-      toNumber: normalizePhone(params.toNumber),
-      body: params.body,
-      status: "received",
-      externalMessageId: params.externalMessageId,
-      segments: 1,
-      metadata: params.metadata ?? {},
-    })
-    .returning({ id: smsMessages.id });
+  return persistInboundSmsWithDeps(params, {
+    findExisting: async (input) => {
+      const [existing] = await db
+        .select({ id: smsMessages.id, contactId: smsMessages.contactId })
+        .from(smsMessages)
+        .where(
+          and(
+            eq(smsMessages.orgId, input.orgId),
+            eq(smsMessages.provider, "twilio"),
+            eq(smsMessages.externalMessageId, input.externalMessageId),
+          ),
+        )
+        .limit(1);
+      return existing ?? null;
+    },
+    insert: async (input) => {
+      const [row] = await db
+        .insert(smsMessages)
+        .values({
+          orgId: input.orgId,
+          contactId: input.contactId,
+          userId: null,
+          provider: "twilio",
+          direction: "inbound",
+          fromNumber: normalizePhone(input.fromNumber),
+          toNumber: normalizePhone(input.toNumber),
+          body: input.body,
+          status: "received",
+          externalMessageId: input.externalMessageId,
+          segments: 1,
+          metadata: input.metadata ?? {},
+        })
+        .onConflictDoNothing()
+        .returning({ id: smsMessages.id, contactId: smsMessages.contactId });
+      return row ?? null;
+    },
+  });
+}
 
-  if (!row) {
-    throw new Error("Could not persist inbound sms");
+export type PersistInboundSmsInput = Parameters<typeof persistInboundSms>[0];
+
+export type PersistInboundSmsResult = {
+  id: string;
+  contactId: string | null;
+  duplicate: boolean;
+};
+
+export type PersistInboundSmsDeps = {
+  findExisting: (input: PersistInboundSmsInput) => Promise<{ id: string; contactId: string | null } | null>;
+  insert: (input: PersistInboundSmsInput) => Promise<{ id: string; contactId: string | null } | null>;
+};
+
+export async function persistInboundSmsWithDeps(
+  params: PersistInboundSmsInput,
+  deps: PersistInboundSmsDeps,
+): Promise<PersistInboundSmsResult> {
+  const existing = await deps.findExisting(params);
+  if (existing) {
+    return { id: existing.id, contactId: existing.contactId, duplicate: true };
   }
 
-  return row;
+  const created = await deps.insert(params);
+  if (created) {
+    return { id: created.id, contactId: created.contactId, duplicate: false };
+  }
+
+  const afterConflict = await deps.findExisting(params);
+  if (afterConflict) {
+    return { id: afterConflict.id, contactId: afterConflict.contactId, duplicate: true };
+  }
+
+  throw new Error("Could not persist inbound sms");
 }
 
 export async function findContactByPhone(orgId: string, phone: string) {

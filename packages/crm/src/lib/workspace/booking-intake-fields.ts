@@ -42,7 +42,7 @@ const UNIVERSAL_TRAILER: BookingIntakeField[] = [
 ];
 
 const URGENCY_OPTIONS = [
-  "Today / emergency",
+  "Urgent service request",
   "This week",
   "Next 2 weeks",
   "I'm planning ahead",
@@ -80,8 +80,7 @@ const BOLD_URGENCY_FIELDS: BookingIntakeField[] = [
     label: "Service address",
     type: "text",
     required: true,
-    placeholder: "123 Main St, Round Rock, TX 78664",
-    helpText: "Where should we dispatch the technician?",
+    placeholder: "Enter service address",
   },
   {
     id: "phone",
@@ -89,7 +88,7 @@ const BOLD_URGENCY_FIELDS: BookingIntakeField[] = [
     type: "tel",
     required: true,
     placeholder: "(555) 123-4567",
-    helpText: "We'll call you back within minutes for emergency requests.",
+    helpText: "Enter the best number to reach you.",
   },
   {
     id: "issue_type",

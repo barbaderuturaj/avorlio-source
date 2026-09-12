@@ -10,6 +10,9 @@ const gridServices = [
 function client(json: unknown) {
   return { messages: { create: async () => ({ content: [{ type: "text", text: JSON.stringify(json) }] }) } };
 }
+function rawClient(text: string) {
+  return { messages: { create: async () => ({ content: text ? [{ type: "text", text }] : [] }) } };
+}
 const fakePhoto = async () => ({ src: "https://images.unsplash.com/p?w=1600", alt: "x" });
 const facts = { business_name: "Acme", city: "Dallas", state: "TX", testimonials: [] } as never;
 
@@ -44,21 +47,49 @@ describe("generateServicePages", () => {
     assert.equal(pages[0].name, "Outdoor Structures");
   });
 
-  test("returns [] gracefully on unparseable LLM output", async () => {
+  test("returns deterministic pages on an empty model response", async () => {
     const pages = await generateServicePages({
-      gridServices, facts, vertical: "landscaping", archetype: "editorial-warm", byokKey: "x",
-      anthropicClient: { messages: { create: async () => ({ content: [{ type: "text", text: "not json" }] }) } },
+      gridServices: [{ id: "hvac-1", name: "AC Repair and Maintenance", description: "Reliable AC repair." }],
+      facts, vertical: "hvac", archetype: "editorial-warm", byokKey: "x",
+      anthropicClient: rawClient(""),
       photoResolver: fakePhoto as never,
     });
-    assert.deepEqual(pages, []);
+    assert.equal(pages.length, 1);
+    assert.equal(pages[0].slug, serviceSlug("AC Repair and Maintenance"));
+    assert.equal(pages[0].name, "AC Repair and Maintenance");
+    assert.equal(pages[0].summary, "Reliable AC repair.");
+    assert.deepEqual(pages[0].body, [{ kind: "paragraph", text: "Reliable AC repair." }]);
+    assert.equal(pages[0].ctaLabel, "Get a free estimate");
+    assert.equal(validateSiteTree({ servicePages: pages }).valid, true);
   });
 
-  test("returns [] gracefully when the LLM call throws", async () => {
+  test("returns deterministic pages on invalid JSON", async () => {
     const pages = await generateServicePages({
       gridServices, facts, vertical: "landscaping", archetype: "editorial-warm", byokKey: "x",
-      anthropicClient: { messages: { create: async () => { throw new Error("rate limited"); } } },
+      anthropicClient: rawClient("not json"),
       photoResolver: fakePhoto as never,
     });
-    assert.deepEqual(pages, []);
+    assert.equal(pages.length, gridServices.length);
+    assert.deepEqual(pages.map((p) => p.name), gridServices.map((s) => s.name));
+    assert.deepEqual(pages.map((p) => p.summary), gridServices.map((s) => s.description));
+    assert.equal(validateSiteTree({ servicePages: pages }).valid, true);
+  });
+
+  test("partial LLM output keeps rich content and fills omitted services", async () => {
+    const pages = await generateServicePages({
+      gridServices, facts, vertical: "landscaping", archetype: "editorial-warm", byokKey: "x",
+      anthropicClient: client({ servicePages: [
+        { name: "Outdoor Structures", summary: "Rich generated summary.", body: [{ kind: "heading", text: "A richer page" }], ctaLabel: "Plan yours" },
+      ] }),
+      photoResolver: fakePhoto as never,
+    });
+    assert.equal(pages.length, gridServices.length);
+    assert.equal(pages[0].summary, "Rich generated summary.");
+    assert.deepEqual(pages[0].body, [{ kind: "heading", text: "A richer page" }]);
+    assert.equal(pages[1].summary, gridServices[1].description);
+    assert.deepEqual(pages[1].body, [{ kind: "paragraph", text: gridServices[1].description }]);
+    assert.equal(pages[1].slug, serviceSlug(gridServices[1].name));
+    const res = validateSiteTree({ servicePages: pages });
+    assert.equal(res.valid, true, JSON.stringify(res.errors));
   });
 });

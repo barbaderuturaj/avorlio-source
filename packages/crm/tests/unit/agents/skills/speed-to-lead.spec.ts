@@ -1,7 +1,7 @@
 // Unified Agent Model — P1, Task T3: the speed-to-lead skill.
 //
 // composeSpeedToLead is a PURE message composer (no I/O, never throws): the
-// instant "we got your inquiry, we'll be in touch" acknowledgement a business
+// automated "we received your inquiry and passed it to the team" acknowledgement a business
 // fires the moment a lead lands (the event-trigger → outbound case). These tests
 // pin the contract:
 //   • the body acknowledges the inquiry AND names a next step;
@@ -36,7 +36,23 @@ describe("composeSpeedToLead — acknowledges the lead", () => {
       channel: "email",
       leadSummary: "leaking water heater",
     });
-    assert.ok(/\b(shortly|soon|touch|back to you|reach)/i.test(out.body), "body should name a next step");
+    assert.match(out.body, /passed your message to the team for follow-up/i);
+    assert.doesNotMatch(
+      out.body,
+      /\b(shortly|soon|within minutes|today|right away)\b/i,
+      "body must not promise human response timing",
+    );
+  });
+
+  test("sms acknowledgement never promises when a human will respond", () => {
+    const out = composeSpeedToLead({
+      contactName: "Sam",
+      businessName: "Acme Plumbing",
+      channel: "sms",
+      leadSummary: "leaking water heater",
+    });
+    assert.match(out.body, /passed it to the team for follow-up/i);
+    assert.doesNotMatch(out.body, /\b(shortly|soon|seconds|today|right away)\b/i);
   });
 });
 

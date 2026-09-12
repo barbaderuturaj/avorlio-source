@@ -48,7 +48,7 @@ export default async function FormsPage() {
         { title: "Total", value: String(forms.length), icon: FileText },
         { title: "Published", value: String(forms.filter((f) => f.isActive).length), icon: CheckCircle2 },
         { title: "Draft", value: String(forms.filter((f) => !f.isActive).length), icon: Eye },
-        { title: "Submissions", value: "0", icon: ListTodo },
+        { title: "Submissions", value: String(forms.reduce((total, form) => total + form.submissionCount, 0)), icon: ListTodo },
       ] as const)
     : [];
 
@@ -168,7 +168,7 @@ export default async function FormsPage() {
                 >
                   {form.isActive ? "Published" : "Draft"}
                 </span>
-                <span className="hidden sm:block text-sm text-muted-foreground">0</span>
+                <span className="hidden sm:block text-sm text-muted-foreground">{form.submissionCount}</span>
                 <div className="hidden sm:flex items-center gap-2">
                   <Link href={`/forms/${form.id}/edit`} className="crm-button-primary h-9 px-4 text-xs">
                     Edit form
