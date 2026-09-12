@@ -53,7 +53,13 @@ import { normalizeTierId, type BillingTier } from "./features";
 /** Internal: extract a tier from an organizations row's subscription/plan
  *  columns. "inactive" = no active paid plan. */
 function tierFromOrgRow(row: { plan: string | null; subscription: unknown }): BillingTier {
-  const subscription = row.subscription as { tier?: string } | null | undefined;
+  const subscription = row.subscription as { provider?: string; dodoStatus?: string; tier?: string } | null | undefined;
+  // Dodo platform access is webhook-state driven. A stale Dodo tier must
+  // never survive a non-active lifecycle state. Stripe behavior remains on
+  // the existing tier/plan resolution path below.
+  if (subscription?.provider === "dodo" && subscription.dodoStatus !== "active") {
+    return "inactive";
+  }
   return normalizeTierId(subscription?.tier ?? row.plan ?? "inactive");
 }
 

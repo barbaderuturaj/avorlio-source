@@ -5,7 +5,7 @@
 // Mirrors the proposal signed-token pattern (lib/proposals/load-by-token.ts).
 
 import { randomBytes } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { onboardingLinks, type OnboardingLink } from "@/db/schema";
 
@@ -47,6 +47,19 @@ export async function createOnboardingLink(
     status: "pending",
   });
   return { token };
+}
+
+/** Idempotent application-level reuse for post-payment activation.
+ * There is intentionally no migration-only uniqueness constraint in V1;
+ * concurrent callers remain a documented limitation. */
+export async function createOrGetPendingOnboardingLink(orgId: string): Promise<{ token: string }> {
+  const [existing] = await db
+    .select({ token: onboardingLinks.token })
+    .from(onboardingLinks)
+    .where(and(eq(onboardingLinks.orgId, orgId), eq(onboardingLinks.status, "pending")))
+    .limit(1);
+  if (existing) return existing;
+  return createOnboardingLink(orgId);
 }
 
 // ─── Load ─────────────────────────────────────────────────────────────────────
