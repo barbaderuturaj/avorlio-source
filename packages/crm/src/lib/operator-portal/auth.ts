@@ -43,11 +43,12 @@
 
 "use server";
 
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { db } from "@/db";
-import { organizations, partnerAgencies, users } from "@/db/schema";
+import { orgMembers, organizations, partnerAgencies, users } from "@/db/schema";
+import { auth } from "@/auth";
 import { assertWritable } from "@/lib/demo/server";
 import { resolveInboxUrl } from "@/lib/utils/email-inbox";
 import { emitSeldonEvent } from "@/lib/events/bus";
@@ -87,7 +88,9 @@ async function getOrgBySlug(orgSlug: string) {
       name: organizations.name,
       slug: organizations.slug,
       ownerId: organizations.ownerId,
+      parentUserId: organizations.parentUserId,
       parentAgencyId: organizations.parentAgencyId,
+      settings: organizations.settings,
     })
     .from(organizations)
     .where(eq(organizations.slug, orgSlug))
@@ -117,8 +120,10 @@ async function getUserEmailById(userId: string | null): Promise<string | null> {
  */
 async function resolveWorkspaceOwnerEmails(org: {
   ownerId: string | null;
+  parentUserId: string | null;
   parentAgencyId: string | null;
-}): Promise<{ ownerEmail: string | null; agencyOwnerEmail: string | null }> {
+  settings: Record<string, unknown>;
+}): Promise<{ ownerEmail: string | null; agencyOwnerEmail: string | null; operatorPortalEmail: string | null }> {
   const ownerEmail = await getUserEmailById(org.ownerId);
 
   let agencyOwnerEmail: string | null = null;
@@ -143,7 +148,12 @@ async function resolveWorkspaceOwnerEmails(org: {
     }
   }
 
-  return { ownerEmail, agencyOwnerEmail };
+  const configuredOperatorEmail = org.settings.operatorPortalEmail;
+  return {
+    ownerEmail,
+    agencyOwnerEmail,
+    operatorPortalEmail: typeof configuredOperatorEmail === "string" ? configuredOperatorEmail : null,
+  };
 }
 
 async function setOperatorSessionCookie(token: string): Promise<void> {
@@ -204,11 +214,12 @@ export async function requestOperatorMagicLinkAction(input: {
   // org-not-found path above — we never reveal whether an email is
   // authorized or a workspace exists (anti-enumeration) — but no token is
   // signed or sent. Pure decision logic + tests live in ./authorization.ts.
-  const { ownerEmail, agencyOwnerEmail } = await resolveWorkspaceOwnerEmails(org);
+  const { ownerEmail, agencyOwnerEmail, operatorPortalEmail } = await resolveWorkspaceOwnerEmails(org);
   const adminEmails = parseAdminAllowlist(process.env.SF_SUPERADMIN_EMAILS);
   const authorized = isEmailAuthorizedForWorkspace(email, {
     ownerEmail,
     agencyOwnerEmail,
+    operatorPortalEmail,
     adminEmails,
   });
   if (!authorized) {
@@ -289,6 +300,83 @@ export async function requestOperatorMagicLinkAction(input: {
 }
 
 // ─── magic-link consumption (called by /portal/[orgSlug]/magic route) ──────
+
+/**
+ * Admin-only managed-SaaS handoff. Stores exactly one workspace-scoped
+ * operator email in organizations.settings, then uses the existing operator
+ * magic-link flow. This intentionally does not create a users row or change
+ * organizations.ownerId / parentAgencyId.
+ */
+export async function setOperatorPortalEmailAndSendMagicLinkAction(input: {
+  orgSlug: string;
+  email: string;
+  invitedByName?: string;
+}): Promise<RequestOperatorMagicLinkResult | { ok: false; reason: string }> {
+  assertWritable();
+
+  const session = await auth();
+  const adminUserId = session?.user?.id?.trim();
+  if (!adminUserId) return { ok: false, reason: "admin_auth_required" };
+
+  const orgSlug = input.orgSlug.trim();
+  const email = (input.email ?? "").trim().toLowerCase();
+  if (!orgSlug || !email) return { ok: false, reason: "missing_required_field" };
+
+  const org = await getOrgBySlug(orgSlug);
+  if (!org) return { ok: false, reason: "workspace_not_found" };
+
+  const [member] = await db
+    .select({ userId: orgMembers.userId })
+    .from(orgMembers)
+    .where(
+      and(
+        eq(orgMembers.orgId, org.id),
+        eq(orgMembers.userId, adminUserId),
+      ),
+    )
+    .limit(1);
+  const directWorkspaceAccess =
+    org.ownerId === adminUserId ||
+    org.parentUserId === adminUserId ||
+    member?.userId === adminUserId;
+
+  let agencyAccess = false;
+  if (org.parentAgencyId) {
+    const [agency] = await db
+      .select({ ownerUserId: partnerAgencies.ownerUserId, ownerWorkspaceId: partnerAgencies.ownerWorkspaceId })
+      .from(partnerAgencies)
+      .where(eq(partnerAgencies.id, org.parentAgencyId))
+      .limit(1);
+    if (agency?.ownerUserId === adminUserId) {
+      agencyAccess = true;
+    } else if (agency?.ownerWorkspaceId) {
+      const [ownerWorkspace] = await db
+        .select({ ownerId: organizations.ownerId })
+        .from(organizations)
+        .where(eq(organizations.id, agency.ownerWorkspaceId))
+        .limit(1);
+      agencyAccess = ownerWorkspace?.ownerId === adminUserId;
+    }
+  }
+
+  if (!directWorkspaceAccess && !agencyAccess) {
+    return { ok: false, reason: "workspace_access_denied" };
+  }
+
+  await db
+    .update(organizations)
+    .set({
+      settings: sql`jsonb_set(COALESCE(${organizations.settings}, '{}'::jsonb), '{operatorPortalEmail}', to_jsonb(${email}::text), true)`,
+      updatedAt: new Date(),
+    })
+    .where(eq(organizations.id, org.id));
+
+  return requestOperatorMagicLinkAction({
+    orgSlug,
+    email,
+    invitedByName: input.invitedByName,
+  });
+}
 
 export async function consumeOperatorMagicLink(input: {
   orgSlug: string;

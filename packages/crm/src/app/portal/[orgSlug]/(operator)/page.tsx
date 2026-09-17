@@ -1,6 +1,6 @@
 // v2 PWA — Today screen (operator mobile home) — SeldonFrame Mobile DS edition.
 //
-// Glance cards: New leads · Today's appts · Unread texts · Missed calls (stub)
+// Glance cards: New leads · Today's appts
 // Pipeline $ card (tappable → breakdown sheet)
 // Quick Actions row: Add Contact · New Booking · Request Review · Scan Card (stub)
 // Up next list (today's bookings)
@@ -11,7 +11,7 @@ import { and, asc, desc, eq, gte, lt, ne, not, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { bookings, contacts, organizations } from "@/db/schema";
 import { getOperatorSessionForOrg } from "@/lib/operator-portal/auth";
-import { countNewLeads, countUnreadInboundSms } from "@/lib/operator-portal/counts";
+import { countNewLeads } from "@/lib/operator-portal/counts";
 import { contactDisplayName } from "@/lib/operator-portal/mobile-format";
 import { getPipelineRollup } from "@/lib/operator-portal/today";
 import { getEffectiveBrandingForWorkspace } from "@/lib/partner-agencies/branding";
@@ -36,7 +36,6 @@ export default async function OperatorTodayPage({
 
   const [
     newLeads,
-    unreadTexts,
     todaysBookings,
     pipelineRollup,
     branding,
@@ -44,7 +43,6 @@ export default async function OperatorTodayPage({
     orgSoulRow,
   ] = await Promise.all([
     countNewLeads(orgId),
-    countUnreadInboundSms(orgId),
     db
       .select({
         id: bookings.id,
@@ -129,7 +127,6 @@ export default async function OperatorTodayPage({
         defaultReviewLink={defaultReviewLink}
         recentContacts={recentContacts}
         newLeads={newLeads}
-        unreadTexts={unreadTexts}
         todaysApptsCount={todaysBookings.length}
         todaysBookings={todaysBookings.map((b) => ({
           id: b.id,

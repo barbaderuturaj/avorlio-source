@@ -15,7 +15,7 @@ const BILLING_PERIODS = ["monthly", "yearly"] as const;
 const googleClientId = process.env.GOOGLE_CLIENT_ID?.trim();
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
 const resendApiKey = (process.env.AUTH_RESEND_KEY ?? process.env.RESEND_API_KEY)?.trim();
-const resendFrom = (process.env.AUTH_RESEND_FROM ?? process.env.DEFAULT_FROM_EMAIL ?? "hello@seldonframe.local").trim();
+const resendFrom = (process.env.AUTH_RESEND_FROM ?? process.env.DEFAULT_FROM_EMAIL ?? "hello@avorlio.com").trim();
 
 function normalizeBillingStatus(value: string | null | undefined): (typeof BILLING_STATUSES)[number] {
   return BILLING_STATUSES.includes(value as (typeof BILLING_STATUSES)[number])
@@ -176,6 +176,22 @@ if (resendApiKey) {
       // domain they may not recognize, which trips spam filters and erodes
       // trust on the very first touchpoint.
       async sendVerificationRequest({ identifier, url, provider }) {
+        const email = identifier.trim().toLowerCase();
+        try {
+          const [existingUser] = await db
+            .select({ id: users.id })
+            .from(users)
+            .where(eq(users.email, email))
+            .limit(1);
+
+          if (!existingUser) return;
+        } catch (error) {
+          console.error(
+            `[auth][resend] existing-user lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return;
+        }
+
         const baseUrl = (
           process.env.NEXTAUTH_URL?.trim() || "https://app.seldonframe.com"
         ).replace(/\/+$/, "");
@@ -189,7 +205,7 @@ if (resendApiKey) {
           },
           body: JSON.stringify({
             from: provider.from,
-            to: identifier,
+            to: email,
             subject,
             html,
             text,
@@ -212,7 +228,7 @@ if (resendApiKey) {
 
 export const authConfig = {
   pages: {
-    signIn: "/signup",
+    signIn: "/login",
     verifyRequest: "/login",
   },
   session: {
@@ -220,6 +236,37 @@ export const authConfig = {
   },
   providers: authProviders,
   callbacks: {
+    signIn: async ({ user, account }) => {
+      if (account?.provider !== "google" && account?.provider !== "resend") {
+        return true;
+      }
+
+      const email = user.email?.trim().toLowerCase();
+      if (!email) {
+        console.warn(`[auth][signIn] denied ${account.provider} login without an email`);
+        return false;
+      }
+
+      try {
+        const [existingUser] = await db
+          .select({ id: users.id })
+          .from(users)
+          .where(eq(users.email, email))
+          .limit(1);
+
+        if (!existingUser) {
+          console.warn(
+            `[auth][signIn] denied unprovisioned ${account.provider} login for email_domain=${email.split("@")[1] ?? "(?)"}`,
+          );
+          return false;
+        }
+
+        return true;
+      } catch (error) {
+        console.error(`[auth][signIn] existing-user lookup failed for ${account.provider}:`, error);
+        return false;
+      }
+    },
     authorized: (params) => {
       if (!params || !params.request) {
         return true;

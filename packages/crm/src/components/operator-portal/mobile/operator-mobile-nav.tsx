@@ -4,7 +4,7 @@
 // based active-state pattern (usePathname in a client subtree so the
 // server layout doesn't have to prop-drill the active route), but
 // renders a FIXED BOTTOM tab bar (LeadConnector-style) for the
-// contractor app. Four tabs: Today / Leads / Messages / Appts.
+// contractor app. Three tabs: Today / Leads / Appts.
 //
 // Safe-area aware (env(safe-area-inset-bottom)) so it clears the iOS
 // home indicator when launched standalone.
@@ -15,7 +15,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 type NavItem = {
-  key: "today" | "leads" | "messages" | "appointments";
+  key: "today" | "leads" | "appointments";
   label: string;
   /** Path tail after `/portal/<slug>`. "" = Today. */
   pathTail: string;
@@ -40,16 +40,6 @@ const NAV_ITEMS: NavItem[] = [
     icon: (
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
         <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75" />
-      </svg>
-    ),
-  },
-  {
-    key: "messages",
-    label: "Messages",
-    pathTail: "/messages",
-    icon: (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z" />
       </svg>
     ),
   },
@@ -86,7 +76,7 @@ export function OperatorMobileNav({
   return (
     <nav
       data-operator-mobile-nav=""
-      className="fixed inset-x-0 bottom-0 z-20 mx-auto flex max-w-[640px] items-stretch justify-around"
+      className="fixed inset-x-0 bottom-0 z-20 mx-auto flex w-full max-w-[640px] items-stretch justify-around md:max-w-[960px] xl:max-w-[1080px]"
       style={{
         backgroundColor: "#FFFFFF",
         borderTop: "1px solid #E5E5E1",

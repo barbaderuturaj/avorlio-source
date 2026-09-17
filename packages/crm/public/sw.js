@@ -20,8 +20,8 @@
 // ("works on desktop, breaks on mobile after install"). Only content-
 // hashed, immutable assets under /_next/static/ are safe to cache.
 
-const CACHE = "sf-pwa-shell-v2";
-const PRECACHE = ["/icon-192.png", "/icon-512.png", "/apple-touch-icon.png"];
+const CACHE = "sf-pwa-shell-v3";
+const PRECACHE = ["/brand/avorlio-favicon-v1.svg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

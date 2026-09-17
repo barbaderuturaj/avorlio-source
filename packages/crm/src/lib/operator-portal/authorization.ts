@@ -18,7 +18,8 @@
 //   1. the workspace owner's email  (organizations.ownerId -> users.email)
 //   2. the parent-agency owner's email
 //      (organizations.parentAgencyId -> partner_agencies owner -> users.email)
-//   3. a platform-admin allowlist entry (SF_SUPERADMIN_EMAILS — the same
+//   3. the workspace-scoped operatorPortalEmail setting
+//   4. a platform-admin allowlist entry (SF_SUPERADMIN_EMAILS — the same
 //      allowlist enforced by lib/auth/super-admin.ts / isSuperAdminUser).
 //
 // All comparisons are case-insensitive and whitespace-insensitive. Null /
@@ -54,13 +55,16 @@ export interface WorkspaceAuthSources {
   agencyOwnerEmail?: string | null;
   /** Platform-admin allowlist (e.g. parsed SF_SUPERADMIN_EMAILS). */
   adminEmails?: readonly string[] | null;
+  /** One managed-SaaS client operator email stored on the workspace. */
+  operatorPortalEmail?: string | null;
 }
 
 /**
  * Pure authorization check for operator magic-link issuance.
  *
  * Returns true iff `email` (after normalization) matches the workspace
- * owner, the parent-agency owner, or a platform-admin allowlist entry.
+ * owner, the parent-agency owner, the workspace operatorPortalEmail, or a
+ * platform-admin allowlist entry.
  * Every source is normalized the same way before comparison, so case and
  * surrounding whitespace never matter. A null/empty submitted email — or
  * the absence of any matching source — yields false.
@@ -77,6 +81,9 @@ export function isEmailAuthorizedForWorkspace(
 
   const agencyOwner = normalizeEmail(sources.agencyOwnerEmail);
   if (agencyOwner && candidate === agencyOwner) return true;
+
+  const operatorEmail = normalizeEmail(sources.operatorPortalEmail);
+  if (operatorEmail && candidate === operatorEmail) return true;
 
   const admins = sources.adminEmails ?? [];
   for (const admin of admins) {

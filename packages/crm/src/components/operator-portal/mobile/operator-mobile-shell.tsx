@@ -44,7 +44,7 @@ export function OperatorMobileShell({
     <div
       // .sf-portal is the DS scope root — all token vars are declared here.
       // Inline CSS vars wire the agency accent so the whole subtree re-skins.
-      className="sf-portal mx-auto flex min-h-[100dvh] max-w-[640px] flex-col"
+      className="sf-portal mx-auto flex min-h-[100dvh] w-full max-w-[640px] flex-col md:max-w-[960px] xl:max-w-[1080px]"
       data-operator-mobile-shell=""
       data-white-label={branding?.is_white_label ? "true" : "false"}
       style={

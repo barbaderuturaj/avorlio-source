@@ -4,11 +4,8 @@
 //
 // All data wiring + server actions PRESERVED:
 //  - createOperatorContactAction (Add Contact sheet)
-//  - requestReviewAction (Request Review sheet)
 //  - /book/${orgSlug}/default (New Booking link)
 //  - pipelineRollup (Pipeline card → stage breakdown sheet)
-//  - Missed calls stub (0 / "None today")
-//  - Scan card → disabled "Soon" tile
 //
 // Only the presentation layer changes to use SeldonFrame Mobile DS components.
 
@@ -17,10 +14,6 @@ import Link from "next/link";
 import {
   UserPlus,
   CalendarPlus,
-  Star,
-  ScanLine,
-  MessageSquare,
-  PhoneMissed,
   CalendarCheck,
   ChevronRight,
   X,
@@ -542,7 +535,6 @@ export function TodayQuickActions({
   defaultReviewLink,
   recentContacts,
   newLeads,
-  unreadTexts,
   todaysApptsCount,
   todaysBookings,
 }: {
@@ -552,12 +544,10 @@ export function TodayQuickActions({
   defaultReviewLink: string;
   recentContacts: RecentContact[];
   newLeads: number;
-  unreadTexts: number;
   todaysApptsCount: number;
   todaysBookings: TodayBooking[];
 }) {
   const [addContactOpen, setAddContactOpen] = useState(false);
-  const [reviewOpen, setReviewOpen] = useState(false);
   const [pipelineOpen, setPipelineOpen] = useState(false);
 
   const formattedPipeline =
@@ -587,21 +577,6 @@ export function TodayQuickActions({
           value={todaysApptsCount}
           tone="neutral"
           note={todaysApptsCount > 0 ? `${todaysApptsCount} scheduled` : "Nothing booked"}
-        />
-        <KpiCard
-          Icon={MessageSquare}
-          label="Unread"
-          value={unreadTexts}
-          tone={unreadTexts > 0 ? "caution" : "neutral"}
-          note={unreadTexts > 0 ? "Needs a reply" : "All read"}
-        />
-        {/* Missed calls — stub (OCR/calling deferred) */}
-        <KpiCard
-          Icon={PhoneMissed}
-          label="Missed calls"
-          value={0}
-          tone="positive"
-          note="None today"
         />
       </div>
 
@@ -710,7 +685,7 @@ export function TodayQuickActions({
         <div className="t-eyebrow" style={{ marginBottom: 10, padding: "0 2px" }}>
           Quick actions
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10 }}>
           <QuickAction
             Icon={UserPlus}
             label="Add contact"
@@ -721,17 +696,6 @@ export function TodayQuickActions({
             Icon={CalendarPlus}
             label="New booking"
             href={`/book/${orgSlug}/default`}
-          />
-          <QuickAction
-            Icon={Star}
-            label="Request review"
-            onClick={() => setReviewOpen(true)}
-          />
-          {/* Scan card — OCR deferred, disabled stub */}
-          <QuickAction
-            Icon={ScanLine}
-            label="Scan card"
-            disabled
           />
         </div>
       </div>
@@ -788,13 +752,6 @@ export function TodayQuickActions({
         open={addContactOpen}
         onClose={() => setAddContactOpen(false)}
         orgSlug={orgSlug}
-      />
-      <RequestReviewSheet
-        open={reviewOpen}
-        onClose={() => setReviewOpen(false)}
-        orgSlug={orgSlug}
-        defaultReviewLink={defaultReviewLink}
-        recentContacts={recentContacts}
       />
       <PipelineSheet
         open={pipelineOpen}

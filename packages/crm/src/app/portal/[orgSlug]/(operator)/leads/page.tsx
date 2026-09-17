@@ -1,8 +1,7 @@
 // v1 PWA — Leads screen.
 //
 // Mobile card list of this workspace's contacts (newest first) with
-// name, status, source, relative created time, and one-tap Call /
-// Text actions. Reuses listContacts({ orgId }) — the same query the
+// name, status, source, and relative created time. Reuses listContacts({ orgId }) — the same query the
 // desktop /contacts grid uses, scoped via the operator session orgId.
 
 import { getOperatorSessionForOrg } from "@/lib/operator-portal/auth";
@@ -10,8 +9,6 @@ import { listContacts } from "@/lib/contacts/actions";
 import {
   contactDisplayName,
   formatRelative,
-  smsHref,
-  telHref,
 } from "@/lib/operator-portal/mobile-format";
 
 export default async function OperatorLeadsPage({
@@ -46,8 +43,6 @@ export default async function OperatorLeadsPage({
               lastName: c.lastName,
               phone: c.phone,
             });
-            const tel = telHref(c.phone);
-            const sms = smsHref(c.phone);
             return (
               <li
                 key={c.id}
@@ -72,24 +67,6 @@ export default async function OperatorLeadsPage({
                   </div>
                 </div>
 
-                {c.phone ? (
-                  <div className="mt-3 flex gap-2">
-                    <a
-                      href={tel}
-                      className="flex-1 rounded-[11px] py-2 text-center text-[12px] font-semibold text-white"
-                      style={{ backgroundColor: "#5b21b6" }}
-                    >
-                      Call
-                    </a>
-                    <a
-                      href={sms}
-                      className="flex-1 rounded-[11px] py-2 text-center text-[12px] font-semibold"
-                      style={{ border: "1px solid #5b21b6", color: "#5b21b6" }}
-                    >
-                      Text
-                    </a>
-                  </div>
-                ) : null}
               </li>
             );
           })}

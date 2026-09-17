@@ -17,6 +17,7 @@ import { eq, and } from "drizzle-orm";
 import { db } from "@/db";
 import { intakeForms } from "@/db/schema";
 import type { IntakeQuestion } from "@/lib/blueprint/types";
+import { HVAC_ONBOARDING_FIELDS } from "@/lib/onboarding/hvac-form-definition";
 
 // ─── Question set ────────────────────────────────────────────────────────────
 
@@ -205,7 +206,7 @@ export const ONBOARDING_QUESTIONS: IntakeQuestion[] = [
 // ─── Seeder ───────────────────────────────────────────────────────────────────
 
 const ONBOARDING_SLUG = "onboarding";
-const ONBOARDING_FORM_NAME = "Client Onboarding";
+const ONBOARDING_FORM_NAME = "Avorlio HVAC Onboarding";
 
 /**
  * Creates an intake_forms row for this org with slug="onboarding".
@@ -231,6 +232,11 @@ export async function seedOnboardingForm(
     .limit(1);
 
   if (existing) {
+    const fields = HVAC_ONBOARDING_FIELDS.map(({ step: _step, ...field }) => field);
+    await db
+      .update(intakeForms)
+      .set({ name: "Avorlio HVAC Onboarding", fields, updatedAt: new Date() })
+      .where(and(eq(intakeForms.orgId, orgId), eq(intakeForms.id, existing.id)));
     return { formId: existing.id };
   }
 
@@ -238,20 +244,7 @@ export async function seedOnboardingForm(
   // options is omitted when undefined (not stored on the row for file/text
   // types); the full question metadata lives in ONBOARDING_QUESTIONS at
   // call time and will be threaded into the card renderer by the route.
-  const fields = ONBOARDING_QUESTIONS.map((q) => ({
-    key: q.id,
-    label: q.label,
-    type: q.type,
-    required: q.required ?? false,
-    ...(q.options ? { options: q.options } : {}),
-    ...(q.type === "file" && q.file
-      ? {
-          accept: q.file.accept,
-          maxSizeMb: q.file.maxSizeMb,
-          multiple: q.file.multiple,
-        }
-      : {}),
-  }));
+  const fields = HVAC_ONBOARDING_FIELDS.map(({ step: _step, ...field }) => field);
 
   const [created] = await db
     .insert(intakeForms)

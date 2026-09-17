@@ -2,7 +2,10 @@ import { requireAuth } from "@/lib/auth/helpers";
 import { getOrgId } from "@/lib/auth/helpers";
 import { enforceBuyerAgencyShellGuard } from "@/lib/marketplace/buyer/buyer-surface-guard-server";
 import { isAdminTokenUserId } from "@/lib/auth/admin-token";
-import { isOperatorPortalUserId } from "@/lib/auth/operator-portal-context";
+import {
+  isOperatorPortalUserId,
+  resolveOperatorPortalContext,
+} from "@/lib/auth/operator-portal-context";
 import { isSuperAdminUser } from "@/lib/auth/super-admin";
 import { getEffectiveBrandingForWorkspace } from "@/lib/partner-agencies/branding";
 import { SoulProvider } from "@/components/soul/soul-provider";
@@ -32,6 +35,7 @@ import { getNotificationFeed } from "@/lib/notifications/feed";
 import { getThemeSettings } from "@/lib/theme/actions";
 import { parseInternalIds } from "@/lib/super-admin/internal-exclusion";
 import { db } from "@/db";
+import { redirect } from "next/navigation";
 import { activities, contacts, deals, landingPages, organizations, users } from "@/db/schema";
 import { desc, eq, sql } from "drizzle-orm";
 import Link from "next/link";
@@ -56,6 +60,14 @@ export default async function DashboardLayout({
   registerCrmEventListeners();
 
   const session = await requireAuth();
+
+  // HVAC V1 operators use the separate client portal only. The operator
+  // cookie is also an auth source for legacy dashboard code, so stop it
+  // before the agency shell can render or expose /dashboard routes.
+  if (isOperatorPortalUserId(session.user?.id)) {
+    const operatorContext = await resolveOperatorPortalContext();
+    redirect(operatorContext ? `/portal/${operatorContext.orgSlug}` : "/login");
+  }
 
   // Bug 2: a marketplace BUYER-only org (bought an agent, not an agency) must
   // never render the agency shell — bounce them to their "My Agent" home so they

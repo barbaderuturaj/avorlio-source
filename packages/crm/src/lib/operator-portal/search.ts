@@ -91,7 +91,7 @@ export async function universalSearch(
       id: c.id,
       title: [c.firstName, c.lastName].filter(Boolean).join(" ") || c.phone || c.email || "Unknown",
       subtitle: c.email ?? c.phone ?? "",
-      href: `${base}/messages/${c.id}`,
+      href: `${base}/leads`,
       score: 0,
     })),
     ...dealRows.map((d) => ({

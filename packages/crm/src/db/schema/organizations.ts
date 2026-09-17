@@ -74,6 +74,13 @@ export type OrganizationIntegrations = {
 };
 
 export type OrganizationSubscription = {
+  provider?: "stripe" | "dodo";
+  dodoCustomerId?: string | null;
+  dodoSubscriptionId?: string | null;
+  dodoProductId?: string | null;
+  dodoStatus?: "pending" | "active" | "on_hold" | "paused" | "cancelled" | "failed" | "expired" | "past_due";
+  currentPeriodStart?: string | null;
+  dodoProcessedEventIds?: string[];
   stripeCustomerId?: string | null;
   stripeSubscriptionId?: string | null;
   stripePriceId?: string | null;

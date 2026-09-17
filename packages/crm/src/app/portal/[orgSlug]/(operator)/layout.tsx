@@ -24,14 +24,21 @@ export async function generateMetadata({
   params: Promise<{ orgSlug: string }>;
 }): Promise<Metadata> {
   const { orgSlug } = await params;
+  const [org] = await db
+    .select({ name: organizations.name })
+    .from(organizations)
+    .where(eq(organizations.slug, orgSlug))
+    .limit(1);
+  const workspaceName = org?.name ?? orgSlug;
   return {
     manifest: `/portal/${orgSlug}/manifest.webmanifest`,
+    applicationName: workspaceName,
     appleWebApp: {
       capable: true,
       statusBarStyle: "black-translucent",
-      title: "Today",
+      title: workspaceName,
     },
-    icons: { apple: "/apple-touch-icon.png" },
+    icons: { apple: "/brand/avorlio-favicon-v1.svg" },
   };
 }
 

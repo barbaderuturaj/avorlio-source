@@ -48,6 +48,8 @@ import { getOnboardingState } from "@/lib/onboarding/state";
 // hand off the workspace to its actual SMB owner without copy-pasting
 // URLs.
 import { InviteSmbOwner } from "./invite-smb-owner";
+import { OnboardingLinkButton } from "./onboarding-link-button";
+import { DodoCheckoutButton } from "./dodo-checkout-button";
 // 2026-05-22 — Copy-to-clipboard button for the R1 landing URL card.
 import { LandingUrlCopyButton } from "./landing-url-copy-button";
 // 2026-05-22 — Fallback generate button when R1 generation failed silently.
@@ -318,13 +320,13 @@ export default async function WorkspaceReadyPage({ params, searchParams }: Ready
     {
       icon: "🏠",
       audience: "operator",
-      label: "Operator dashboard",
-      title: `${workspace.name}'s own admin view`,
+      label: "Client portal",
+      title: `${workspace.name}'s client operator portal`,
       description:
-        "What the SMB owner uses to run their business — contacts, deals, bookings, billing. Lighter than the agency view (no agents / automations / templates — those stay in your agency console).",
+        "What the HVAC client uses to see Today, leads, and appointments. Avorlio keeps AI, integrations, website setup, and configuration in the agency console.",
       publicHref: null,
       publicLabel: "",
-      adminHref: sw("/dashboard"),
+      adminHref: `/portal/${workspace.slug}/login`,
       adminLabel: "Open operator dashboard",
     },
     {
@@ -509,6 +511,7 @@ export default async function WorkspaceReadyPage({ params, searchParams }: Ready
             . Share the public URL with your client or keep tuning before you do.
           </p>
           <div className="flex flex-wrap items-center gap-3 pt-2">
+            <OnboardingLinkButton workspaceId={workspace.id} />
             <Link
               href={sw("/dashboard")}
               className="crm-pressable inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-primary px-5 text-sm font-semibold text-primary-foreground shadow-(--shadow-sm) transition-[background-color,transform] duration-150 ease-out hover:bg-primary/90"
@@ -527,6 +530,16 @@ export default async function WorkspaceReadyPage({ params, searchParams }: Ready
             </a>
           </div>
         </header>
+
+        <section className="rounded-2xl border border-border/70 bg-card/40 p-5">
+          <p className="mb-1 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+            Internal billing
+          </p>
+          <p className="mb-3 text-sm text-muted-foreground">
+            Create the $299/month Avorlio platform subscription checkout for this client workspace.
+          </p>
+          <DodoCheckoutButton workspaceSlug={workspace.slug} />
+        </section>
 
         {/* ============== R1 LANDING URL CARD ==============
             2026-05-22 — surfaces the auto-generated public landing

@@ -6,9 +6,8 @@
 // start_url + scope are pinned to /portal/<orgSlug>/ so the installed
 // app opens straight into this contractor's mobile shell.
 //
-// Falls back to SeldonFrame defaults when the slug is unknown or the
-// workspace has no active agency (branding resolver already returns
-// SF defaults in those cases). Never throws on a bad slug.
+// Falls back to Avorlio defaults when the slug is unknown or the
+// workspace has no active agency. Never throws on a bad slug.
 
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
@@ -30,7 +29,7 @@ export async function GET(
   const { orgSlug } = await context.params;
 
   const [org] = await db
-    .select({ id: organizations.id })
+    .select({ id: organizations.id, name: organizations.name })
     .from(organizations)
     .where(eq(organizations.slug, orgSlug))
     .limit(1);
@@ -45,14 +44,18 @@ export async function GET(
     ? await getEffectiveBrandingForWorkspace(org.id)
     : {
         is_white_label: false,
-        brand_name: "SeldonFrame",
+        brand_name: "Avorlio",
         logo_url: null,
         primary_color: null,
         accent_color: null,
       };
 
   const manifest = generatePwaManifest(
-    brandingToManifestOptions({ orgSlug, branding }),
+    brandingToManifestOptions({
+      orgSlug,
+      workspaceName: org?.name ?? orgSlug,
+      branding,
+    }),
   );
 
   return new Response(JSON.stringify(manifest), {
