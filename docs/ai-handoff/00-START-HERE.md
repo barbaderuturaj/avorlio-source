@@ -45,8 +45,10 @@ the routing entry point.
 - Dodo: `09-BILLING-DODO.md`
 - HVAC customer lifecycle: `10-HVAC-CUSTOMER-FLOW.md`
 - Tests/limits/operations: `11-TESTING-AND-QA.md` through `14-OPERATIONS-RUNBOOK.md`
+- Prioritization, future features, and scope expansion: `18-GROWTH-ROADMAP.md`
 
 Never casually alter production, migrations, auth, billing, or secrets. Older
 README/legacy SeldonFrame material may describe features and verticals that are
 not current Avorlio launch scope. Current code plus provenance documents win.
-
+Do not implement a later roadmap stage without operator approval or real-customer
+evidence.

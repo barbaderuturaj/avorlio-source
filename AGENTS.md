@@ -52,3 +52,7 @@ Read [the five-minute handoff](docs/ai-handoff/00-START-HERE.md), then the
 topic document relevant to the task. If `.avorlio-private/` exists, read only
 its `README.md` when operator/private context is relevant; it is local-only and
 must never be staged.
+
+For prioritization, future features, or scope-expansion decisions, read
+`docs/ai-handoff/18-GROWTH-ROADMAP.md`. Do not implement later roadmap stages
+without operator approval or real-customer evidence.
