@@ -41,3 +41,6 @@ dist/
 # Local backup copies
 *.bak
 *.bak-*
+
+# Private operator handoff; never commit this local-only context.
+.avorlio-private/
