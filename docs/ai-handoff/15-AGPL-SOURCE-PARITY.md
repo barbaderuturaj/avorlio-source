@@ -12,14 +12,19 @@ the verified reconstructed source used for parity/recovery purposes.
 ## Future release discipline
 
 1. Commit and normally push the corresponding source before or with release.
-2. Record the public commit/tag and built image identity in a future
-   .avorlio-release.json or equivalent release record.
-3. Retain build/test/migration evidence and state whether deployment was verified.
-4. Compare the deployed source/image inputs with the recorded release identity.
+2. Build the production image from that committed source and handle or verify
+   migrations.
+3. Generate, validate, and copy the schema-versioned `.avorlio-release.json`
+   into the production directory.
+4. Confirm its public-source SHA and Docker image ID against the actual
+   deployment, then retain build/test/migration and smoke-check evidence.
 5. Update the current-state/provenance docs when the verified state changes.
+
+A release is not continuity-complete until every step above is complete.
+Operators and AI agents must read `.avorlio-release.json` rather than infer a
+deployed Git SHA from filesystem timestamps. See `17-RELEASE-IDENTITY.md`.
 
 Never publish credentials, private keys, database URLs containing credentials,
 customer data, sales/lead data, runtime uploads/dumps, or private operator
 notes. This is a technical process description, not legal advice or a legal
 compliance guarantee.
-

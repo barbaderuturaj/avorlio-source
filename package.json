@@ -27,7 +27,9 @@
     "db:seed-demo": "pnpm --filter @seldonframe/crm db:seed-demo",
     "template:validate": "pnpm --filter @seldonframe/crm template:validate",
     "tsx": "node scripts/run-tsx.js",
-    "e2e:smoke": "pnpm --filter @seldonframe/crm exec playwright test e2e/funnel-smoke.spec.ts"
+    "e2e:smoke": "pnpm --filter @seldonframe/crm exec playwright test e2e/funnel-smoke.spec.ts",
+    "release:manifest": "node scripts/release/generate-avorlio-release.mjs",
+    "release:verify": "node scripts/release/verify-avorlio-release.mjs"
   },
   "devDependencies": {
     "turbo": "^2.10.5"
