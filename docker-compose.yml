@@ -41,6 +41,11 @@ services:
   neon-proxy:
     image: ghcr.io/timowilhelm/local-neon-http-proxy:main
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       PG_CONNECTION_STRING: postgres://seldon:seldon@postgres:5432/seldonframe
     ports:
